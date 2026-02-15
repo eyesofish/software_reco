@@ -6,15 +6,18 @@ public class RecommendRequest {
     private String query;
     private Integer timeout;
     @JsonProperty("max_iterations")
-    private Integer max_iterations;
+    private Integer maxIterations;
+    @JsonProperty("session_id")
+    private String sessionId;
 
     public RecommendRequest() {
     }
 
-    public RecommendRequest(String query, Integer timeout, Integer maxIterations) {
+    public RecommendRequest(String query, Integer timeout, Integer maxIterations, String sessionId) {
         this.query = query;
         this.timeout = timeout;
-        this.max_iterations = maxIterations;
+        this.maxIterations = maxIterations;
+        this.sessionId = sessionId;
     }
 
     public String getQuery() {
@@ -34,10 +37,18 @@ public class RecommendRequest {
     }
 
     public Integer getMaxIterations() {
-        return max_iterations;
+        return maxIterations;
     }
 
     public void setMaxIterations(Integer maxIterations) {
-        this.max_iterations = maxIterations;
+        this.maxIterations = maxIterations;
+    }
+
+    public String getSessionId() {
+        return sessionId;
+    }
+
+    public void setSessionId(String sessionId) {
+        this.sessionId = sessionId;
     }
 }

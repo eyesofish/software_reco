@@ -1,4 +1,5 @@
 import logging
+import re
 import time
 from typing import Any, Dict, Optional
 from uuid import uuid4
@@ -10,6 +11,8 @@ from app.api.v1.models import (
     RecommendationConfirmRequest,
     RecommendationRequest,
     RecommendationResponse,
+    SessionStateResponse,
+    SessionStateUpdateRequest,
 )
 from software_recommend_system.rag_agent import create_rag_with_routing_agent
 from software_recommend_system.state import AgentState
@@ -18,6 +21,12 @@ from software_recommend_system.utils import initialize_vector_store
 router = APIRouter()
 logger = logging.getLogger(__name__)
 AGENT = create_rag_with_routing_agent()
+
+SESSION_STATE_STORE: Dict[str, Dict[str, Any]] = {}
+NAME_ZH_PATTERN = re.compile(
+    r"(?:(?:\u6211\u53eb|\u8bb0\u4f4f\u6211\u53eb|\u8bb0\u4f4f\u6211\u7684\u540d\u5b57\u662f|\u6211\u7684\u540d\u5b57\u662f)\s*([\u4e00-\u9fffA-Za-z][\u4e00-\u9fffA-Za-z0-9_\-]{0,31}))"
+)
+NAME_EN_PATTERN = re.compile(r"(?i)(?:my name is|i am|i'm)\s+([A-Za-z][A-Za-z\-' ]{0,40})")
 
 
 def _get_value(result: Any, key: str, default: Any = None) -> Any:
@@ -41,16 +50,65 @@ def _extract_interrupt_payload(result: Any) -> Optional[Dict[str, Any]]:
     return {"type": "human_confirmation", "message": str(payload)}
 
 
+def _extract_name_fact(query: str) -> Optional[str]:
+    if not query:
+        return None
+    zh = NAME_ZH_PATTERN.search(query)
+    if zh:
+        return zh.group(1).strip()
+    en = NAME_EN_PATTERN.search(query)
+    if en:
+        return en.group(1).strip()
+    return None
+
+
+def _is_asking_user_name(query: str) -> bool:
+    if not query:
+        return False
+    normalized = query.strip().lower()
+    return (
+        ("\u6211\u53eb\u4ec0\u4e48" in normalized)
+        or ("\u6211\u7684\u540d\u5b57" in normalized)
+        or ("what is my name" in normalized)
+        or ("who am i" in normalized)
+    )
+
+
+def _get_or_create_session_state(session_id: str) -> Dict[str, Any]:
+    existing = SESSION_STATE_STORE.get(session_id)
+    if existing:
+        return existing
+    created = {"facts": {}, "updated_at": time.time()}
+    SESSION_STATE_STORE[session_id] = created
+    return created
+
+
+def _merge_session_facts(session_id: str, facts: Dict[str, str]) -> Dict[str, Any]:
+    state = _get_or_create_session_state(session_id)
+    current_facts: Dict[str, str] = state.setdefault("facts", {})
+    for key, value in (facts or {}).items():
+        fact_key = (key or "").strip()
+        fact_value = (value or "").strip()
+        if fact_key and fact_value:
+            current_facts[fact_key] = fact_value
+    state["updated_at"] = time.time()
+    return state
+
+
+def _upsert_name_fact_from_query(session_id: str, query: str) -> Dict[str, Any]:
+    name = _extract_name_fact(query)
+    if not name:
+        return _get_or_create_session_state(session_id)
+    return _merge_session_facts(session_id, {"user_name": name})
+
+
 @router.post("/recommend", response_model=RecommendationResponse)
 async def get_software_recommendation(request_data: RecommendationRequest):
-    """
-    Get software recommendations.
-    - **query**: user query text
-    - **timeout**: timeout in seconds, default 60
-    - **max_iterations**: max iteration count, default 3
-    """
     try:
         session_id = request_data.session_id or uuid4().hex
+        session_state = _upsert_name_fact_from_query(session_id, request_data.query)
+        known_name = (session_state.get("facts") or {}).get("user_name")
+
         logger.info(
             "recommend request: session_id=%s timeout=%s max_iterations=%s query=%r",
             session_id,
@@ -59,8 +117,29 @@ async def get_software_recommendation(request_data: RecommendationRequest):
             request_data.query,
         )
 
+        if known_name and _is_asking_user_name(request_data.query):
+            return RecommendationResponse(
+                status="success",
+                final_answer=f"\u4f60\u53eb{known_name}\u3002",
+                candidates=[],
+                mode="chat",
+                iteration_count=0,
+                coverage=1.0,
+                session_id=session_id,
+                awaiting_human_confirmation=False,
+            )
+
+        effective_query = request_data.query
+        if known_name:
+            effective_query = (
+                f"{request_data.query}\n\n"
+                "[Known User Facts]\n"
+                f"user_name: {known_name}\n"
+                "If user asks identity-related questions, trust this fact."
+            )
+
         state = AgentState(
-            user_query=request_data.query,
+            user_query=effective_query,
             timeout_budget=request_data.timeout,
             max_iterations=request_data.max_iterations,
             start_time=time.time(),
@@ -141,6 +220,26 @@ async def confirm_software_recommendation(request_data: RecommendationConfirmReq
         ) from exc
 
 
+@router.get("/session-state/{session_id}", response_model=SessionStateResponse)
+async def get_session_state(session_id: str):
+    state = _get_or_create_session_state(session_id)
+    return SessionStateResponse(
+        session_id=session_id,
+        facts=state.get("facts", {}),
+        updated_at=float(state.get("updated_at", time.time())),
+    )
+
+
+@router.put("/session-state/{session_id}", response_model=SessionStateResponse)
+async def upsert_session_state(session_id: str, request_data: SessionStateUpdateRequest):
+    state = _merge_session_facts(session_id, request_data.facts or {})
+    return SessionStateResponse(
+        session_id=session_id,
+        facts=state.get("facts", {}),
+        updated_at=float(state.get("updated_at", time.time())),
+    )
+
+
 async def run_agent_async(agent, graph_input: Any, config: Optional[Dict[str, Any]] = None):
     """Run the agent asynchronously."""
     try:
@@ -187,51 +286,6 @@ async def initialize_database():
                     "url": "https://memcached.org/",
                     "source_ranking": 8.0,
                     "tags": ["cache", "performance"],
-                },
-            },
-            {
-                "content": (
-                    "Ehcache is an open-source, standards-based cache used to boost performance, "
-                    "offload your database and simplify scalability. Ehcache offers analysis "
-                    "and reporting, enabling you to monitor cache activity and performance."
-                ),
-                "metadata": {
-                    "source": "ehcache.org",
-                    "published_date": "2023-03-10",
-                    "author": "Terracotta Team",
-                    "url": "https://www.ehcache.org/",
-                    "source_ranking": 7.5,
-                    "tags": ["cache", "java", "spring"],
-                },
-            },
-            {
-                "content": (
-                    "Spring Boot is an open-source Java-based framework used to create stand-alone, "
-                    "production-grade Spring applications with minimum configurations. It simplifies "
-                    "the development process by providing default configurations."
-                ),
-                "metadata": {
-                    "source": "spring.io",
-                    "published_date": "2023-02-01",
-                    "author": "Pivotal Team",
-                    "url": "https://spring.io/projects/spring-boot",
-                    "source_ranking": 9.5,
-                    "tags": ["framework", "java", "spring"],
-                },
-            },
-            {
-                "content": (
-                    "Hibernate is an object-relational mapping tool for the Java programming language. "
-                    "It provides a framework for mapping an object-oriented domain model to a relational "
-                    "database and offers data query and retrieval facilities."
-                ),
-                "metadata": {
-                    "source": "hibernate.org",
-                    "published_date": "2023-01-20",
-                    "author": "Hibernate Team",
-                    "url": "https://hibernate.org/",
-                    "source_ranking": 8.5,
-                    "tags": ["orm", "java", "database"],
                 },
             },
         ]

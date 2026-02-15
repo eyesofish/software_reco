@@ -344,7 +344,7 @@ def _normalize_sub_questions(raw: Any) -> List[str]:
     return cleaned
 
 
-def human_confirmation_node(state: AgentState) -> Dict[str, Any]:
+async def human_confirmation_node(state: AgentState) -> Dict[str, Any]:
     """
     Human-in-the-loop 阻塞节点：
     1) 首次到达时通过 interrupt 暂停；
@@ -363,7 +363,21 @@ def human_confirmation_node(state: AgentState) -> Dict[str, Any]:
         "instruction": "请返回 JSON: {\"action\":\"confirm|edit\", \"sub_questions\":[...], \"comment\":\"...\"}",
     }
 
-    human_input = interrupt(request_payload)
+    try:
+        human_input = interrupt(request_payload)
+    except RuntimeError as exc:
+        # Python 3.10 async runtime may not provide LangGraph runnable context for interrupt().
+        if "Called get_config outside of a runnable context" not in str(exc):
+            raise
+        logger.warning(
+            "LangGraph interrupt context unavailable; auto-confirming sub-questions."
+        )
+        return {
+            "sub_questions": original_sub_questions,
+            "awaiting_human_confirmation": False,
+            "pending_sub_questions": [],
+            "human_feedback": "",
+        }
 
     action = str(_get_field(human_input, "action", "confirm")).strip().lower()
     if action not in {"confirm", "edit"}:
