@@ -17,21 +17,38 @@ import org.springframework.web.bind.annotation.RestController;
 
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 @RestController
 public class ChatController {
     private static final Logger logger = LoggerFactory.getLogger(ChatController.class);
-    private static final Pattern NAME_ZH_PATTERN = Pattern.compile(
-            "(?:(?:\\u6211\\u53eb|\\u8bb0\\u4f4f\\u6211\\u53eb|\\u8bb0\\u4f4f\\u6211\\u7684\\u540d\\u5b57\\u662f|\\u6211\\u7684\\u540d\\u5b57\\u662f)\\s*([\\p{IsHan}A-Za-z][\\p{IsHan}A-Za-z0-9_\\-]{0,31}))"
-    );
-    private static final Pattern NAME_EN_PATTERN = Pattern.compile(
+    private static final Pattern[] SELF_INTRO_ZH_PATTERNS = new Pattern[]{
+            Pattern.compile(
+                    "(?:(?:^|[，,。！？!\\s])(?:\\u6211\\u53eb|\\u8bb0\\u4f4f\\u6211\\u53eb|\\u8bb0\\u4f4f\\u6211\\u7684\\u540d\\u5b57\\u662f|\\u6211\\u7684\\u540d\\u5b57\\u662f)\\s*([\\p{IsHan}A-Za-z][\\p{IsHan}A-Za-z0-9_\\-]{0,31}))"
+            ),
+            Pattern.compile(
+                    "(?:(?:^|[，,。！？!\\s])(?:\\u6211\\u662f)\\s*([\\p{IsHan}A-Za-z][\\p{IsHan}A-Za-z0-9_\\-]{0,31}))"
+            )
+    };
+    private static final Pattern SELF_INTRO_EN_PATTERN = Pattern.compile(
             "(?i)(?:my name is|i am|i'm)\\s+([A-Za-z][A-Za-z\\-' ]{0,40})"
+    );
+    private static final Pattern[] USER_NAME_QUESTION_PATTERNS = new Pattern[]{
+            Pattern.compile("\\u6211\\u53eb(\\u4ec0\\u4e48|\\u5565|\\u8c01)"),
+            Pattern.compile("\\u6211\\u7684\\u540d\\u5b57(\\u662f)?(\\u4ec0\\u4e48|\\u5565|\\u8c01)"),
+            Pattern.compile("\\u6211\\u662f\\u8c01"),
+            Pattern.compile("(?i)what is my name"),
+            Pattern.compile("(?i)who am i")
+    };
+    private static final Set<String> INVALID_NAME_VALUES = Set.of(
+            "\u4ec0\u4e48", "\u8c01", "\u5565", "\u54ea\u4f4d", "\u540d\u5b57", "\u59d3\u540d", "name", "what", "who"
     );
 
     private final FastApiClient fastApiClient;
@@ -45,28 +62,36 @@ public class ChatController {
     @PostMapping("/api/chat")
     public OllamaChatResponse chat(@RequestBody OllamaChatRequest request) {
         logIncomingMessages(request);
+        String requestConversationId = firstNonBlank(request.getConversationId(), request.getSessionId());
 
         String query = extractLastUserMessage(request.getMessages());
         if (query == null || query.isBlank()) {
             return buildResponse(
                     request,
                     "Please enter a message.",
-                    request.getConversationId(),
-                    request.getConversationId()
+                    requestConversationId,
+                    requestConversationId
             );
         }
 
         ConversationEntity conversation = conversationService.ensureConversation(
-                request.getConversationId(),
+                requestConversationId,
                 query,
                 request.getModel()
         );
 
         ConversationMessageEntity userMessage = conversationService.appendMessage(conversation, "user", query);
 
-        extractUserName(query).ifPresent(name ->
-                conversationService.upsertFact(conversation.getId(), "user_name", name, userMessage.getId(), 0.99d)
-        );
+        Map<String, String> extractedFacts = extractFactsForSessionUpdate(query);
+        for (Map.Entry<String, String> fact : extractedFacts.entrySet()) {
+            conversationService.upsertFact(
+                    conversation.getId(),
+                    fact.getKey(),
+                    fact.getValue(),
+                    userMessage.getId(),
+                    0.99d
+            );
+        }
 
         Map<String, String> facts = conversationService.getFacts(conversation.getId());
         String knownName = facts.get("user_name");
@@ -148,29 +173,71 @@ public class ChatController {
         if (query == null || query.isBlank()) {
             return Optional.empty();
         }
-
-        Matcher zh = NAME_ZH_PATTERN.matcher(query);
-        if (zh.find()) {
-            return Optional.of(zh.group(1).trim());
+        if (isAskingUserName(query)) {
+            return Optional.empty();
         }
 
-        Matcher en = NAME_EN_PATTERN.matcher(query);
+        for (Pattern pattern : SELF_INTRO_ZH_PATTERNS) {
+            Matcher zh = pattern.matcher(query);
+            if (zh.find()) {
+                Optional<String> normalized = normalizeCandidateName(zh.group(1));
+                if (normalized.isPresent()) {
+                    return normalized;
+                }
+            }
+        }
+
+        Matcher en = SELF_INTRO_EN_PATTERN.matcher(query);
         if (en.find()) {
-            return Optional.of(en.group(1).trim());
+            return normalizeCandidateName(en.group(1));
         }
 
         return Optional.empty();
+    }
+
+    private Optional<String> normalizeCandidateName(String raw) {
+        if (raw == null) {
+            return Optional.empty();
+        }
+
+        String cleaned = raw.trim().replaceAll(
+                "^[\\s，,。！？!?.；;:：\"'“”‘’()（）\\[\\]【】]+|[\\s，,。！？!?.；;:：\"'“”‘’()（）\\[\\]【】]+$",
+                ""
+        );
+        if (cleaned.isEmpty()) {
+            return Optional.empty();
+        }
+
+        String lower = cleaned.toLowerCase(Locale.ROOT);
+        if (INVALID_NAME_VALUES.contains(cleaned) || INVALID_NAME_VALUES.contains(lower)) {
+            return Optional.empty();
+        }
+
+        if (cleaned.endsWith("\u5417") || cleaned.endsWith("\u5462") || cleaned.endsWith("\u4e48") || cleaned.endsWith("\u561b")) {
+            return Optional.empty();
+        }
+
+        return Optional.of(cleaned);
+    }
+
+    private Map<String, String> extractFactsForSessionUpdate(String query) {
+        Map<String, String> facts = new LinkedHashMap<>();
+        extractUserName(query).ifPresent(name -> facts.put("user_name", name));
+        return facts;
     }
 
     private boolean isAskingUserName(String query) {
         if (query == null) {
             return false;
         }
-        String normalized = query.trim().toLowerCase(Locale.ROOT);
-        return normalized.contains("\u6211\u53eb\u4ec0\u4e48")
-                || normalized.contains("\u6211\u7684\u540d\u5b57")
-                || normalized.contains("what is my name")
-                || normalized.contains("who am i");
+        String normalized = query.trim();
+        for (Pattern pattern : USER_NAME_QUESTION_PATTERNS) {
+            if (pattern.matcher(normalized).find()) {
+                return true;
+            }
+        }
+        String lowered = normalized.toLowerCase(Locale.ROOT);
+        return lowered.contains("what's my name") || lowered.contains("whats my name");
     }
 
     private String buildQueryWithContext(
@@ -222,6 +289,16 @@ public class ChatController {
         }
         String normalized = text.replace('\n', ' ').replace('\r', ' ').trim();
         return normalized.length() > 300 ? normalized.substring(0, 300) : normalized;
+    }
+
+    private String firstNonBlank(String first, String second) {
+        if (first != null && !first.isBlank()) {
+            return first;
+        }
+        if (second != null && !second.isBlank()) {
+            return second;
+        }
+        return null;
     }
 
     private OllamaChatResponse buildResponse(

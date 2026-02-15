@@ -23,10 +23,12 @@ class AgentState(BaseModel):
     messages: List[Dict[str, str]] = Field(default_factory=list)
     mode: Optional[str] = None
     normalized_query: str = ""
-    constraints: Dict[str, str] = {"language": "", "scenario": "", "preference": ""}
-    sub_questions: List[str] = []
-    evidence: List[EvidenceItem] = []
-    candidates: List[CandidateSolution] = []
+    constraints: Dict[str, str] = Field(
+        default_factory=lambda: {"language": "", "scenario": "", "preference": ""}
+    )
+    sub_questions: List[str] = Field(default_factory=list)
+    evidence: List[EvidenceItem] = Field(default_factory=list)
+    candidates: List[CandidateSolution] = Field(default_factory=list)
     final_answer: str = ""
     drawing_params: str = ""
     image_result: str = ""
@@ -39,5 +41,5 @@ class AgentState(BaseModel):
     start_time: Optional[float] = None
     awaiting_human_confirmation: bool = False
     human_feedback: str = ""
-    pending_sub_questions: List[str] = []
+    pending_sub_questions: List[str] = Field(default_factory=list)
     session_id: str = ""

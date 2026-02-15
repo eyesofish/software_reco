@@ -10,6 +10,8 @@ public class OllamaChatRequest {
     private Boolean stream;
     @JsonProperty("conversation_id")
     private String conversationId;
+    @JsonProperty("session_id")
+    private String sessionId;
 
     public String getModel() { return model; }
     public void setModel(String model) { this.model = model; }
@@ -19,4 +21,6 @@ public class OllamaChatRequest {
     public void setStream(Boolean stream) { this.stream = stream; }
     public String getConversationId() { return conversationId; }
     public void setConversationId(String conversationId) { this.conversationId = conversationId; }
+    public String getSessionId() { return sessionId; }
+    public void setSessionId(String sessionId) { this.sessionId = sessionId; }
 }

@@ -18,9 +18,36 @@ from .nodes import (
 )
 import logging
 import time
+import os
+from pathlib import Path
 
 logger = logging.getLogger(__name__)
-_CHECKPOINTER = MemorySaver()
+
+try:
+    from langgraph.checkpoint.sqlite import SqliteSaver  # type: ignore
+except Exception:  # pragma: no cover - optional dependency
+    SqliteSaver = None  # type: ignore
+
+
+def _build_checkpointer():
+    checkpoint_path = Path(
+        os.getenv("LANGGRAPH_CHECKPOINT_PATH", ".runtime/langgraph_checkpoints.sqlite")
+    )
+    checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
+
+    if SqliteSaver is not None:
+        try:
+            return SqliteSaver.from_conn_string(str(checkpoint_path))
+        except Exception as exc:  # pragma: no cover - defensive fallback
+            logger.warning("Failed to initialize SqliteSaver, fallback to MemorySaver: %s", exc)
+
+    logger.warning(
+        "Using in-memory LangGraph checkpointer. Install sqlite checkpointer for durable resume."
+    )
+    return MemorySaver()
+
+
+_CHECKPOINTER = _build_checkpointer()
 
 def create_rag_with_routing_agent():
     """创建带有路由功能的 RAG Agent 图"""

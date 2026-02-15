@@ -1,7 +1,11 @@
 import logging
+import json
+import os
 import re
 import time
-from typing import Any, Dict, Optional
+from pathlib import Path
+from threading import RLock
+from typing import Any, Dict, List, Optional
 from uuid import uuid4
 
 from fastapi import APIRouter, HTTPException
@@ -21,12 +25,114 @@ from software_recommend_system.utils import initialize_vector_store
 router = APIRouter()
 logger = logging.getLogger(__name__)
 AGENT = create_rag_with_routing_agent()
-
-SESSION_STATE_STORE: Dict[str, Dict[str, Any]] = {}
 NAME_ZH_PATTERN = re.compile(
-    r"(?:(?:\u6211\u53eb|\u8bb0\u4f4f\u6211\u53eb|\u8bb0\u4f4f\u6211\u7684\u540d\u5b57\u662f|\u6211\u7684\u540d\u5b57\u662f)\s*([\u4e00-\u9fffA-Za-z][\u4e00-\u9fffA-Za-z0-9_\-]{0,31}))"
+    r"(?:(?:^|[，,。！？!\s])(?:\u6211\u53eb|\u8bb0\u4f4f\u6211\u53eb|\u8bb0\u4f4f\u6211\u7684\u540d\u5b57\u662f|\u6211\u7684\u540d\u5b57\u662f)\s*([\u4e00-\u9fffA-Za-z][\u4e00-\u9fffA-Za-z0-9_\-]{0,31}))"
+)
+NAME_IS_ZH_PATTERN = re.compile(
+    r"(?:(?:^|[，,。！？!\s])(?:\u6211\u662f)\s*([\u4e00-\u9fffA-Za-z][\u4e00-\u9fffA-Za-z0-9_\-]{0,31}))"
 )
 NAME_EN_PATTERN = re.compile(r"(?i)(?:my name is|i am|i'm)\s+([A-Za-z][A-Za-z\-' ]{0,40})")
+USER_NAME_QUESTION_PATTERNS = (
+    re.compile(r"\u6211\u53eb(\u4ec0\u4e48|\u5565|\u8c01)"),
+    re.compile(r"\u6211\u7684\u540d\u5b57(\u662f)?(\u4ec0\u4e48|\u5565|\u8c01)"),
+    re.compile(r"\u6211\u662f\u8c01"),
+    re.compile(r"(?i)what is my name"),
+    re.compile(r"(?i)who am i"),
+)
+INVALID_NAME_VALUES = {
+    "\u4ec0\u4e48",
+    "\u8c01",
+    "\u5565",
+    "\u54ea\u4f4d",
+    "\u540d\u5b57",
+    "\u59d3\u540d",
+    "name",
+    "what",
+    "who",
+}
+SESSION_STATE_FILE = Path(os.getenv("SESSION_STATE_FILE", ".runtime/fastapi_session_state.json"))
+SESSION_MAX_MESSAGES = int(os.getenv("SESSION_MAX_MESSAGES", "30"))
+_SESSION_LOCK = RLock()
+
+
+def _normalize_session_facts(raw: Any) -> Dict[str, str]:
+    if not isinstance(raw, dict):
+        return {}
+    normalized: Dict[str, str] = {}
+    for key, value in raw.items():
+        fact_key = str(key or "").strip()
+        fact_value = str(value or "").strip()
+        if fact_key and fact_value:
+            normalized[fact_key] = fact_value
+    return normalized
+
+
+def _normalize_session_messages(raw: Any) -> List[Dict[str, str]]:
+    if not isinstance(raw, list):
+        return []
+
+    normalized: List[Dict[str, str]] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        role = str(item.get("role", "")).strip().lower()
+        content = str(item.get("content", "")).strip()
+        if role in {"system", "user", "assistant"} and content:
+            normalized.append({"role": role, "content": content})
+
+    return normalized[-SESSION_MAX_MESSAGES:]
+
+
+def _normalize_updated_at(raw: Any) -> float:
+    try:
+        return float(raw)
+    except (TypeError, ValueError):
+        return time.time()
+
+
+def _normalize_session_state(raw: Any) -> Dict[str, Any]:
+    state = raw if isinstance(raw, dict) else {}
+    return {
+        "facts": _normalize_session_facts(state.get("facts", {})),
+        "messages": _normalize_session_messages(state.get("messages", [])),
+        "updated_at": _normalize_updated_at(state.get("updated_at")),
+    }
+
+
+def _persist_session_state_store_locked() -> None:
+    SESSION_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+    SESSION_STATE_FILE.write_text(
+        json.dumps(SESSION_STATE_STORE, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+
+def _load_session_state_store() -> Dict[str, Dict[str, Any]]:
+    if not SESSION_STATE_FILE.exists():
+        return {}
+
+    try:
+        content = SESSION_STATE_FILE.read_text(encoding="utf-8")
+        raw = json.loads(content)
+    except Exception as exc:  # pragma: no cover - defensive logging
+        logger.warning("failed to load session state file %s: %s", SESSION_STATE_FILE, exc)
+        return {}
+
+    if not isinstance(raw, dict):
+        logger.warning("invalid session state payload, expected dict at root")
+        return {}
+
+    normalized: Dict[str, Dict[str, Any]] = {}
+    for session_id, state in raw.items():
+        sid = str(session_id or "").strip()
+        if not sid:
+            continue
+        normalized[sid] = _normalize_session_state(state)
+
+    return normalized
+
+
+SESSION_STATE_STORE: Dict[str, Dict[str, Any]] = _load_session_state_store()
 
 
 def _get_value(result: Any, key: str, default: Any = None) -> Any:
@@ -51,48 +157,106 @@ def _extract_interrupt_payload(result: Any) -> Optional[Dict[str, Any]]:
 
 
 def _extract_name_fact(query: str) -> Optional[str]:
-    if not query:
+    if not query or _is_asking_user_name(query):
         return None
+
     zh = NAME_ZH_PATTERN.search(query)
     if zh:
-        return zh.group(1).strip()
+        normalized = _normalize_candidate_name(zh.group(1))
+        if normalized:
+            return normalized
+
+    zh_is = NAME_IS_ZH_PATTERN.search(query)
+    if zh_is:
+        normalized = _normalize_candidate_name(zh_is.group(1))
+        if normalized:
+            return normalized
+
     en = NAME_EN_PATTERN.search(query)
     if en:
-        return en.group(1).strip()
+        normalized = _normalize_candidate_name(en.group(1))
+        if normalized:
+            return normalized
+
     return None
+
+
+def _normalize_candidate_name(raw: str) -> Optional[str]:
+    candidate = (raw or "").strip()
+    candidate = candidate.strip(" \t\r\n，,。！？!?.；;:：\"'“”‘’()（）[]【】")
+    if not candidate:
+        return None
+
+    lowered = candidate.lower()
+    if candidate in INVALID_NAME_VALUES or lowered in INVALID_NAME_VALUES:
+        return None
+    if candidate.endswith(("\u5417", "\u5462", "\u4e48", "\u561b")):
+        return None
+    return candidate
 
 
 def _is_asking_user_name(query: str) -> bool:
     if not query:
         return False
-    normalized = query.strip().lower()
-    return (
-        ("\u6211\u53eb\u4ec0\u4e48" in normalized)
-        or ("\u6211\u7684\u540d\u5b57" in normalized)
-        or ("what is my name" in normalized)
-        or ("who am i" in normalized)
-    )
+    normalized = query.strip()
+    for pattern in USER_NAME_QUESTION_PATTERNS:
+        if pattern.search(normalized):
+            return True
+
+    lowered = normalized.lower()
+    return ("what's my name" in lowered) or ("whats my name" in lowered)
 
 
 def _get_or_create_session_state(session_id: str) -> Dict[str, Any]:
-    existing = SESSION_STATE_STORE.get(session_id)
-    if existing:
-        return existing
-    created = {"facts": {}, "updated_at": time.time()}
-    SESSION_STATE_STORE[session_id] = created
-    return created
+    sid = (session_id or "").strip()
+    if not sid:
+        raise ValueError("session_id is required")
+
+    with _SESSION_LOCK:
+        existing = SESSION_STATE_STORE.get(sid)
+        if existing:
+            normalized = _normalize_session_state(existing)
+            SESSION_STATE_STORE[sid] = normalized
+            return normalized
+
+        created = {"facts": {}, "messages": [], "updated_at": time.time()}
+        SESSION_STATE_STORE[sid] = created
+        _persist_session_state_store_locked()
+        return created
 
 
 def _merge_session_facts(session_id: str, facts: Dict[str, str]) -> Dict[str, Any]:
-    state = _get_or_create_session_state(session_id)
-    current_facts: Dict[str, str] = state.setdefault("facts", {})
-    for key, value in (facts or {}).items():
-        fact_key = (key or "").strip()
-        fact_value = (value or "").strip()
-        if fact_key and fact_value:
-            current_facts[fact_key] = fact_value
-    state["updated_at"] = time.time()
-    return state
+    with _SESSION_LOCK:
+        state = _get_or_create_session_state(session_id)
+        current_facts: Dict[str, str] = state.setdefault("facts", {})
+        for key, value in (facts or {}).items():
+            fact_key = (key or "").strip()
+            fact_value = (value or "").strip()
+            if fact_key == "user_name":
+                normalized_name = _normalize_candidate_name(fact_value)
+                if not normalized_name:
+                    continue
+                fact_value = normalized_name
+            if fact_key and fact_value:
+                current_facts[fact_key] = fact_value
+        state["updated_at"] = time.time()
+        _persist_session_state_store_locked()
+        return state
+
+
+def _append_session_messages(session_id: str, messages: List[Dict[str, str]]) -> Dict[str, Any]:
+    updates = _normalize_session_messages(messages)
+    if not updates:
+        return _get_or_create_session_state(session_id)
+
+    with _SESSION_LOCK:
+        state = _get_or_create_session_state(session_id)
+        history = _normalize_session_messages(state.get("messages", []))
+        history.extend(updates)
+        state["messages"] = history[-SESSION_MAX_MESSAGES:]
+        state["updated_at"] = time.time()
+        _persist_session_state_store_locked()
+        return state
 
 
 def _upsert_name_fact_from_query(session_id: str, query: str) -> Dict[str, Any]:
@@ -108,6 +272,7 @@ async def get_software_recommendation(request_data: RecommendationRequest):
         session_id = request_data.session_id or uuid4().hex
         session_state = _upsert_name_fact_from_query(session_id, request_data.query)
         known_name = (session_state.get("facts") or {}).get("user_name")
+        session_messages = _normalize_session_messages(session_state.get("messages", []))
 
         logger.info(
             "recommend request: session_id=%s timeout=%s max_iterations=%s query=%r",
@@ -118,9 +283,17 @@ async def get_software_recommendation(request_data: RecommendationRequest):
         )
 
         if known_name and _is_asking_user_name(request_data.query):
+            memory_answer = f"\u4f60\u53eb{known_name}\u3002"
+            _append_session_messages(
+                session_id,
+                [
+                    {"role": "user", "content": request_data.query},
+                    {"role": "assistant", "content": memory_answer},
+                ],
+            )
             return RecommendationResponse(
                 status="success",
-                final_answer=f"\u4f60\u53eb{known_name}\u3002",
+                final_answer=memory_answer,
                 candidates=[],
                 mode="chat",
                 iteration_count=0,
@@ -140,6 +313,7 @@ async def get_software_recommendation(request_data: RecommendationRequest):
 
         state = AgentState(
             user_query=effective_query,
+            messages=session_messages,
             timeout_budget=request_data.timeout,
             max_iterations=request_data.max_iterations,
             start_time=time.time(),
@@ -150,6 +324,10 @@ async def get_software_recommendation(request_data: RecommendationRequest):
         result = await run_agent_async(AGENT, state, config=config)
         interrupt_payload = _extract_interrupt_payload(result)
         if interrupt_payload and interrupt_payload.get("type") == "human_confirmation":
+            _append_session_messages(
+                session_id,
+                [{"role": "user", "content": request_data.query}],
+            )
             return RecommendationResponse(
                 status="awaiting_human_confirmation",
                 final_answer="",
@@ -162,9 +340,18 @@ async def get_software_recommendation(request_data: RecommendationRequest):
                 pending_sub_questions=interrupt_payload.get("sub_questions", []),
             )
 
+        final_answer = _get_value(result, "final_answer", "")
+        _append_session_messages(
+            session_id,
+            [
+                {"role": "user", "content": request_data.query},
+                {"role": "assistant", "content": final_answer},
+            ],
+        )
+
         return RecommendationResponse(
             status="success",
-            final_answer=_get_value(result, "final_answer", ""),
+            final_answer=final_answer,
             candidates=_get_value(result, "candidates", []),
             mode=_get_value(result, "mode", ""),
             iteration_count=_get_value(result, "iteration_count", 0),
@@ -203,9 +390,16 @@ async def confirm_software_recommendation(request_data: RecommendationConfirmReq
                 pending_sub_questions=interrupt_payload.get("sub_questions", []),
             )
 
+        final_answer = _get_value(result, "final_answer", "")
+        if final_answer:
+            _append_session_messages(
+                request_data.session_id,
+                [{"role": "assistant", "content": final_answer}],
+            )
+
         return RecommendationResponse(
             status="success",
-            final_answer=_get_value(result, "final_answer", ""),
+            final_answer=final_answer,
             candidates=_get_value(result, "candidates", []),
             mode=_get_value(result, "mode", ""),
             iteration_count=_get_value(result, "iteration_count", 0),

@@ -31,22 +31,59 @@ export default function Chat () {
   const chats = useChats('chats')
   const { autoSaveChats, modelName, modelUrl } = useConfig('config')
   const assistantMessage = useRef<Message>(createAssistantMessage(''))
+  const activeConversationId = useRef<string|undefined>(undefined)
+  const activeSessionId = useRef<string|undefined>(undefined)
   const renderCount = useRef(0)
   const rowContainerRef = useRef<HTMLDivElement>(null)
   const talkRef = useRef<HTMLDivElement>(null)
   const textAreaRef = useRef<HTMLTextAreaElement>(null)
+
+  function resolveConversationRefs (messages : Message[]|undefined) : {
+    conversationId ?: string,
+    sessionId ?: string
+  } {
+    if (!messages || messages.length === 0) {
+      return {}
+    }
+    for (let i = messages.length - 1; i >= 0; i--) {
+      const message = messages[i]
+      const conversationId = message.conversationId?.trim()
+      const sessionId = message.sessionId?.trim()
+      if (conversationId || sessionId) {
+        return { conversationId, sessionId }
+      }
+    }
+    return {}
+  }
 
   function requestHandler () {
     if (loading) return
     const messageText = getMessageText()
     if (!messageText) return
     setLoading(true)
-    const userMessage = createUserMessage(messageText)
+
+    const currentMessages = chats[index as number] || []
+    const refs = resolveConversationRefs(currentMessages)
+    activeConversationId.current = refs.conversationId
+    activeSessionId.current = refs.sessionId
+
+    const userMessage = createUserMessage(
+      messageText,
+      refs.conversationId,
+      refs.sessionId
+    )
+    const messagesForRequest = [...currentMessages, userMessage]
+
     updateTalk(false, userMessage)
     disChats(addMessage({ index: index as number, message: userMessage }))
     assistantMessage.current = createAssistantMessage('')
     requester(
-      modelUrl, modelName, chats[index as number], responseHandler, errorHandler
+      modelUrl,
+      modelName,
+      messagesForRequest,
+      refs.conversationId || refs.sessionId,
+      responseHandler,
+      errorHandler
     )
   }
 
@@ -56,8 +93,20 @@ export default function Chat () {
       assistantMessage.current.content += response.message.content
     }
     if (response.done) {
+      const conversationId = response.conversation_id || activeConversationId.current
+      const sessionId = response.session_id || activeSessionId.current
+      const finalAssistantMessage = createAssistantMessage(
+        assistantMessage.current.content,
+        conversationId,
+        sessionId
+      )
+      assistantMessage.current = finalAssistantMessage
+
+      activeConversationId.current = conversationId
+      activeSessionId.current = sessionId
+
       appendBr(2)
-      disChats(addMessage({ index: index as number, message: assistantMessage.current }))
+      disChats(addMessage({ index: index as number, message: finalAssistantMessage }))
       setLoading(false)
     }
   }

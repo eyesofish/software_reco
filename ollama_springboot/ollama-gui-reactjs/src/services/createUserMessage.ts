@@ -1,10 +1,16 @@
 import { Message } from '~/entities/messages'
 
 
-export default function createUserMessage (content : string) : Message {
+export default function createUserMessage (
+  content : string,
+  conversationId ?: string,
+  sessionId ?: string
+) : Message {
   return {
     role: 'user',
     content,
-    time: Date.now()
+    time: Date.now(),
+    conversationId,
+    sessionId
   }
 }
