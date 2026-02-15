@@ -1,0 +1,118 @@
+# Workflow: 前端聊天请求与会话更新
+
+## Trigger
+- 事件：用户在聊天页点击发送按钮。
+
+## Steps
+1. 读取输入框内容；若为空则终止本次发送。
+2. 将用户消息追加到当前会话，并将页面状态切为加载中。
+3. 以当前配置的模型地址与模型名发起聊天请求。
+4. 按响应分片持续接收 assistant 消息并实时追加到会话展示区。
+5. 当响应标记完成后，将完整 assistant 消息写入会话状态并结束加载。
+6. 若开启自动保存，则把最新会话写入本地存储。
+
+## Key State / Artifact
+- 前端配置：`modelUrl`、`modelName`、`autoSaveChats`
+- 会话状态：`chats`（用户消息与 assistant 消息）
+- 页面状态：`loading`、当前会话索引
+
+## Termination
+- 正常结束条件：收到完成标记并写入 assistant 消息。
+- 异常/失败分支：请求或响应解析失败，显示错误并退出加载状态。
+
+# Workflow: Spring Chat 聚合流程
+
+## Trigger
+- API：`POST /api/chat`
+
+## Steps
+1. 接收聊天请求并读取消息列表。
+2. 从消息列表中提取最后一条用户消息作为查询文本。
+3. 若查询文本为空，直接返回固定提示消息。
+4. 调用 FastAPI 推荐接口并传入查询参数。
+5. 根据上游返回状态组装 assistant 内容：
+6. 若有推荐答案则返回推荐答案。
+7. 若上游调用失败则返回服务不可用提示。
+8. 返回统一格式的聊天响应（`done=true`）。
+
+## Key State / Artifact
+- 输入：`model`、`messages`、`stream`
+- 提取后的 `query`
+- FastAPI 推荐响应：`status`、`final_answer`
+- 输出：Ollama 风格响应消息（assistant）
+
+## Termination
+- 正常结束条件：返回 assistant 响应。
+- 异常/失败分支：上游调用异常时返回降级消息。
+
+# Workflow: FastAPI 推荐请求与人工确认闭环
+
+## Trigger
+- API：`POST /api/v1/recommend`
+- API：`POST /api/v1/recommend/confirm`
+
+## Steps
+1. 接收推荐请求并校验参数。
+2. 为请求确定 `session_id`，并绑定到执行线程上下文。
+3. 执行 Agent 工作流。
+4. 若工作流中断为人工确认，则返回 `awaiting_human_confirmation=true` 与待确认子问题。
+5. 客户端提交确认/编辑请求后，以同一 `session_id` 恢复工作流。
+6. 恢复后再次判断是否仍需人工确认；若不需则返回最终推荐结果。
+
+## Key State / Artifact
+- 请求参数：`query`、`timeout`、`max_iterations`、`session_id`
+- 恢复参数：`action`、`sub_questions`、`comment`
+- 会话状态：`session_id`、中断载荷、待确认子问题
+- 响应状态：`status`、`awaiting_human_confirmation`、`final_answer`
+
+## Termination
+- 正常结束条件：返回 `status=success` 且包含最终答案。
+- 异常/失败分支：参数校验失败返回 422；执行异常返回 500。
+
+# Workflow: Agent 路由执行流程（RAG / Chat / Draw）
+
+## Trigger
+- 事件：推荐 Agent 被调用（初次调用或确认后恢复）。
+
+## Steps
+1. 进入入口节点，记录用户消息并初始化本轮时间戳。
+2. 规范化用户查询并提取约束信息。
+3. 执行路由分流，判定进入 `rag`、`chat` 或 `draw` 模式。
+4. `rag` 分支：生成子问题并进入人工确认节点。
+5. 人工确认通过后，进入证据收集、证据评估、候选方案生成。
+6. 执行覆盖率检查；若未满足终止条件则回到证据收集继续迭代。
+7. 满足终止条件后生成最终推荐答案并结束。
+8. `chat` 分支：直接生成聊天回答并结束。
+9. `draw` 分支：先生成绘图参数，再生成图像结果并结束。
+
+## Key State / Artifact
+- 路由状态：`mode`
+- 查询状态：`normalized_query`、`constraints`、`sub_questions`
+- 证据与候选：`evidence`、`candidates`
+- 迭代状态：`coverage`、`needs_refinement`、`iteration_count`
+- 人工确认状态：`pending_sub_questions`、`human_feedback`
+- 输出状态：`final_answer`、`image_result`
+
+## Termination
+- 正常结束条件：三条分支任一完成最终输出并到达流程终点。
+- 异常/失败分支：节点执行异常导致流程中断并由上层接口返回失败。
+
+# Workflow: 向量库初始化流程
+
+## Trigger
+- API：`POST /api/v1/initialize-db`
+- 事件：CLI 运行时传入初始化参数。
+
+## Steps
+1. 构建初始化文档集合（内容与元数据）。
+2. 计算文档向量并写入向量集合。
+3. 返回初始化成功或失败状态。
+
+## Key State / Artifact
+- 初始化文档列表
+- 向量集合：`software_recommendations`
+- 初始化结果状态（成功/失败）
+
+## Termination
+- 正常结束条件：初始化成功并返回成功状态。
+- 异常/失败分支：初始化过程异常或写入失败并返回失败状态。

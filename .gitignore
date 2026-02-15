@@ -1,0 +1,78 @@
+# ========================
+# OS / Editor
+# ========================
+.DS_Store
+Thumbs.db
+Desktop.ini
+.vscode/
+.idea/
+*.iml
+*.ipr
+*.iws
+
+# ========================
+# Logs
+# ========================
+*.log
+logs/
+
+# ========================
+# Env / Local config
+# ========================
+.env
+.env.*
+*.local
+!*.env.example
+!*.example.env
+
+# ========================
+# Python / FastAPI
+# ========================
+**/__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.venv/
+venv/
+env/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+coverage.xml
+htmlcov/
+.ipynb_checkpoints/
+*.egg-info/
+.eggs/
+
+# Local vector DB / runtime data
+**/chroma_db/
+
+# ========================
+# Java / Spring Boot
+# ========================
+**/target/
+!**/src/main/**/target/
+!**/src/test/**/target/
+out/
+.apt_generated
+.classpath
+.factorypath
+.project
+.settings
+.springBeans
+.sts4-cache
+.mvn/wrapper/maven-wrapper.jar
+
+# ========================
+# Node / React
+# ========================
+**/node_modules/
+**/.pnp
+**/.pnp.js
+**/coverage/
+**/build/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
