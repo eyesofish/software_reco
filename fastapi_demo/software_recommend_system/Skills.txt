@@ -1,0 +1,230 @@
+﻿# Skill: recommendation-request-handler
+
+## Description
+- 这个 Skill 用于把一次推荐请求从 API 入参转换为统一的推荐结果。它封装了参数校验后的状态构建、Agent 调用和响应字段整理。它适合需要稳定输出结构的在线推荐接口。
+
+## When to Use
+- 当需要处理 `query/timeout/max_iterations` 并返回统一推荐响应时使用。
+- 不适用于仅做底层检索、仅做绘图或仅做离线数据初始化的场景。
+
+## Inputs
+- `query`（非空文本）
+- `timeout`（秒）
+- `max_iterations`（迭代上限）
+- 可用的 Agent 构建能力与模型配置
+
+## Execution Steps
+1. 接收并校验请求参数。
+2. 创建推荐 Agent 实例。
+3. 构造 `AgentState`（含 `user_query`、`timeout_budget`、`max_iterations`、`start_time`）。
+4. 异步执行 Agent。
+5. 提取并规范化输出字段。
+6. 返回统一响应或错误响应。
+
+## Outputs
+- 推荐结果对象：`status`、`final_answer`、`candidates`、`mode`、`iteration_count`、`coverage`
+- 失败时返回错误状态（API 场景下映射到 500）
+
+## Notes
+- 请求参数不合法时会在接口层被拒绝。
+- Agent 返回类型可能是对象或字典，字段提取需要兼容两种形态。
+
+# Skill: query-mode-router
+
+## Description
+- 这个 Skill 用于把用户输入路由到 `rag`、`chat` 或 `draw` 三种处理模式。它通过关键词与技术术语命中判断请求类型。它用于在多能力系统里做入口分流。
+
+## When to Use
+- 当同一入口需要在推荐、对话、绘图三类能力中自动选择路径时使用。
+- 不适用于已由上游明确指定执行模式的场景。
+
+## Inputs
+- `user_query` 文本
+- 绘图关键词集合
+- 技术术语词表
+
+## Execution Steps
+1. 检查输入是否命中绘图关键词。
+2. 若命中绘图关键词，直接设定为 `draw`。
+3. 若未命中，检测技术术语与技术意图关键词。
+4. 命中技术特征时设定为 `rag`，否则设定为 `chat`。
+
+## Outputs
+- `mode`（`rag` / `chat` / `draw`）
+
+## Notes
+- 该判定依赖关键词覆盖度，边界输入可能出现误分流。
+- 多语言混合输入下命中率取决于词表质量。
+
+# Skill: query-normalizer-and-planner
+
+## Description
+- 这个 Skill 用于把自然语言问题规整为可检索查询，并进一步拆分成子问题。它还能抽取语言、场景、偏好等约束信息。它适用于需要把模糊需求转为检索驱动任务的链路。
+
+## When to Use
+- 当输入问题较口语化、目标不够明确，且后续需要检索或证据收集时使用。
+- 不适用于纯闲聊或不需要检索分解的短回答场景。
+
+## Inputs
+- `user_query`
+- LLM 可用性与模型配置
+- 约束提取关键词规则
+
+## Execution Steps
+1. 调用模型生成标准化查询列表（JSON 结构）。
+2. 解析标准化结果，失败时回退到原始查询。
+3. 从原始输入提取语言、场景、偏好约束。
+4. 基于标准化查询和约束生成子问题列表。
+5. 子问题生成失败时执行规则化回退拆分。
+
+## Outputs
+- `normalized_query`
+- `constraints`（`language`、`scenario`、`preference`）
+- `sub_questions`
+
+## Notes
+- 模型输出不是合法 JSON 时必须走回退逻辑。
+- 回退拆分规则较简单，复杂并列需求可能拆分不充分。
+
+# Skill: hybrid-document-retriever
+
+## Description
+- 这个 Skill 用于执行统一检索：先做向量库相似检索，再按条件补充实时搜索结果。它把不同来源的数据标准化为统一文档结构，便于后续评分与生成。它适用于证据收集阶段。
+
+## When to Use
+- 当需要同时利用本地知识库和外部搜索结果时使用。
+- 不适用于仅需固定数据源、且不希望访问外部搜索的场景。
+
+## Inputs
+- `query`
+- `k`（检索数量）
+- 向量库路径与集合
+- 可选 Tavily 配置
+
+## Execution Steps
+1. 对查询生成向量并检索本地集合。
+2. 将检索结果映射为统一 `Document` 结构。
+3. 若外部搜索可用，执行实时搜索并转换为 `Document`。
+4. 合并多源文档并返回。
+
+## Outputs
+- `Document` 列表（含 `content`、`metadata`、`score`）
+
+## Notes
+- 向量集合不存在时会返回空列表而不是报错终止。
+- 外部搜索能力受 API Key 与依赖安装状态影响。
+
+# Skill: recommendation-candidate-synthesizer
+
+## Description
+- 这个 Skill 用于把证据集合转成可排序的推荐候选方案。它优先使用模型生成结构化候选，失败时回退到基于首条证据的简化候选。它适用于从“检索结果”过渡到“可决策方案”的阶段。
+
+## When to Use
+- 当已经拿到证据并需要输出 `solution/rationale/pros/cons/score` 结构时使用。
+- 不适用于证据为空、或只需要原始检索结果不需要候选排序的场景。
+
+## Inputs
+- `evidence`（问题、文档、质量分）
+- LLM 可用性与模型配置
+
+## Execution Steps
+1. 压缩证据内容并构造候选生成输入。
+2. 调用模型生成候选列表。
+3. 校验并规范化候选字段与分值范围。
+4. 模型失败时用规则回退生成候选。
+5. 按相关性分值降序排序。
+
+## Outputs
+- `candidates` 列表（`solution`、`rationale`、`pros`、`cons`、`relevance_score`）
+
+## Notes
+- 模型输出结构不稳定时需要严格字段清洗。
+- 回退候选信息密度较低，只保证链路可继续。
+
+# Skill: coverage-iteration-controller
+
+## Description
+- 这个 Skill 用于评估当前证据覆盖度，并决定继续迭代还是终止生成。它统一考虑覆盖率、迭代次数、超时预算与候选产出。它适用于需要可控收敛的多轮检索流程。
+
+## When to Use
+- 当流程存在“收集证据-评估-再收集”的循环并需要终止门控时使用。
+- 不适用于一次性直出回答、没有迭代状态的任务。
+
+## Inputs
+- `sub_questions`
+- `evidence`
+- `candidates`
+- `coverage_threshold`
+- `iteration_count` 与 `max_iterations`
+- `start_time` 与 `timeout_budget`
+
+## Execution Steps
+1. 计算已覆盖子问题占比。
+2. 计算是否需要继续细化（`needs_refinement`）。
+3. 结合覆盖率、迭代上限、超时状态与细化标记判断分支。
+4. 输出覆盖度状态和继续/终止决策。
+
+## Outputs
+- `coverage`
+- `needs_refinement`
+- 分支决策（继续迭代或终止）
+
+## Notes
+- `start_time` 缺失会影响超时判断准确性。
+- 覆盖率阈值过高会导致不必要迭代。
+
+# Skill: structured-chart-generator
+
+## Description
+- 这个 Skill 用于将绘图需求转换为结构化参数，并生成图像结果。它先做参数结构化，再做字段校验与图像生成调用。它适用于图表类输出需求。
+
+## When to Use
+- 当输入是“画图/图表生成”类请求，且需要返回可访问图像结果时使用。
+- 不适用于普通文本问答或推荐排序场景。
+
+## Inputs
+- 用户绘图描述文本，或结构化绘图参数 JSON
+- 图像模型配置（模型名、尺寸）
+
+## Execution Steps
+1. 识别图表类型并构建结构化参数。
+2. 解析参数 JSON 并校验必填字段。
+3. 组装图像生成提示并调用图像接口。
+4. 解析响应并返回 URL 或 Base64 图像。
+
+## Outputs
+- `drawing_params`（结构化参数）
+- `image_result`（图像 URL 或 Base64 数据）
+- 面向用户的绘图结果文本
+
+## Notes
+- 参数 JSON 非法或字段缺失会直接失败。
+- 该能力依赖图像模型可用与配额状态。
+
+# Skill: vector-store-bootstrap
+
+## Description
+- 这个 Skill 用于把一批文档嵌入后写入向量数据库集合，完成知识库初始化。它将文本内容和元数据统一入库，供后续相似检索使用。它适用于新环境冷启动或样本数据重建。
+
+## When to Use
+- 当向量库为空、首次部署或需要重建基础检索数据时使用。
+- 不适用于在线查询阶段的实时推荐调用。
+
+## Inputs
+- 文档列表（每项至少包含 `content`，可包含 `metadata`）
+- 向量模型配置与向量库路径
+
+## Execution Steps
+1. 连接或创建目标向量集合。
+2. 提取文本与元数据并生成文档 ID。
+3. 批量计算文本嵌入向量。
+4. 批量写入集合。
+5. 返回初始化状态。
+
+## Outputs
+- 成功标记（`True/False`）
+- 目标集合中的可检索文档数据
+
+## Notes
+- 文档缺少 `content` 会导致初始化失败。
+- 该能力对嵌入模型与向量库连通性有强依赖。

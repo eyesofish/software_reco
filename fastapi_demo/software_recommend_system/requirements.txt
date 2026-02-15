@@ -1,0 +1,7 @@
+langgraph==1.0.6
+langchain-core==1.2.7
+openai==2.15.0
+chromadb==1.4.1
+pydantic==2.12.5
+python-dotenv==1.0.0
+tiktoken==0.5.1

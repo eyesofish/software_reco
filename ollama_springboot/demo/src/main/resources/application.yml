@@ -1,0 +1,13 @@
+server:
+  port: 8080
+
+spring:
+  jackson:
+    property-naming-strategy: SNAKE_CASE
+
+app:
+  fastapi:
+    base-url: http://127.0.0.1:8000
+    recommend-path: /api/v1/recommend
+  cors:
+    allowed-origins: http://localhost:3000,http://127.0.0.1:3000
