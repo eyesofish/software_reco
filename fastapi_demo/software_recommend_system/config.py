@@ -12,6 +12,11 @@ class Settings:
     DASHSCOPE_API_KEY = os.getenv("DASHSCOPE_API_KEY", "")
     BASE_URL = os.getenv("BASE_URL", "")
     OPENAI_BASE_URL = os.getenv("OPENAI_BASE_URL", BASE_URL)
+    EMBEDDING_PROVIDER = os.getenv("EMBEDDING_PROVIDER", "dashscope")
+    EMBEDDING_BASE_URL = os.getenv(
+        "EMBEDDING_BASE_URL",
+        "https://dashscope.aliyuncs.com/compatible-mode/v1",
+    )
     TAVILY_API_KEY = os.getenv("TAVILY_API_KEY", "")
 
     # Vector store + embedding config

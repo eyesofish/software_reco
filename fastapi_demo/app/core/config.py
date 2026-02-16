@@ -21,6 +21,11 @@ class Settings(BaseSettings):
     DASHSCOPE_API_KEY: str = os.getenv("DASHSCOPE_API_KEY", "")
     BASE_URL: str = os.getenv("BASE_URL", "")
     OPENAI_BASE_URL: str = os.getenv("OPENAI_BASE_URL", BASE_URL)
+    EMBEDDING_PROVIDER: str = os.getenv("EMBEDDING_PROVIDER", "dashscope")
+    EMBEDDING_BASE_URL: str = os.getenv(
+        "EMBEDDING_BASE_URL",
+        "https://dashscope.aliyuncs.com/compatible-mode/v1",
+    )
     TAVILY_API_KEY: str = os.getenv("TAVILY_API_KEY", "")
 
     CHROMA_DB_PATH: str = os.getenv("CHROMA_DB_PATH", "./chroma_db")
