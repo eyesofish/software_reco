@@ -70,7 +70,19 @@ uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
 
 4. 图里执行节点（路由到 rag/chat/draw）  
 文件：`fastapi_demo/software_recommend_system/nodes.py`  
-关键函数：`entry_node`、`routing_node`、`query_normalization_node` 等
+关键函数：`entry_node`、`routing_node`、`query_normalization_node`、`evidence_collection_node`、`candidate_generation_node`、`answer_generation_node`、`chat_answer_generation_node`
+
+这一段的真实执行逻辑（简版）：
+- 先 `entry_node` 记录本轮用户输入到 `state.messages`。
+- 再 `routing_node` 决定 `mode`：
+  - `chat` -> 直接走 `chat_answer_generation_node`
+  - `draw` -> 走 `pre_drawing_node -> draw_image_node`
+  - `rag` -> 走 `query_normalization_node -> sub_question_generation_node -> evidence_collection_node -> candidate_generation_node -> answer_generation_node`
+
+你问的重点（是否把“相似度检索出的向量”拼接到 query 再调 LLM）：
+- 当前代码没有把“向量数组”拼接到 query。
+- 实际链路是：`query -> embed_texts -> Chroma query -> 返回文档文本/metadata`，然后把“检索到的文档内容摘要”组装成 `evidence_payload` 交给 LLM（`candidate_generation_node`）。
+- 最后 `answer_generation_node` 基于候选方案输出最终答案。
 
 5. 返回 `RecommendationResponse`  
 文件：`fastapi_demo/app/api/v1/models.py`  

@@ -230,35 +230,35 @@ def query_normalization_node(state: AgentState) -> Dict[str, Any]:
 
     normalized_queries = []
     prompt = "\n".join([
-        '你是一个软件工程查询规范化助手。',
+        'You are a software engineering query normalization assistant.',
         '',
-        '你的任务是：',
-        '将用户的自然语言问题，转换为一个或多个“工程化、可检索”的标准问题，',
-        '使其尽可能贴近以下类别的技术关键词：',
-        '- 软件架构 / 分布式系统',
-        '- 后端工程 / 中间件',
-        '- 数据库 / 向量数据库 / 数据工程',
+        'Your task is:',
+        'Convert a user\'s natural-language question into one or more standardized, engineering-oriented, searchable queries.',
+        'Make them as close as possible to technical keywords in the following categories:',
+        '- Software architecture / Distributed systems',
+        '- Backend engineering / Middleware',
+        '- Databases / Vector databases / Data engineering',
         '- AI / LLM / RAG / Agent',
-        '- DevOps / 云 / 非功能性需求',
-        '- 常见编程语言与框架',
+        '- DevOps / Cloud / Non-functional requirements',
+        '- Common programming languages and frameworks',
         '',
-        '转换规则：',
-        '1. 删除情绪化、目标导向、模糊表达（如“我想”“有没有大神推荐”“最好”“比较厉害的”）。',
-        '2. 将口语化描述替换为明确的技术概念（如“扛并发”→“high concurrency”）。',
-        '3. 若存在多个技术关注点，拆分为多个规范化子查询。',
-        '4. 不要引入用户未提及的新需求。',
-        '5. 不要给出解决方案或建议。',
+        'Transformation rules:',
+        '1. Remove emotional, goal-oriented, or vague wording (e.g., "I want", "any expert recommendations", "best", "very strong").',
+        '2. Replace colloquial expressions with explicit technical concepts (e.g., "handle lots of users" -> "high concurrency").',
+        '3. If multiple technical concerns exist, split them into multiple normalized sub-queries.',
+        '4. Do not introduce new requirements not mentioned by the user.',
+        '5. Do not provide solutions or recommendations.',
         '',
-        '输出格式要求：',
-        '- 只输出 JSON',
-        '- 使用 normalized_queries 字段',
-        '- 每个 query 都应像搜索引擎或技术文档标题',
+        'Output format requirements:',
+        '- Output JSON only',
+        '- Use the normalized_queries field',
+        '- Each query should look like a search-engine query or technical document title',
         '',
-        '示例：',
-        '用户输入：',
-        '“我想做一个能扛住很多人同时用的 RAG 系统，有没有好点的方案？”',
+        'Example:',
+        'User input:',
+        '"I want to build a RAG system that can handle many simultaneous users. Any good approach?"',
         '',
-        '输出：',
+        'Output:',
         '{',
         '  "normalized_queries": [',
         '    "RAG system architecture for high concurrency",',
@@ -339,11 +339,11 @@ def query_normalization_node(state: AgentState) -> Dict[str, Any]:
     }
 
 def sub_question_generation_node(state: AgentState) -> Dict[str, Any]:
-    """子问题生成节点"""
+    """Sub-question generation node."""
     normalized_query = _get_field(state, "normalized_query", "")
     constraints = _get_field(state, "constraints", {})
 
-    logger.info(f"为查询生成子问题: {normalized_query}")
+    logger.info(f"Generating sub-questions for query: {normalized_query}")
 
     sub_questions = []
     try:
@@ -355,14 +355,14 @@ def sub_question_generation_node(state: AgentState) -> Dict[str, Any]:
                     "role": "system",
                     "content": "\n".join(
                         [
-                            "你是软件推荐系统的需求分析助手。",
-                            "该软件要解决的核心问题是什么，目标用户是谁？",
-                            "该需求主要属于哪类软件工程领域（如推荐系统、RAG、AI 工具）？",
-                            "是否有明确的技术栈或运行环境限制（如 Java/Spring Boot、Python/FastAPI）？",
-                            "系统是否有性能、并发或可扩展性的非功能性要求？",
-                            "该系统涉及哪些数据类型，是否需要数据库或向量数据库？",
-                            "最终软件的交付形态是什么（Web 服务、API、工具平台）？",
-                            "只返回JSON数组或包含 sub_questions 字段的JSON对象，不要输出其它文本。"
+                            "You are a requirements analysis assistant for a software recommendation system.",
+                            "What core problem should this software solve, and who are the target users?",
+                            "Which software engineering domain does this requirement mainly belong to (e.g., recommendation systems, RAG, AI tools)?",
+                            "Are there explicit technology stack or runtime constraints (e.g., Java/Spring Boot, Python/FastAPI)?",
+                            "Does the system have non-functional requirements for performance, concurrency, or scalability?",
+                            "What data types are involved, and is a database or vector database required?",
+                            "What is the final delivery format of the software (web service, API, or tool platform)?",
+                            "Return only a JSON array or a JSON object containing the sub_questions field. Do not output any other text."
                         ]
                     )
                 },
@@ -392,16 +392,16 @@ def sub_question_generation_node(state: AgentState) -> Dict[str, Any]:
             parsed = parsed.get("sub_questions", [])
 
         if not isinstance(parsed, list):
-            raise ValueError("LLM返回格式不是子问题列表")
+            raise ValueError("LLM response format is not a sub-question list")
 
         sub_questions = [str(item).strip() for item in parsed if str(item).strip()]
     except Exception as e:
-        logger.error(f"调用 LLM 生成子问题失败: {str(e)}")
+        logger.error(f"Failed to generate sub-questions with LLM: {str(e)}")
 
     if not sub_questions:
         sub_questions = [normalized_query]
-        if "和" in normalized_query or "and" in normalized_query.lower():
-            parts = re.split(r'和|and', normalized_query)
+        if " and " in normalized_query.lower():
+            parts = re.split(r'\band\b', normalized_query, flags=re.IGNORECASE)
             if len(parts) > 1:
                 sub_questions = [part.strip() for part in parts if part.strip()]
 
@@ -439,7 +439,7 @@ async def human_confirmation_node(state: AgentState) -> Dict[str, Any]:
         "type": "human_confirmation",
         "query": _get_field(state, "user_query", ""),
         "sub_questions": original_sub_questions,
-        "instruction": "请返回 JSON: {\"action\":\"confirm|edit\", \"sub_questions\":[...], \"comment\":\"...\"}",
+        "instruction": "Return JSON only: {\"action\":\"confirm|edit\", \"sub_questions\":[...], \"comment\":\"...\"}",
     }
 
     try:
@@ -568,9 +568,9 @@ def candidate_generation_node(state: AgentState) -> Dict[str, Any]:
                 {
                     "role": "system",
                     "content": (
-                        "你是软件推荐助手。请根据给定证据生成候选方案列表。"
-                        "只返回JSON数组或包含 candidates 字段的JSON对象，不要输出其它文本。"
-                        "每个候选方案必须包含字段: solution, rationale, pros, cons, relevance_score(0-1)。"
+                        "You are a software recommendation assistant. Generate a list of candidate solutions based on the provided evidence. "
+                        "Return only a JSON array or a JSON object containing the candidates field. Do not output any other text. "
+                        "Each candidate must include: solution, rationale, pros, cons, relevance_score (0-1)."
                     )
                 },
                 {"role": "user", "content": json.dumps(evidence_payload, ensure_ascii=False)}
