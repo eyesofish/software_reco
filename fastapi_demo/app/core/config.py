@@ -25,6 +25,9 @@ class Settings(BaseSettings):
 
     CHROMA_DB_PATH: str = os.getenv("CHROMA_DB_PATH", "./chroma_db")
     EMBEDDING_MODEL: str = os.getenv("EMBEDDING_MODEL", "Qwen/Qwen3-Embedding-0.6B")
+    CHUNK_SIZE: int = int(os.getenv("CHUNK_SIZE", "800"))
+    CHUNK_OVERLAP: int = int(os.getenv("CHUNK_OVERLAP", "120"))
+    INGEST_PATH: str = os.getenv("INGEST_PATH", "./ingest_docs")
     IMAGE_MODEL: str = os.getenv("IMAGE_MODEL", "qwen-image-edit")
     IMAGE_SIZE: str = os.getenv("IMAGE_SIZE", "1024x1024")
 

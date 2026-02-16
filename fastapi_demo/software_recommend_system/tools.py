@@ -1,6 +1,7 @@
-from typing import List, Dict, Any
+﻿from typing import List, Dict, Any
 from .document_schema import Document
 from .config import settings
+from .ingestion.embedder import embed_texts
 import chromadb
 import openai
 import logging
@@ -16,14 +17,6 @@ def _get_openai_client() -> openai.OpenAI:
     return openai.OpenAI(api_key=api_key, base_url=base_url)
 
 
-def _embed_texts(texts: List[str]) -> List[List[float]]:
-    client = _get_openai_client()
-    response = client.embeddings.create(
-        model=settings.EMBEDDING_MODEL,
-        input=texts,
-    )
-    return [item.embedding for item in response.data]
-
 def similarity_search(query: str, k: int = 5) -> List[Document]:
     """
     执行向量库相似性搜索，查找与查询最相关的文档
@@ -38,7 +31,7 @@ def similarity_search(query: str, k: int = 5) -> List[Document]:
         collection = client.get_collection("software_recommendations")
         
         # 对查询进行嵌入
-        query_embeddings = _embed_texts([query])
+        query_embeddings = embed_texts([query])
         
         # 执行相似性搜索
         results = collection.query(
@@ -274,3 +267,4 @@ def get_all_tools():
         tools.append(search_tool)
     
     return tools
+

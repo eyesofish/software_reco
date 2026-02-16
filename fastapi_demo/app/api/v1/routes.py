@@ -450,6 +450,7 @@ async def initialize_database():
     try:
         sample_docs = [
             {
+                "id": "redis-overview",
                 "content": (
                     "Redis is an in-memory data structure store, used as a distributed, "
                     "in-memory key-value database, cache and message broker, with optional "
@@ -467,6 +468,7 @@ async def initialize_database():
                 },
             },
             {
+                "id": "memcached-overview",
                 "content": (
                     "Memcached is a general-purpose distributed memory caching system. It is "
                     "often used to speed up dynamic database-driven websites by caching data "

@@ -89,12 +89,17 @@ uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
 | `fastapi_demo/app/core/startup.py` | 启动钩子 | 启动时预加载逻辑 |
 | `fastapi_demo/app/api/v1/models.py` | 请求/响应 Pydantic 模型 | 加字段、改参数校验 |
 | `fastapi_demo/app/api/v1/routes.py` | 所有 API 路由 + 会话状态维护 | 改接口行为、会话记忆策略 |
+| `fastapi_demo/app/api/v1/startup_ingest.py` | 启动自动文档入库 | 改启动扫描目录、文件解析、自动入库条件 |
 | `fastapi_demo/app/services/recommendation_service.py` | 旧服务层封装（当前主要走 routes 直调） | 想做服务层抽象时 |
 | `fastapi_demo/software_recommend_system/state.py` | Agent 全量状态结构 `AgentState` | 新增状态字段、修状态默认值 |
 | `fastapi_demo/software_recommend_system/rag_agent.py` | LangGraph 图编排 + checkpointer | 改流程拓扑、换持久化 checkpoint |
 | `fastapi_demo/software_recommend_system/nodes.py` | 具体节点实现（RAG/Chat/Draw） | 改检索逻辑、改回答生成 |
 | `fastapi_demo/software_recommend_system/tools.py` | 检索/绘图工具（向量检索 + Tavily） | 改搜索来源、改 tool 逻辑 |
-| `fastapi_demo/software_recommend_system/utils.py` | 向量库初始化工具 | 改 embedding / 初始化行为 |
+| `fastapi_demo/software_recommend_system/utils.py` | 向量入库总入口（编排 loader/chunker/embedder/indexer） | 改 ingest 编排流程 |
+| `fastapi_demo/software_recommend_system/ingestion/loader.py` | 文档标准化模块 | 改原始文档清洗逻辑 |
+| `fastapi_demo/software_recommend_system/ingestion/chunker.py` | 文本切块模块 | 改 chunk 大小、重叠和 metadata |
+| `fastapi_demo/software_recommend_system/ingestion/embedder.py` | 向量化模块（唯一 embeddings 调用） | 改 embedding 模型调用 |
+| `fastapi_demo/software_recommend_system/ingestion/indexer.py` | Chroma 持久化写入模块 | 改集合写入/upsert 策略 |
 | `fastapi_demo/software_recommend_system/config.py` | 业务层配置（模型、向量库参数） | 改 LLM/embedding/tool 配置 |
 | `fastapi_demo/software_recommend_system/document_schema.py` | 文档数据结构（Document/Metadata） | 扩展文档元信息字段 |
 | `fastapi_demo/software_recommend_system/run_agent.py` | CLI 调试入口 | 本地命令行调试节点流程 |
@@ -203,7 +208,107 @@ uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
 - 入口：`fastapi_demo/app/api/v1/routes.py:448`
 - 函数：`initialize_database()`
 - 功能：写入示例文档到向量库
-- 依赖：`initialize_vector_store`（`fastapi_demo/software_recommend_system/utils.py:24`）
+- 依赖：`initialize_vector_store`（`fastapi_demo/software_recommend_system/utils.py:13`）
+
+### 5.5 Chroma 向量库与 Embedding 调用链（你问的重点）
+
+配置入口：
+- `fastapi_demo/software_recommend_system/config.py:18`：`CHROMA_DB_PATH`
+- `fastapi_demo/software_recommend_system/config.py:19`：`EMBEDDING_MODEL`
+- `fastapi_demo/software_recommend_system/config.py:20`：`CHUNK_SIZE`
+- `fastapi_demo/software_recommend_system/config.py:21`：`CHUNK_OVERLAP`
+- `fastapi_demo/app/core/config.py:26`：`CHROMA_DB_PATH`
+- `fastapi_demo/app/core/config.py:27`：`EMBEDDING_MODEL`
+- `fastapi_demo/app/core/config.py:28`：`CHUNK_SIZE`
+- `fastapi_demo/app/core/config.py:29`：`CHUNK_OVERLAP`
+
+向量写入链路（初始化）：
+1. `POST /api/v1/initialize-db` 进入 `initialize_database`  
+位置：`fastapi_demo/app/api/v1/routes.py:448`
+2. 在路由里构造 `sample_docs`（每条含 `id + content + metadata`）  
+位置：`fastapi_demo/app/api/v1/routes.py:451`
+3. 调用 `initialize_vector_store(sample_docs)`  
+位置：`fastapi_demo/app/api/v1/routes.py:489`
+4. 进入 ingest 编排入口 `initialize_vector_store`  
+位置：`fastapi_demo/software_recommend_system/utils.py:13`
+5. 文档标准化：`normalize_documents`  
+位置：`fastapi_demo/software_recommend_system/ingestion/loader.py:4`
+6. 文本切块：`chunk_documents(..., chunk_size=settings.CHUNK_SIZE, chunk_overlap=settings.CHUNK_OVERLAP)`  
+位置：`fastapi_demo/software_recommend_system/ingestion/chunker.py:166`  
+实现要点：优先按中英文标点做句子切分，再按 `chunk_size` 组块；若单句超长，回退到固定长度切分，并保留 overlap
+7. 文本向量化：`embed_texts(chunk_texts)`  
+位置：`fastapi_demo/software_recommend_system/ingestion/embedder.py:14`  
+代码行为：`client.embeddings.create(model=settings.EMBEDDING_MODEL, input=...)`
+8. Chroma 写入：`index_embeddings(...)`  
+位置：`fastapi_demo/software_recommend_system/ingestion/indexer.py:16`  
+代码行为：`collection.upsert(ids, documents, metadatas, embeddings)`
+9. Chroma 持久化路径读取：`get_chroma_collection`  
+位置：`fastapi_demo/software_recommend_system/ingestion/indexer.py:10`  
+代码行为：`chromadb.PersistentClient(path=settings.CHROMA_DB_PATH)`
+
+向量检索链路（查询）：
+1. 节点检索最终会调用 `unified_search`  
+位置：`fastapi_demo/software_recommend_system/tools.py:245`
+2. `unified_search` 先调 `similarity_search`（向量检索）  
+位置：`fastapi_demo/software_recommend_system/tools.py:20`
+3. `similarity_search` 用同一个 `CHROMA_DB_PATH` 打开持久化库并读取 `software_recommendations` 集合
+4. 对 query 做 embedding（单条）  
+位置：`fastapi_demo/software_recommend_system/tools.py:34`（`embed_texts([query])`）
+5. 调用 `collection.query(query_embeddings=..., n_results=k)` 返回相似文档
+6. 若 Tavily 可用，`unified_search` 会把网络搜索结果拼接进来（不是向量库结果）
+
+### 5.6 chunk 向量化当前状态（已实现）
+
+当前代码现状：
+- 已实现“先 chunk 再 embedding 再入库”的模块化流水线。
+- chunk 在 `fastapi_demo/software_recommend_system/ingestion/chunker.py:166` 执行，采用“句子优先”切分：
+  - 先用中英文标点拆句（`_split_into_sentence_spans`，`chunker.py:39`）
+  - 再按 `chunk_size` 进行句子分组（`_build_chunks`，`chunker.py:117`）
+  - 若单句超过 `chunk_size`，回退固定长度切分（`_split_span_by_fixed_length`，`chunker.py:49`）
+  - overlap 按句子尾部复用逻辑保留
+- 每个 chunk metadata 会写入：
+  - `source_doc_id`
+  - `chunk_index`
+  - `chunk_start`
+  - `chunk_end`
+- embedding 调用统一在 `fastapi_demo/software_recommend_system/ingestion/embedder.py:14`，项目内不再重复实现 embedding API 调用。
+
+如果你要调优 chunk 质量（现在就能改）：
+1. 改环境变量 `CHUNK_SIZE`、`CHUNK_OVERLAP`。  
+2. 或直接改 `chunk_documents` 句子分组策略（例如引入 token 长度预算）。  
+3. 若要接入 token splitter，可替换 `_split_into_sentence_spans` 或 `_build_chunks` 的实现。  
+
+### 5.7 启动自动入库（Startup Ingest）机制
+
+目标：
+- FastAPI 启动时自动扫描目录并入库（支持 `.txt/.md/.pdf`）。
+- 仅当向量库为空时执行，避免每次启动重复导入。
+
+入口链路：
+1. FastAPI 启动事件  
+位置：`fastapi_demo/app/main.py`（`app.on_event("startup")(startup_event_handler)`）
+2. 启动钩子执行  
+位置：`fastapi_demo/app/core/startup.py:8`（`startup_event_handler`）
+3. 调用自动入库  
+位置：`fastapi_demo/app/core/startup.py:16`（`run_startup_ingestion_if_needed()`）
+4. 自动入库主逻辑  
+位置：`fastapi_demo/app/api/v1/startup_ingest.py:120`
+
+自动入库逻辑细节（`startup_ingest.py`）：
+- 扫描文件后缀：`SUPPORTED_EXTENSIONS`（`startup_ingest.py:15`）
+- 扫描目录：`settings.INGEST_PATH`（配置在 `app/core/config.py:30`）
+- 向量库空库判断：`collection.count()`（`startup_ingest.py:126`）
+  - `count > 0` 直接跳过自动入库
+- 文件读取：
+  - 文本：`_read_plain_text`（`startup_ingest.py:23`）
+  - PDF：`_read_pdf_text`（`startup_ingest.py:34`，通过 `PyPDF2`）
+- 文件列表收集：`_list_candidate_files`（`startup_ingest.py:63`）
+- 单文档入库：`_ingest_single_document`（`startup_ingest.py:87`）
+  - 内部依次调用：`normalize_documents -> chunk_documents -> embed_texts -> index_embeddings`
+
+注意：
+- 这个自动入库不改任何现有 REST 路由，只在启动阶段工作。
+- 如果未安装 `PyPDF2`，PDF 文件会被跳过并打 warning 日志。
 
 ---
 
@@ -372,7 +477,21 @@ uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
 
 工具层：
 - `fastapi_demo/software_recommend_system/tools.py`
-- `similarity_search`（27）、`_tavily_search`（101）、`unified_search`（252）
+- `similarity_search`（20）、`_tavily_search`（94）、`unified_search`（245）
+
+如果你要改“分块后再向量化（chunk embedding）”：
+- 主改目录：`fastapi_demo/software_recommend_system/ingestion/`
+- 关键函数：
+  - `normalize_documents`（`loader.py:4`）：原始文档标准化
+  - `chunk_documents`（`chunker.py:166`）：句子优先切块策略
+  - `_split_into_sentence_spans`（`chunker.py:39`）：句子切分
+  - `_build_chunks`（`chunker.py:117`）：句子组块 + overlap
+  - `embed_texts`（`embedder.py:14`）：唯一 embedding API 调用点
+  - `index_embeddings`（`indexer.py:16`）：Chroma upsert 写入点
+  - `initialize_vector_store`（`utils.py:13`）：总编排入口
+- 配置同步：
+  - `fastapi_demo/software_recommend_system/config.py`：`CHUNK_SIZE/CHUNK_OVERLAP`（20/21）
+  - `fastapi_demo/app/core/config.py`：`CHUNK_SIZE/CHUNK_OVERLAP`（28/29）
 
 ### 场景 D：改流程图（先做什么后做什么）
 
@@ -398,13 +517,32 @@ FastAPI 层配置：
 
 业务层配置：
 - `fastapi_demo/software_recommend_system/config.py`
-- 类：`Settings`（6）
+- 类：`Settings`（8）
 
 高频环境变量：
 - `SERVER_HOST`、`SERVER_PORT`、`DEBUG`
 - `OPENAI_API_KEY`、`OPENAI_BASE_URL`、`LLM_MODEL`
-- `CHROMA_DB_PATH`、`EMBEDDING_MODEL`
+- `CHROMA_DB_PATH`、`EMBEDDING_MODEL`、`CHUNK_SIZE`、`CHUNK_OVERLAP`
+- `INGEST_PATH`（启动自动扫描目录）
 - `TIMEOUT_BUDGET`、`MAX_ITERATIONS`
+
+### 场景 F：改“启动自动入库”策略
+
+核心文件：
+- `fastapi_demo/app/core/startup.py`
+- `fastapi_demo/app/api/v1/startup_ingest.py`
+
+关键位置：
+- `startup_event_handler`（`startup.py:8`）：启动时触发入口
+- `run_startup_ingestion_if_needed`（`startup_ingest.py:120`）：空库判断 + 扫描 + 入库主流程
+- `_list_candidate_files`（`startup_ingest.py:63`）：扫描目录与扩展名过滤
+- `_read_pdf_text`（`startup_ingest.py:34`）：PDF 提取文本
+- `_ingest_single_document`（`startup_ingest.py:87`）：调用现有 ingestion 模块链路
+
+你通常会改：
+1. 扫描目录：`INGEST_PATH`
+2. 支持的扩展名：`SUPPORTED_EXTENSIONS`
+3. 空库判断策略：`collection.count() == 0` 的条件逻辑
 
 ---
 
@@ -417,18 +555,28 @@ FastAPI 层配置：
 5. `.runtime/langgraph_checkpoints.sqlite` 是否创建/更新
 6. 422 校验报错先看 `app/main.py` 的 validation log
 7. 推荐效果差优先看 `nodes.py` 的路由和 evidence 相关节点
+8. 启动自动入库是否触发：看 `startup_ingest` 相关日志
+9. `INGEST_PATH` 目录是否存在且有 `.txt/.md/.pdf` 文件
+10. 若预期自动入库却未执行，先看向量库 `collection.count()` 是否已大于 0（非空会跳过）
 
 ---
 
 ## 10. 建议阅读顺序（半天上手）
 
 1. `fastapi_demo/app/main.py`
-2. `fastapi_demo/app/api/v1/models.py`
-3. `fastapi_demo/app/api/v1/routes.py`
-4. `fastapi_demo/software_recommend_system/state.py`
-5. `fastapi_demo/software_recommend_system/rag_agent.py`
-6. `fastapi_demo/software_recommend_system/nodes.py`
-7. `fastapi_demo/software_recommend_system/tools.py`
+2. `fastapi_demo/app/core/config.py`
+3. `fastapi_demo/app/core/startup.py`
+4. `fastapi_demo/app/api/v1/startup_ingest.py`
+5. `fastapi_demo/app/api/v1/models.py`
+6. `fastapi_demo/app/api/v1/routes.py`
+7. `fastapi_demo/software_recommend_system/state.py`
+8. `fastapi_demo/software_recommend_system/rag_agent.py`
+9. `fastapi_demo/software_recommend_system/nodes.py`
+10. `fastapi_demo/software_recommend_system/tools.py`
+11. `fastapi_demo/software_recommend_system/ingestion/loader.py`
+12. `fastapi_demo/software_recommend_system/ingestion/chunker.py`
+13. `fastapi_demo/software_recommend_system/ingestion/embedder.py`
+14. `fastapi_demo/software_recommend_system/ingestion/indexer.py`
 
-看完这 7 个文件，基本就能独立改需求了。
+看完这 14 个文件，基本就能独立改需求了。
 

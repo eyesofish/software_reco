@@ -1,55 +1,51 @@
-from typing import List, Dict, Any
-from .document_schema import Document, Metadata
-from .config import settings
-import chromadb
-import openai
+﻿from typing import Any, Dict, List
 import logging
+
+from .config import settings
+from .ingestion.loader import normalize_documents
+from .ingestion.chunker import chunk_documents
+from .ingestion.embedder import embed_texts
+from .ingestion.indexer import index_embeddings
 
 logger = logging.getLogger(__name__)
 
-def _get_openai_client() -> openai.OpenAI:
-    api_key = settings.DASHSCOPE_API_KEY or settings.OPENAI_API_KEY
-    base_url = settings.OPENAI_BASE_URL or None
-    return openai.OpenAI(api_key=api_key, base_url=base_url)
-
-
-def _embed_texts(texts: List[str]) -> List[List[float]]:
-    client = _get_openai_client()
-    response = client.embeddings.create(
-        model=settings.EMBEDDING_MODEL,
-        input=texts,
-    )
-    return [item.embedding for item in response.data]
 
 def initialize_vector_store(documents: List[Dict[str, Any]]) -> bool:
-    """
-    初始化向量数据库，将文档数据存入向量库
-    """
+    """Ingest raw docs into Chroma through loader -> chunker -> embedder -> indexer."""
     try:
-        # 初始化向量数据库客户端
-        client = chromadb.PersistentClient(path=settings.CHROMA_DB_PATH)
-        
-        # 获取或创建集合
-        collection = client.get_or_create_collection("software_recommendations")
-        
-        # 准备数据
-        ids = [str(i) for i in range(len(documents))]
-        texts = [doc["content"] for doc in documents]
-        metadatas = [doc.get("metadata", {}) for doc in documents]
-        
-        # 计算嵌入向量
-        embeddings = _embed_texts(texts)
-        
-        # 添加到集合中
-        collection.add(
-            ids=ids,
-            documents=texts,
-            metadatas=metadatas,
-            embeddings=embeddings
+        normalized_documents = normalize_documents(documents)
+        if not normalized_documents:
+            logger.warning("No valid documents to ingest")
+            return False
+
+        chunks = chunk_documents(
+            normalized_documents,
+            chunk_size=settings.CHUNK_SIZE,
+            chunk_overlap=settings.CHUNK_OVERLAP,
         )
-        
-        logger.info(f"成功添加 {len(documents)} 个文档到向量数据库")
+        if not chunks:
+            logger.warning("Chunking produced no content")
+            return False
+
+        chunk_ids = [str(chunk["id"]) for chunk in chunks]
+        chunk_texts = [str(chunk["content"]) for chunk in chunks]
+        metadatas = [dict(chunk.get("metadata", {})) for chunk in chunks]
+
+        embeddings = embed_texts(chunk_texts)
+        indexed_count = index_embeddings(
+            chunk_ids=chunk_ids,
+            chunk_texts=chunk_texts,
+            metadatas=metadatas,
+            embeddings=embeddings,
+        )
+
+        logger.info(
+            "Ingested %s documents into %s chunks (%s indexed vectors)",
+            len(normalized_documents),
+            len(chunks),
+            indexed_count,
+        )
         return True
-    except Exception as e:
-        logger.error(f"初始化向量数据库失败: {str(e)}")
+    except Exception as exc:
+        logger.error("Failed to initialize vector store: %s", str(exc))
         return False
