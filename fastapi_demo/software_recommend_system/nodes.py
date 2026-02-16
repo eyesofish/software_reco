@@ -111,6 +111,73 @@ def _is_drawing_request(text: str) -> bool:
             return True
     return False
 
+KNOWN_FACTS_MARKER = "[Known User Facts]"
+ALL_TECH_TERMS = tuple(
+    str(term).strip()
+    for group in TECH_TERMS.values()
+    for term in group
+    if str(term).strip()
+)
+SHORT_AMBIGUOUS_TECH_TERMS = {"go", "ci", "cd"}
+CHAT_FIRST_PATTERNS = (
+    re.compile(r"^\s*(你好|您好|嗨|哈喽|早上好|下午好|晚上好)\s*[!！。?？]?\s*$"),
+    re.compile(r"^\s*(谢谢|多谢|再见|拜拜)\s*[!！。]?\s*$"),
+    re.compile(r"(?i)^\s*(hi|hello|hey|good morning|good afternoon|good evening)\b"),
+    re.compile(r"(?i)^\s*(thanks|thank you|bye|goodbye)\b"),
+    re.compile(r"(我是谁|我叫什么|你记得我吗|你还记得我|你是谁|你能做什么)"),
+    re.compile(r"(?i)\b(who am i|what is my name|what's my name|whats my name|who are you)\b"),
+    re.compile(r"^\s*(?:我叫|我是)\s*[\u4e00-\u9fffA-Za-z][\u4e00-\u9fffA-Za-z0-9_\-]{0,31}\s*$"),
+    re.compile(r"(?i)^\s*(?:my name is|i am|i'm)\s+[A-Za-z][A-Za-z\-' ]{0,40}\s*$"),
+)
+RAG_INTENT_PATTERNS = (
+    re.compile(
+        r"(?i)\b(recommend|comparison|compare|versus|vs|architecture|design|implement|"
+        r"build|deploy|optimize|tech stack|framework|database|vector database|"
+        r"rag|llm|agent|langgraph|langchain)\b"
+    ),
+    re.compile(r"(推荐|对比|比较|选型|架构|方案|实现|部署|优化|技术栈|数据库|向量库|检索|召回)"),
+)
+
+def _extract_current_user_query(raw_query: str) -> str:
+    query = (raw_query or "").strip()
+    if not query:
+        return ""
+    marker_index = query.find(KNOWN_FACTS_MARKER)
+    if marker_index >= 0:
+        return query[:marker_index].strip()
+    return query
+
+def _contains_tech_term(query_lower: str, term: str) -> bool:
+    normalized_term = (term or "").strip().lower()
+    if not normalized_term:
+        return False
+    if re.search(r"[a-z0-9]", normalized_term):
+        boundary_pattern = rf"(?<![a-z0-9]){re.escape(normalized_term)}(?![a-z0-9])"
+        return re.search(boundary_pattern, query_lower) is not None
+    return normalized_term in query_lower
+
+def _collect_tech_hits(query: str) -> List[str]:
+    lowered = (query or "").lower()
+    if not lowered:
+        return []
+    hits: List[str] = []
+    for term in ALL_TECH_TERMS:
+        if _contains_tech_term(lowered, term):
+            hits.append(term)
+    return hits
+
+def _is_chat_first_query(query: str) -> bool:
+    normalized = (query or "").strip()
+    if not normalized:
+        return True
+    return any(pattern.search(normalized) for pattern in CHAT_FIRST_PATTERNS)
+
+def _has_rag_intent(query: str) -> bool:
+    normalized = (query or "").strip()
+    if not normalized:
+        return False
+    return any(pattern.search(normalized) for pattern in RAG_INTENT_PATTERNS)
+
 def entry_node(state: AgentState) -> Dict[str, Any]:
     """用户输入节点"""
     logger.info(f"接收用户查询: {state.user_query[:50]}...")
@@ -125,24 +192,36 @@ def entry_node(state: AgentState) -> Dict[str, Any]:
     }
 
 def routing_node(state: AgentState) -> Dict[str, Any]:
-    """路由节点，决定使用 RAG、Chat 还是画图模式"""
+    """Routing node: decide between rag/chat/draw."""
     user_query = _get_field(state, "user_query", "")
-    
-    if _is_drawing_request(user_query):
-        return {"mode": "draw"}
-    
-    # 检查是否包含技术术语，决定使用哪种模式
-    query_lower = user_query.lower()
-    has_framework = any(term.lower() in query_lower for term_list in TECH_TERMS.values() for term in term_list)
-    has_tech_keywords = any(keyword in query_lower for keyword in ["版本", "推荐", "对比", "优缺点", "技术栈"])
-    
-    mode = "rag" if (has_framework or has_tech_keywords) else "chat"
-    
-    logger.info(f"路由到 {mode} 模式")
-    
-    return {
-        "mode": mode
-    }
+    routing_query = _extract_current_user_query(user_query)
+
+    if _is_drawing_request(routing_query):
+        mode = "draw"
+        tech_hits: List[str] = []
+    elif _is_chat_first_query(routing_query) and not _has_rag_intent(routing_query):
+        mode = "chat"
+        tech_hits = []
+    else:
+        tech_hits = _collect_tech_hits(routing_query)
+        has_rag_intent = _has_rag_intent(routing_query)
+        if has_rag_intent:
+            mode = "rag"
+        elif len(tech_hits) >= 2:
+            mode = "rag"
+        elif len(tech_hits) == 1 and tech_hits[0].lower() not in SHORT_AMBIGUOUS_TECH_TERMS:
+            mode = "rag"
+        else:
+            mode = "chat"
+
+    logger.info(
+        "route mode=%s raw_query=%r routing_query=%r tech_hits=%s",
+        mode,
+        user_query[:120],
+        routing_query[:120],
+        tech_hits[:8],
+    )
+    return {"mode": mode}
 
 def query_normalization_node(state: AgentState) -> Dict[str, Any]:
     """查询规范化节点"""
@@ -685,3 +764,4 @@ def draw_image_node(state: AgentState) -> Dict[str, Any]:
     image_url = draw_image_tool(structured_params)
     final_answer = f"图像已生成: {image_url}"
     return {"image_result": image_url, "final_answer": final_answer}
+
