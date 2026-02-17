@@ -4,6 +4,7 @@ import { useNavigate } from 'react-router-dom'
 import ROUTES from '~/constants/routes'
 import scroller from '~/services/scroller'
 import Store from '~/services/store'
+import { I18N, type AppLanguage, setStoredLanguage, useAppLanguage } from '~/services/language'
 import { disConfig, useConfig } from '~/stores/config'
 import { toggleAutoSaveChats, updateConfig } from '~/stores/config/actions'
 import Button from '~/components/button'
@@ -23,6 +24,8 @@ export default function Config () {
   const renderCount = useRef(0)
   const rowContainerRef = useRef<HTMLDivElement>(null)
   const config = useConfig('config')
+  const language = useAppLanguage()
+  const text = I18N[language]
   const [modelName, setModelName] = useState(config.modelName)
   const [modelUrl, setModelUrl] = useState(config.modelUrl)
   const [theme, setTheme] = useState<ThemeOption>('dark')
@@ -31,7 +34,7 @@ export default function Config () {
   const navigate = useNavigate()
 
   function handleClearAll () {
-    const confirmed = confirm('Are you sure you want to delete everything?\nThis cannot be undone.')
+    const confirmed = confirm(text.clearAllConfirm)
     if (!confirmed) return
     Store.clear()
     navigate(ROUTES.ROOT)
@@ -52,6 +55,11 @@ export default function Config () {
     setTheme(value)
     localStorage.setItem('theme', value)
     document.documentElement.setAttribute('data-theme', value)
+  }
+
+  function handleLanguageChange (event: ChangeEvent<HTMLSelectElement>) {
+    const value = event.target.value as AppLanguage
+    setStoredLanguage(value)
   }
 
   function handleEnableSplashChange () {
@@ -105,23 +113,31 @@ export default function Config () {
         <Filler />
         <Filler height='auto' width='88%'>
           <ThemeContainer>
-            <ThemeLabel htmlFor='theme'>Theme</ThemeLabel>
+            <ThemeLabel htmlFor='language'>{text.language}</ThemeLabel>
+            <ThemeSelect id='language' value={language} onChange={handleLanguageChange}>
+              <option value='en'>{text.english}</option>
+              <option value='zh'>{text.chinese}</option>
+            </ThemeSelect>
+          </ThemeContainer>
+          <Filler height={fillerRef.current.height} />
+          <ThemeContainer>
+            <ThemeLabel htmlFor='theme'>{text.theme}</ThemeLabel>
             <ThemeSelect id='theme' value={theme} onChange={handleThemeChange}>
-              <option value='dark'>Dark</option>
-              <option value='light'>Light</option>
+              <option value='dark'>{text.dark}</option>
+              <option value='light'>{text.light}</option>
             </ThemeSelect>
           </ThemeContainer>
           <Filler height={fillerRef.current.height} />
           <Toggle
             checked={enableSplash}
             id='enableSplash'
-            label='Enable splash animation'
+            label={text.enableSplashAnimation}
             onChange={handleEnableSplashChange}
           />
           <Filler height={fillerRef.current.height} />
           <ThemeContainer>
             <ThemeLabel htmlFor='starSpeed'>
-              Animation speed ({starSpeed.toFixed(1)}x)
+              {text.animationSpeed} ({starSpeed.toFixed(1)}x)
             </ThemeLabel>
             <input
               id='starSpeed'
@@ -137,23 +153,23 @@ export default function Config () {
           <Filler height={fillerRef.current.height} />
           <Toggle
             checked={config.autoSaveChats} id='autoSaveChats'
-            label='Save all chats' onChange={() => disConfig(toggleAutoSaveChats())}
+            label={text.saveAllChats} onChange={() => disConfig(toggleAutoSaveChats())}
           />
           <Filler height={fillerRef.current.height} />
           <TextInput
-            placeholder='Model URL' value={modelUrl}
+            placeholder={text.modelUrl} value={modelUrl}
             onChange={e => setModelUrl(e.target.value)}
           />
           <Filler height={fillerRef.current.height} />
           <TextInput
-            placeholder='Model Name' value={modelName}
+            placeholder={text.modelName} value={modelName}
             onChange={e => setModelName(e.target.value)}
           />
           <Filler height={fillerRef.current.height} />
           <ButtonsContainer>
-            <Button onClick={handleClearAll}>Clear all</Button>
-            <Button onClick={() => navigate(ROUTES.GO_BACK)}>Chat</Button>
-            <Button onClick={handleSave}>Save</Button>
+            <Button onClick={handleClearAll}>{text.clearAll}</Button>
+            <Button onClick={() => navigate(ROUTES.GO_BACK)}>{text.chat}</Button>
+            <Button onClick={handleSave}>{text.save}</Button>
           </ButtonsContainer>
         </Filler>
         <Filler />

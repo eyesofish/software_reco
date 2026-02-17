@@ -1,5 +1,6 @@
 ﻿import { useEffect, useRef } from 'react'
 
+import { I18N, useAppLanguage } from '~/services/language'
 import '~/styles/splash.css'
 
 interface Star {
@@ -24,6 +25,7 @@ function getStarSpeedMultiplier () {
 
 export default function SplashScreen () {
   const canvasRef = useRef<HTMLCanvasElement>(null)
+  const language = useAppLanguage()
 
   useEffect(() => {
     const canvas = canvasRef.current
@@ -102,7 +104,7 @@ export default function SplashScreen () {
   return (
     <div className='splash-container'>
       <canvas id='starfield' ref={canvasRef}></canvas>
-      <div className='splash-text'>Software Recommendation System</div>
+      <div className='splash-text'>{I18N[language].splashTitle}</div>
     </div>
   )
 }
