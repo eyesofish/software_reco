@@ -14,9 +14,9 @@ export default function reducer (
       return { chats: [...state.chats] }
     }
     case 'DELETE_CHAT': {
-      if (!Array.isArray(state.chats[action.payload])) return state
-      state.chats.splice(action.payload, 1)
-      return { chats: [...state.chats] }
+      const nextChats = state.chats.filter((_, index) => index !== action.payload)
+      if (nextChats.length === state.chats.length) return state
+      return { chats: nextChats }
     }
     case 'LOAD_CHATS': {
       return { chats: [...action.payload] }

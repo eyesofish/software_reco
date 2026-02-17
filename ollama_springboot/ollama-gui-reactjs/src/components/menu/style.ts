@@ -9,12 +9,28 @@ export const ButtonsContainer = styled.div`
   width: 100%;
 `
 
+export const ChatRow = styled.div`
+  align-items: center;
+  display: flex;
+  gap: 8px;
+  margin-bottom: 4px;
+  width: 100%;
+
+  .delete-btn {
+    opacity: 0;
+  }
+
+  &:hover .delete-btn {
+    opacity: 1;
+  }
+`
+
 export const Chat = styled(Link)`
   border-radius: 4px;
   color: rgba(255,255,255,0.25);
   cursor: pointer;
   display: block;
-  margin-bottom: 4px;
+  flex: 1;
   overflow: hidden;
   padding: 4px;
   text-overflow: ellipsis;
@@ -25,6 +41,22 @@ export const Chat = styled(Link)`
   &:hover {
     background-color: rgba(255,255,255,0.25);
     box-shadow: 0 0 0 4px rgba(0, 122, 255, 0.2);
+    color: #fff;
+  }
+`
+
+export const DeleteButton = styled.button`
+  background: transparent;
+  border: none;
+  color: rgba(255, 255, 255, 0.75);
+  cursor: pointer;
+  font-size: 18px;
+  line-height: 1;
+  min-width: 18px;
+  padding: 0 4px;
+  transition: color 0.2s ease, opacity 0.2s ease;
+
+  &:hover {
     color: #fff;
   }
 `
