@@ -27,9 +27,8 @@ export default function Chat () {
 
   const navigate = useNavigate()
   const { chat } = useParams()
-  const [index, setIndex] = useState<number|null>(null)
+  const [currentChatId, setCurrentChatId] = useState<number|null>(null)
   const [loading, setLoading] = useState(true)
-  const [talkMessages, setTalkMessages] = useState<Message[]>([])
   const [streamingAssistantContent, setStreamingAssistantContent] = useState('')
   const chats = useChats('chats')
   const { autoSaveChats, modelName, modelUrl } = useConfig('config')
@@ -58,14 +57,23 @@ export default function Chat () {
     return {}
   }
 
+  function handleDeleteChat (chatId : number) {
+    if (currentChatId !== chatId) return
+    setCurrentChatId(null)
+    setStreamingAssistantContent('')
+    activeConversationId.current = undefined
+    activeSessionId.current = undefined
+    setLoading(false)
+  }
+
   function requestHandler () {
-    if (loading) return
+    if (loading || currentChatId === null) return
     const messageText = getMessageText()
     if (!messageText) return
     setLoading(true)
     setStreamingAssistantContent('')
 
-    const currentMessages = chats[index as number] || []
+    const currentMessages = chats[currentChatId] || []
     const refs = resolveConversationRefs(currentMessages)
     activeConversationId.current = refs.conversationId
     activeSessionId.current = refs.sessionId
@@ -78,8 +86,7 @@ export default function Chat () {
     const messagesForRequest = [...currentMessages, userMessage]
 
     clearTextArea()
-    setTalkMessages(messages => [...messages, userMessage])
-    disChats(addMessage({ index: index as number, message: userMessage }))
+    disChats(addMessage({ index: currentChatId, message: userMessage }))
     assistantMessage.current = createAssistantMessage('')
     requester(
       modelUrl,
@@ -109,9 +116,9 @@ export default function Chat () {
       activeConversationId.current = conversationId
       activeSessionId.current = sessionId
 
-      setTalkMessages(messages => [...messages, finalAssistantMessage])
       setStreamingAssistantContent('')
-      disChats(addMessage({ index: index as number, message: finalAssistantMessage }))
+      if (currentChatId !== null)
+        disChats(addMessage({ index: currentChatId, message: finalAssistantMessage }))
       setLoading(false)
     }
   }
@@ -140,40 +147,43 @@ export default function Chat () {
   }, [autoSaveChats, chats])
 
   useEffect(() => {
-    if (index === null) {
+    if (currentChatId === null) {
+      setStreamingAssistantContent('')
+      setLoading(false)
       return
     }
-    if (index < 0 || index > chats.length) {
+    if (currentChatId < 0 || currentChatId > chats.length) {
       navigate(ROUTES.ROOT)
       return
     }
     scroller(rowContainerRef, 1)
     setStreamingAssistantContent('')
-    setTalkMessages(chats[index] || [])
-    const refs = resolveConversationRefs(chats[index])
+    const refs = resolveConversationRefs(chats[currentChatId])
     activeConversationId.current = refs.conversationId
     activeSessionId.current = refs.sessionId
     setLoading(false)
-  }, [index])
+  }, [chats, currentChatId, navigate])
 
   useEffect(() => {
     textAreaRef.current?.focus()
-    setTalkMessages([])
     setStreamingAssistantContent('')
-    setIndex(getChatIndex())
+    setCurrentChatId(getChatIndex())
   }, [chat])
 
-  const hasTalk = talkMessages.length > 0 || !!streamingAssistantContent
+  const messages = currentChatId === null
+    ? []
+    : chats[currentChatId] || []
+  const hasTalk = messages.length > 0 || !!streamingAssistantContent
 
   return (
     <RowContainer ref={rowContainerRef}>
-      <Menu loading={loading} scrollRef={rowContainerRef} />
+      <Menu loading={loading} onDeleteChat={handleDeleteChat} scrollRef={rowContainerRef} />
       <ColumnContainer style={{ padding: 8, paddingRight: 0 }}>
         { loading && <Loading src={LOADING} /> }
         { hasTalk
           ? (
             <Talk>
-              {talkMessages.map((message, messageIndex) => (
+              {messages.map((message, messageIndex) => (
                 message.role === 'assistant'
                   ? (
                     <div

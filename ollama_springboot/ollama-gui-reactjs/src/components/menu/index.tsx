@@ -13,16 +13,18 @@ import { ButtonsContainer, Chat, ChatRow, ChatsContainer, Container, DeleteButto
 
 interface MenuProps {
   loading ?: boolean,
+  onDeleteChat ?: (chatIndex : number) => void,
   scrollRef : React.RefObject<HTMLElement>
 }
 
-export default function Menu ({ loading, scrollRef } : MenuProps) {
+export default function Menu ({ loading, onDeleteChat, scrollRef } : MenuProps) {
 
   const navigate = useNavigate()
   const isMobile = useIsMobile()
   const chats = useChats('chats')
 
   function deleteSingleChat (chatIndex : number) {
+    onDeleteChat?.(chatIndex)
     const updatedChats = chats.filter((_, index) => index !== chatIndex)
     disChats(deleteChat(chatIndex))
     Store.set('chats', updatedChats)
