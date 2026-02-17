@@ -7,9 +7,13 @@ interface SplashScreenProps {
   children ?: JSX.Element
 }
 
+function isSplashEnabled () {
+  return localStorage.getItem('enableSplash') !== 'false'
+}
+
 function SplashLifecycle ({ children } : SplashScreenProps) {
 
-  const [showSplash, setShowSplash] = useState(true)
+  const [showSplash, setShowSplash] = useState(() => isSplashEnabled())
 
   useEffect(() => {
     if (!children) {
@@ -18,9 +22,21 @@ function SplashLifecycle ({ children } : SplashScreenProps) {
     }
 
     let active = true
+    const enableSplash = isSplashEnabled()
+    const bootPromise = AppBoot.run()
+
+    if (!enableSplash) {
+      bootPromise.finally(() => {
+        if (active) setShowSplash(false)
+      })
+      return () => {
+        active = false
+      }
+    }
+
     const minSplashDelay = new Promise(resolve => setTimeout(resolve, 3000))
 
-    Promise.all([AppBoot.run(), minSplashDelay]).finally(() => {
+    Promise.all([bootPromise, minSplashDelay]).finally(() => {
       if (active) setShowSplash(false)
     })
 

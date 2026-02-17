@@ -26,6 +26,7 @@ export default function Config () {
   const [modelName, setModelName] = useState(config.modelName)
   const [modelUrl, setModelUrl] = useState(config.modelUrl)
   const [theme, setTheme] = useState<ThemeOption>('dark')
+  const [enableSplash, setEnableSplash] = useState(true)
   const navigate = useNavigate()
 
   function handleClearAll () {
@@ -52,6 +53,12 @@ export default function Config () {
     document.documentElement.setAttribute('data-theme', value)
   }
 
+  function handleEnableSplashChange () {
+    const value = !enableSplash
+    setEnableSplash(value)
+    localStorage.setItem('enableSplash', String(value))
+  }
+
   useEffect(() => {
     scroller(rowContainerRef, 1)
   }, [])
@@ -61,6 +68,12 @@ export default function Config () {
     const initialTheme = savedTheme === 'light' ? 'light' : 'dark'
     setTheme(initialTheme)
     document.documentElement.setAttribute('data-theme', initialTheme)
+  }, [])
+
+  useEffect(() => {
+    const savedEnableSplash = localStorage.getItem('enableSplash')
+    if (savedEnableSplash === null) return
+    setEnableSplash(savedEnableSplash === 'true')
   }, [])
 
   useEffect(() => {
@@ -82,6 +95,13 @@ export default function Config () {
               <option value='light'>Light</option>
             </ThemeSelect>
           </ThemeContainer>
+          <Filler height={fillerRef.current.height} />
+          <Toggle
+            checked={enableSplash}
+            id='enableSplash'
+            label='Enable splash animation'
+            onChange={handleEnableSplashChange}
+          />
           <Filler height={fillerRef.current.height} />
           <Toggle
             checked={config.autoSaveChats} id='autoSaveChats'
