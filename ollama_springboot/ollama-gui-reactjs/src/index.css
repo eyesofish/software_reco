@@ -4,6 +4,7 @@
 }
 
 :root {
+  --app-font-size: 16px;
   --bg-color: #1C1C1E;
   --text-color: #F8F8F8;
 }
@@ -17,7 +18,7 @@
   border: none;
   box-sizing: border-box;
   font-family: 'SF Pro', sans-serif;
-  font-size: 16px;
+  font-size: var(--app-font-size);
   margin: 0;
   padding: 0;
   text-decoration: none;

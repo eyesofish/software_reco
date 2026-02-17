@@ -31,7 +31,14 @@ export default function Config () {
   const [theme, setTheme] = useState<ThemeOption>('dark')
   const [enableSplash, setEnableSplash] = useState(true)
   const [starSpeed, setStarSpeed] = useState(1)
+  const [fontSize, setFontSize] = useState(16)
   const navigate = useNavigate()
+
+  function applyFontSize (value: number) {
+    const clamped = Math.min(20, Math.max(14, value))
+    setFontSize(clamped)
+    document.documentElement.style.setProperty('--app-font-size', `${clamped}px`)
+  }
 
   function handleClearAll () {
     const confirmed = confirm(text.clearAllConfirm)
@@ -74,6 +81,12 @@ export default function Config () {
     localStorage.setItem('starSpeed', String(value))
   }
 
+  function handleFontSizeChange (event: ChangeEvent<HTMLInputElement>) {
+    const value = Number(event.target.value)
+    applyFontSize(value)
+    localStorage.setItem('fontSize', String(Math.min(20, Math.max(14, value))))
+  }
+
   useEffect(() => {
     scroller(rowContainerRef, 1)
   }, [])
@@ -98,6 +111,22 @@ export default function Config () {
     if (Number.isNaN(parsed)) return
     const clamped = Math.min(2, Math.max(0.1, parsed))
     setStarSpeed(clamped)
+  }, [])
+
+  useEffect(() => {
+    const savedFontSize = localStorage.getItem('fontSize')
+    if (savedFontSize === null) {
+      applyFontSize(16)
+      return
+    }
+
+    const parsed = Number(savedFontSize)
+    if (Number.isNaN(parsed)) {
+      applyFontSize(16)
+      return
+    }
+
+    applyFontSize(parsed)
   }, [])
 
   useEffect(() => {
@@ -148,6 +177,22 @@ export default function Config () {
               style={{ width: '100%' }}
               type='range'
               value={starSpeed}
+            />
+          </ThemeContainer>
+          <Filler height={fillerRef.current.height} />
+          <ThemeContainer>
+            <ThemeLabel htmlFor='fontSize'>
+              {text.fontSize} ({fontSize}px)
+            </ThemeLabel>
+            <input
+              id='fontSize'
+              max='20'
+              min='14'
+              onChange={handleFontSizeChange}
+              step='1'
+              style={{ width: '100%' }}
+              type='range'
+              value={fontSize}
             />
           </ThemeContainer>
           <Filler height={fillerRef.current.height} />
