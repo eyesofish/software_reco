@@ -12,6 +12,16 @@ interface Star {
 
 const STAR_COUNT = 220
 
+function getStarSpeedMultiplier () {
+  const savedStarSpeed = localStorage.getItem('starSpeed')
+  if (savedStarSpeed === null) return 1
+
+  const parsed = Number(savedStarSpeed)
+  if (Number.isNaN(parsed)) return 1
+
+  return Math.min(2, Math.max(0.1, parsed))
+}
+
 export default function SplashScreen () {
   const canvasRef = useRef<HTMLCanvasElement>(null)
 
@@ -28,12 +38,13 @@ export default function SplashScreen () {
     let width = 0
     let height = 0
     let stars: Star[] = []
+    const speedMultiplier = getStarSpeedMultiplier()
 
     function createStar (initialY ?: number) : Star {
       return {
         alpha: 0.2 + Math.random() * 0.7,
         radius: 0.4 + Math.random() * 1.8,
-        speed: 0.15 + Math.random() * 0.65,
+        speed: (0.15 + Math.random() * 0.65) * speedMultiplier,
         x: Math.random() * width,
         y: initialY ?? Math.random() * height
       }

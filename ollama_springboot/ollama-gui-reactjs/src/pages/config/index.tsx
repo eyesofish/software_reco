@@ -27,6 +27,7 @@ export default function Config () {
   const [modelUrl, setModelUrl] = useState(config.modelUrl)
   const [theme, setTheme] = useState<ThemeOption>('dark')
   const [enableSplash, setEnableSplash] = useState(true)
+  const [starSpeed, setStarSpeed] = useState(1)
   const navigate = useNavigate()
 
   function handleClearAll () {
@@ -59,6 +60,12 @@ export default function Config () {
     localStorage.setItem('enableSplash', String(value))
   }
 
+  function handleStarSpeedChange (event: ChangeEvent<HTMLInputElement>) {
+    const value = Number(event.target.value)
+    setStarSpeed(value)
+    localStorage.setItem('starSpeed', String(value))
+  }
+
   useEffect(() => {
     scroller(rowContainerRef, 1)
   }, [])
@@ -74,6 +81,15 @@ export default function Config () {
     const savedEnableSplash = localStorage.getItem('enableSplash')
     if (savedEnableSplash === null) return
     setEnableSplash(savedEnableSplash === 'true')
+  }, [])
+
+  useEffect(() => {
+    const savedStarSpeed = localStorage.getItem('starSpeed')
+    if (savedStarSpeed === null) return
+    const parsed = Number(savedStarSpeed)
+    if (Number.isNaN(parsed)) return
+    const clamped = Math.min(2, Math.max(0.1, parsed))
+    setStarSpeed(clamped)
   }, [])
 
   useEffect(() => {
@@ -102,6 +118,22 @@ export default function Config () {
             label='Enable splash animation'
             onChange={handleEnableSplashChange}
           />
+          <Filler height={fillerRef.current.height} />
+          <ThemeContainer>
+            <ThemeLabel htmlFor='starSpeed'>
+              Animation speed ({starSpeed.toFixed(1)}x)
+            </ThemeLabel>
+            <input
+              id='starSpeed'
+              max='2.0'
+              min='0.1'
+              onChange={handleStarSpeedChange}
+              step='0.1'
+              style={{ width: '100%' }}
+              type='range'
+              value={starSpeed}
+            />
+          </ThemeContainer>
           <Filler height={fillerRef.current.height} />
           <Toggle
             checked={config.autoSaveChats} id='autoSaveChats'
