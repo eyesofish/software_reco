@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { type ChangeEvent, useEffect, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 
 import ROUTES from '~/constants/routes'
@@ -12,7 +12,9 @@ import Footer from '~/components/footer'
 import Menu from '~/components/menu'
 import TextInput from '~/components/textInput'
 import Toggle from '~/components/toggle'
-import { ButtonsContainer } from './style'
+import { ButtonsContainer, ThemeContainer, ThemeLabel, ThemeSelect } from './style'
+
+type ThemeOption = 'dark' | 'light'
 
 
 export default function Config () {
@@ -23,6 +25,7 @@ export default function Config () {
   const config = useConfig('config')
   const [modelName, setModelName] = useState(config.modelName)
   const [modelUrl, setModelUrl] = useState(config.modelUrl)
+  const [theme, setTheme] = useState<ThemeOption>('dark')
   const navigate = useNavigate()
 
   function handleClearAll () {
@@ -37,10 +40,27 @@ export default function Config () {
     disConfig(updateConfig({
       ...config, modelName, modelUrl
     }))
+    localStorage.setItem('theme', theme)
+    document.documentElement.setAttribute('data-theme', theme)
+    navigate('/')
+  }
+
+  function handleThemeChange (event: ChangeEvent<HTMLSelectElement>) {
+    const value = event.target.value as ThemeOption
+    setTheme(value)
+    localStorage.setItem('theme', value)
+    document.documentElement.setAttribute('data-theme', value)
   }
 
   useEffect(() => {
     scroller(rowContainerRef, 1)
+  }, [])
+
+  useEffect(() => {
+    const savedTheme = localStorage.getItem('theme')
+    const initialTheme = savedTheme === 'light' ? 'light' : 'dark'
+    setTheme(initialTheme)
+    document.documentElement.setAttribute('data-theme', initialTheme)
   }, [])
 
   useEffect(() => {
@@ -55,6 +75,14 @@ export default function Config () {
       <ColumnContainer>
         <Filler />
         <Filler height='auto' width='88%'>
+          <ThemeContainer>
+            <ThemeLabel htmlFor='theme'>Theme</ThemeLabel>
+            <ThemeSelect id='theme' value={theme} onChange={handleThemeChange}>
+              <option value='dark'>Dark</option>
+              <option value='light'>Light</option>
+            </ThemeSelect>
+          </ThemeContainer>
+          <Filler height={fillerRef.current.height} />
           <Toggle
             checked={config.autoSaveChats} id='autoSaveChats'
             label='Save all chats' onChange={() => disConfig(toggleAutoSaveChats())}

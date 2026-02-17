@@ -3,6 +3,16 @@
   src: url('./assets/fonts/sf-pro-regular.otf') format('opentype');
 }
 
+:root {
+  --bg-color: #1C1C1E;
+  --text-color: #F8F8F8;
+}
+
+:root[data-theme='light'] {
+  --bg-color: #F4F4F5;
+  --text-color: #1C1C1E;
+}
+
 * {
   border: none;
   box-sizing: border-box;
@@ -27,8 +37,8 @@ a:active {
 
 body {
   align-items: center;
-  background-color: #1C1C1E;
-  color: #F8F8F8;
+  background-color: var(--bg-color);
+  color: var(--text-color);
   display: flex;
   height: 100svh;
   justify-content: center;
