@@ -1,6 +1,33 @@
+.assistantMessage {
+  margin-bottom: 12px;
+  white-space: normal;
+}
+
+.assistantMessage p {
+  margin: 0 0 8px;
+}
+
+.assistantMessage p:last-child {
+  margin-bottom: 0;
+}
+
+.assistantMessage pre {
+  background-color: rgba(0, 0, 0, 0.2);
+  border-radius: 8px;
+  margin: 8px 0;
+  overflow-x: auto;
+  padding: 8px;
+}
+
+.assistantMessage code {
+  font-family: "Courier New", Courier, monospace;
+}
+
 .userMessage {
   background-color: rgba(255,255,255,0.25);
   border-radius: 8px;
+  margin-bottom: 12px;
+  margin-left: auto;
   padding: 8px;
   width: fit-content;
 }

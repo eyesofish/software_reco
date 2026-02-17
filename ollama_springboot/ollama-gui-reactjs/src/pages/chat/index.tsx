@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
+import ReactMarkdown from 'react-markdown'
 
 import ROUTES from '~/constants/routes'
 import { Message, ModelResponse } from '~/entities/messages'
@@ -28,6 +29,8 @@ export default function Chat () {
   const { chat } = useParams()
   const [index, setIndex] = useState<number|null>(null)
   const [loading, setLoading] = useState(true)
+  const [talkMessages, setTalkMessages] = useState<Message[]>([])
+  const [streamingAssistantContent, setStreamingAssistantContent] = useState('')
   const chats = useChats('chats')
   const { autoSaveChats, modelName, modelUrl } = useConfig('config')
   const assistantMessage = useRef<Message>(createAssistantMessage(''))
@@ -35,7 +38,6 @@ export default function Chat () {
   const activeSessionId = useRef<string|undefined>(undefined)
   const renderCount = useRef(0)
   const rowContainerRef = useRef<HTMLDivElement>(null)
-  const talkRef = useRef<HTMLDivElement>(null)
   const textAreaRef = useRef<HTMLTextAreaElement>(null)
 
   function resolveConversationRefs (messages : Message[]|undefined) : {
@@ -61,6 +63,7 @@ export default function Chat () {
     const messageText = getMessageText()
     if (!messageText) return
     setLoading(true)
+    setStreamingAssistantContent('')
 
     const currentMessages = chats[index as number] || []
     const refs = resolveConversationRefs(currentMessages)
@@ -74,7 +77,8 @@ export default function Chat () {
     )
     const messagesForRequest = [...currentMessages, userMessage]
 
-    updateTalk(false, userMessage)
+    clearTextArea()
+    setTalkMessages(messages => [...messages, userMessage])
     disChats(addMessage({ index: index as number, message: userMessage }))
     assistantMessage.current = createAssistantMessage('')
     requester(
@@ -89,8 +93,8 @@ export default function Chat () {
 
   function responseHandler (response : ModelResponse) {
     if (response.message.content) {
-      updateTalk(false, response.message)
       assistantMessage.current.content += response.message.content
+      setStreamingAssistantContent(content => content + response.message.content)
     }
     if (response.done) {
       const conversationId = response.conversation_id || activeConversationId.current
@@ -105,7 +109,8 @@ export default function Chat () {
       activeConversationId.current = conversationId
       activeSessionId.current = sessionId
 
-      appendBr(2)
+      setTalkMessages(messages => [...messages, finalAssistantMessage])
+      setStreamingAssistantContent('')
       disChats(addMessage({ index: index as number, message: finalAssistantMessage }))
       setLoading(false)
     }
@@ -114,6 +119,7 @@ export default function Chat () {
   function errorHandler (error : unknown) {
     alert('Something went wrong :-(')
     console.error(error)
+    setStreamingAssistantContent('')
     setLoading(false)
   }
 
@@ -121,40 +127,9 @@ export default function Chat () {
     return textAreaRef.current?.value as string
   }
 
-  function updateTalk (loaded : boolean, { role, content } : Message) {
-    roles[role](content)
-    if (loaded && role === 'assistant') {
-      appendBr(2)
-    }
-  }
-
-  const roles : {
-    [key in Message['role']] : (content : string) => void
-  } = {
-    assistant: content => {
-      const span = document.createElement('span')
-      span.innerText = content
-      talkRef.current?.appendChild(span)
-    },
-    user: content => {
-      clearTextArea()
-      const p = document.createElement('p')
-      p.classList.add('userMessage')
-      p.innerText = content
-      talkRef.current?.appendChild(p)
-      appendBr()
-    }
-  }
-
   function clearTextArea () {
     (textAreaRef.current as HTMLTextAreaElement).value = ''
     textAreaRef.current?.focus()
-  }
-
-  function appendBr (amount = 1) {
-    for (let i = 0; i < amount; i++) {
-      talkRef.current?.appendChild(document.createElement('br'))
-    }
   }
 
   useEffect(() => {
@@ -173,27 +148,55 @@ export default function Chat () {
       return
     }
     scroller(rowContainerRef, 1)
-    if (chats[index]) {
-      if (!loading) setLoading(true)
-      chats[index].forEach(message => {
-        updateTalk(true, message)
-      })
-    }
+    setStreamingAssistantContent('')
+    setTalkMessages(chats[index] || [])
+    const refs = resolveConversationRefs(chats[index])
+    activeConversationId.current = refs.conversationId
+    activeSessionId.current = refs.sessionId
     setLoading(false)
   }, [index])
 
   useEffect(() => {
     textAreaRef.current?.focus()
-    talkRef.current?.replaceChildren()
+    setTalkMessages([])
+    setStreamingAssistantContent('')
     setIndex(getChatIndex())
   }, [chat])
+
+  const hasTalk = talkMessages.length > 0 || !!streamingAssistantContent
 
   return (
     <RowContainer ref={rowContainerRef}>
       <Menu loading={loading} scrollRef={rowContainerRef} />
       <ColumnContainer style={{ padding: 8, paddingRight: 0 }}>
         { loading && <Loading src={LOADING} /> }
-        { chats.length ? <Talk ref={talkRef} /> : <About /> }
+        { hasTalk
+          ? (
+            <Talk>
+              {talkMessages.map((message, messageIndex) => (
+                message.role === 'assistant'
+                  ? (
+                    <div
+                      className='assistantMessage'
+                      key={`${message.time}-assistant-${messageIndex}`}
+                    >
+                      <ReactMarkdown>{message.content}</ReactMarkdown>
+                    </div>
+                    )
+                  : (
+                    <p className='userMessage' key={`${message.time}-user-${messageIndex}`}>
+                      {message.content}
+                    </p>
+                    )
+              ))}
+              { streamingAssistantContent && (
+                <div className='assistantMessage assistantMessageStreaming'>
+                  <ReactMarkdown>{streamingAssistantContent}</ReactMarkdown>
+                </div>
+              ) }
+            </Talk>
+            )
+          : <About /> }
         <InputContainer>
           <TextArea
             placeholder='Message Ollama'
