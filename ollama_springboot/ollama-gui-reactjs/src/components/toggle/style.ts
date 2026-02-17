@@ -19,8 +19,10 @@ export const Checkbox = styled.input`
 
 export const Container = styled.div`
   align-items: center;
+  color: var(--config-toggle-label-color);
   display: flex;
   justify-content: space-between;
+  transition: color 0.3s ease;
   width: 100%;
 `
 

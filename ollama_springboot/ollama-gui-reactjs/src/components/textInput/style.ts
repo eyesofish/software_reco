@@ -1,18 +1,23 @@
 import styled from 'styled-components'
 
 export const Input = styled.input`
-  background-color: rgba(255,255,255,0.25);
-  border: 1px solid #dcdcdc;
+  background-color: var(--config-input-bg-color);
+  border: 1px solid var(--config-input-border-color);
   border-radius: 8px;
   box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
-  color: #fff;
+  color: var(--config-input-text-color);
   margin-right: 8px;
   outline: none;
   overflow-y: hidden;
   padding: 12px 16px;
   resize: none;
-  transition: border-color 0.3s, box-shadow 0.3s;
+  transition: background-color 0.3s, border-color 0.3s, box-shadow 0.3s, color 0.3s;
   width: 100%;
+
+  &::placeholder {
+    color: var(--config-input-placeholder-color);
+    transition: color 0.3s;
+  }
 
   &:focus {
     border-color: #007aff;

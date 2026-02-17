@@ -6,11 +6,21 @@
 :root {
   --app-font-size: 16px;
   --bg-color: #1C1C1E;
+  --config-input-bg-color: rgba(255, 255, 255, 0.25);
+  --config-input-border-color: #dcdcdc;
+  --config-input-placeholder-color: rgba(248, 248, 248, 0.75);
+  --config-input-text-color: #ffffff;
+  --config-toggle-label-color: #f8f8f8;
   --text-color: #F8F8F8;
 }
 
 :root[data-theme='light'] {
   --bg-color: #F4F4F5;
+  --config-input-bg-color: rgba(255, 255, 255, 0.88);
+  --config-input-border-color: #c7c7cf;
+  --config-input-placeholder-color: rgba(28, 28, 30, 0.5);
+  --config-input-text-color: #1c1c1e;
+  --config-toggle-label-color: #1c1c1e;
   --text-color: #1C1C1E;
 }
 
