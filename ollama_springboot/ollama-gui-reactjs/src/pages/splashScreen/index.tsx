@@ -1,36 +1,38 @@
 import { Suspense, useEffect, useState } from 'react'
-import { CSSTransition } from 'react-transition-group'
 
+import SplashScreen from '~/components/SplashScreen'
 import AppBoot from '~/services/appBoot'
-import { Container, Logo } from './style'
-import './animations.css'
 
 interface SplashScreenProps {
   children ?: JSX.Element
 }
 
-function SplashScreen ({ children } : SplashScreenProps) {
+function SplashLifecycle ({ children } : SplashScreenProps) {
 
-  const [booting, setBooting] = useState(true)
+  const [showSplash, setShowSplash] = useState(true)
 
   useEffect(() => {
-    if (!children) return
-    AppBoot.run().then(() => setBooting(false))
+    if (!children) {
+      setShowSplash(false)
+      return
+    }
+
+    let active = true
+    const minSplashDelay = new Promise(resolve => setTimeout(resolve, 3000))
+
+    Promise.all([AppBoot.run(), minSplashDelay]).finally(() => {
+      if (active) setShowSplash(false)
+    })
+
+    return () => {
+      active = false
+    }
   }, [])
 
   return (
     <>
-    <CSSTransition
-      classNames='anim'
-      in={booting}
-      timeout={500}
-      unmountOnExit={true}
-    >
-      <Container>
-        <Logo src={`${process.env.PUBLIC_URL}/favicon.svg`} />
-      </Container>
-    </CSSTransition>
-    { children }
+      { showSplash && <SplashScreen /> }
+      { children }
     </>
   )
 
@@ -40,7 +42,7 @@ export default function LoadingWrapper ({ children } : SplashScreenProps) {
 
   return (
     <Suspense fallback={<SplashScreen />}>
-      <SplashScreen>{ children }</SplashScreen>
+      <SplashLifecycle>{ children }</SplashLifecycle>
     </Suspense>
   )
 
