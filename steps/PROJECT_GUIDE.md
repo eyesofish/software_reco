@@ -62,6 +62,33 @@ uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
 文件：`fastapi_demo/app/api/v1/routes.py`  
 函数：`_get_or_create_session_state`、`_merge_session_facts`、`_append_session_messages`
 
+完整链路（从拿到 `session_id` 到更新 `facts/messages`）：
+1. 入参先做 ID 归一化（`models.py`）  
+`RecommendationRequest` / `RecommendationConfirmRequest` 的 `normalize_ids` 会把 `conversation_id` 映射到 `session_id`。
+2. `POST /recommend` 拿到 `session_id`  
+路由里执行 `session_id = request_data.session_id or uuid4().hex`，客户端没传就服务端新生成。
+3. 先尝试更新 facts（只处理姓名事实）  
+`_upsert_name_fact_from_query(session_id, query)` -> `_extract_name_fact` 抽取姓名；命中则调用 `_merge_session_facts` 写入 `facts.user_name`，并更新 `updated_at`。
+4. 读取当前会话状态  
+`_get_or_create_session_state(session_id)`：  
+- 若已存在：规范化后返回；  
+- 若不存在：创建 `{"facts": {}, "messages": [], "updated_at": now}` 并立刻落盘。  
+会话内存来自进程启动时 `_load_session_state_store()` 从 `.runtime/fastapi_session_state.json` 加载。
+5. 把历史消息喂给 Agent  
+`session_messages = _normalize_session_messages(state["messages"])`，随后放入 `AgentState(messages=...)`，并用 `thread_id=session_id` 调用 LangGraph。
+6. `POST /recommend` 里 messages 的三种写回分支  
+- 记忆直答分支（用户问“我是谁”且已有 `user_name`）：写入 2 条消息（`user` + `assistant`）。  
+- 人工确认中断分支（`awaiting_human_confirmation`）：先写入 1 条 `user`，等待 `/recommend/confirm`。  
+- 正常完成分支：写入 2 条消息（`user` + `assistant(final_answer)`）。
+7. `POST /recommend/confirm` 的 messages 写回  
+恢复图执行后，若拿到 `final_answer`，调用 `_append_session_messages(session_id, [{"role":"assistant","content":...}])` 追加 1 条 `assistant`。
+8. `_append_session_messages` 的统一行为  
+先 normalize 增量消息，再拿旧历史合并，最终 `state["messages"] = history[-SESSION_MAX_MESSAGES:]`（只保留最近 N 条），更新 `updated_at` 并落盘。
+9. facts 的手动更新入口  
+`PUT /session-state/{session_id}` -> `_merge_session_facts(session_id, request_data.facts)`，用于外部直接补充/覆盖 facts（同样会更新时间并落盘）。
+10. 并发与持久化保证  
+`_get_or_create_session_state`、`_merge_session_facts`、`_append_session_messages` 都在 `_SESSION_LOCK` 下操作；每次写操作后都会调用 `_persist_session_state_store_locked()` 写回 `.runtime/fastapi_session_state.json`。
+
 3. 构造 `AgentState` 并调用 LangGraph  
 文件：`fastapi_demo/app/api/v1/routes.py`  
 函数：`run_agent_async`  

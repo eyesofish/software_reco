@@ -405,8 +405,17 @@ def sub_question_generation_node(state: AgentState) -> Dict[str, Any]:
             if len(parts) > 1:
                 sub_questions = [part.strip() for part in parts if part.strip()]
 
+    logger.warning(
+        "SUBQ_READY count=%d preview=%s",
+        len(sub_questions),
+        sub_questions[:3],
+    )
+
     return {
-        "sub_questions": sub_questions
+        "sub_questions": sub_questions,
+        "pending_sub_questions": sub_questions,
+        "awaiting_human_confirmation": True,
+        "human_confirmation_done": False,
     }
 
 
@@ -423,7 +432,7 @@ def _normalize_sub_questions(raw: Any) -> List[str]:
     return cleaned
 
 
-async def human_confirmation_node(state: AgentState) -> Dict[str, Any]:
+def human_confirmation_node(state: AgentState) -> Dict[str, Any]:
     """
     Human-in-the-loop 阻塞节点：
     1) 首次到达时通过 interrupt 暂停；
@@ -435,6 +444,17 @@ async def human_confirmation_node(state: AgentState) -> Dict[str, Any]:
         fallback_query = str(_get_field(state, "normalized_query", "")).strip()
         original_sub_questions = [fallback_query] if fallback_query else []
 
+    # Guard against unexpected re-entry after a successful confirm within the same graph run.
+    if bool(_get_field(state, "human_confirmation_done", False)):
+        logger.warning(
+            "HITL_BYPASS_ALREADY_CONFIRMED subq_count=%d",
+            len(original_sub_questions),
+        )
+        return {
+            "awaiting_human_confirmation": False,
+            "pending_sub_questions": [],
+        }
+
     request_payload = {
         "type": "human_confirmation",
         "query": _get_field(state, "user_query", ""),
@@ -442,21 +462,24 @@ async def human_confirmation_node(state: AgentState) -> Dict[str, Any]:
         "instruction": "Return JSON only: {\"action\":\"confirm|edit\", \"sub_questions\":[...], \"comment\":\"...\"}",
     }
 
+    logger.warning(
+        "HITL_INTERRUPT_ENTER subq_count=%d preview=%s",
+        len(original_sub_questions),
+        original_sub_questions[:3],
+    )
+
     try:
         human_input = interrupt(request_payload)
     except RuntimeError as exc:
-        # Python 3.10 async runtime may not provide LangGraph runnable context for interrupt().
+        # Never auto-confirm when interrupt context is missing; fail fast for caller-side handling.
         if "Called get_config outside of a runnable context" not in str(exc):
             raise
-        logger.warning(
-            "LangGraph interrupt context unavailable; auto-confirming sub-questions."
+        logger.error(
+            "Interrupt called without LangGraph runnable context; refusing auto-confirm."
         )
-        return {
-            "sub_questions": original_sub_questions,
-            "awaiting_human_confirmation": False,
-            "pending_sub_questions": [],
-            "human_feedback": "",
-        }
+        raise RuntimeError(
+            "Interrupt requires an active LangGraph runnable context."
+        ) from exc
 
     action = str(_get_field(human_input, "action", "confirm")).strip().lower()
     if action not in {"confirm", "edit"}:
@@ -466,11 +489,19 @@ async def human_confirmation_node(state: AgentState) -> Dict[str, Any]:
     comment = str(_get_field(human_input, "comment", "")).strip()
     final_sub_questions = edited_sub_questions if action == "edit" and edited_sub_questions else original_sub_questions
 
+    logger.warning(
+        "HITL_RESUMED action=%s edited_count=%d final_count=%d",
+        action,
+        len(edited_sub_questions),
+        len(final_sub_questions),
+    )
+
     return {
         "sub_questions": final_sub_questions,
         "awaiting_human_confirmation": False,
         "pending_sub_questions": [],
         "human_feedback": comment,
+        "human_confirmation_done": True,
     }
 
 
@@ -479,7 +510,12 @@ def evidence_collection_node(state: AgentState) -> Dict[str, Any]:
     sub_questions = _get_field(state, "sub_questions", [])
     evidence = _get_field(state, "evidence", [])
     iteration_count = _get_field(state, "iteration_count", 0)
-    
+
+    logger.warning(
+        "EVIDENCE_COLLECTION_ENTER iteration=%d subq_count=%d",
+        iteration_count,
+        len(sub_questions),
+    )
     logger.info(f"收集证据，迭代次数: {iteration_count}, 子问题数量: {len(sub_questions)}")
     
     # 为每个子问题收集证据
@@ -507,7 +543,7 @@ def evidence_collection_node(state: AgentState) -> Dict[str, Any]:
 def evidence_evaluation_node(state: AgentState) -> Dict[str, Any]:
     """证据评估节点"""
     evidence = _get_field(state, "evidence", [])
-    
+
     logger.info(f"评估 {len(evidence)} 个证据项")
     
     # 在实际应用中，这里会使用 LLM 来评估证据的质量
@@ -684,7 +720,12 @@ def answer_generation_node(state: AgentState) -> Dict[str, Any]:
     user_query = _get_field(state, "user_query", "")
     candidates = _get_field(state, "candidates", [])
     evidence = _get_field(state, "evidence", [])
-    
+
+    logger.warning(
+        "ANSWER_GENERATION_ENTER candidate_count=%d evidence_count=%d",
+        len(candidates),
+        len(evidence),
+    )
     logger.info(f"生成最终答案，基于 {len(candidates)} 个候选方案")
     
     if candidates:
@@ -764,4 +805,5 @@ def draw_image_node(state: AgentState) -> Dict[str, Any]:
     image_url = draw_image_tool(structured_params)
     final_answer = f"图像已生成: {image_url}"
     return {"image_result": image_url, "final_answer": final_answer}
+
 

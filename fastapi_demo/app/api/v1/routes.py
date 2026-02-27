@@ -3,6 +3,7 @@ import json
 import os
 import re
 import time
+import asyncio
 from pathlib import Path
 from threading import RLock
 from typing import Any, Dict, List, Optional
@@ -50,6 +51,9 @@ INVALID_NAME_VALUES = {
     "what",
     "who",
 }
+CONFIRM_SHORT_QUERY_PATTERN = re.compile(
+    r"(?i)^\s*(?:\u786e\u8ba4|\u7ee7\u7eed|\u7ee7\u7eed\u5427|\u597d\u7684|\u597d|ok|okay|yes|y|go on|continue)\s*[.!?\u3002\uff01\uff1f]*\s*$"
+)
 SESSION_STATE_FILE = Path(os.getenv("SESSION_STATE_FILE", ".runtime/fastapi_session_state.json"))
 SESSION_MAX_MESSAGES = int(os.getenv("SESSION_MAX_MESSAGES", "30"))
 _SESSION_LOCK = RLock()
@@ -156,6 +160,36 @@ def _extract_interrupt_payload(result: Any) -> Optional[Dict[str, Any]]:
     return {"type": "human_confirmation", "message": str(payload)}
 
 
+def _normalize_pending_sub_questions(raw: Any) -> List[str]:
+    if isinstance(raw, str):
+        raw = [raw]
+    if not isinstance(raw, list):
+        return []
+    normalized: List[str] = []
+    for item in raw:
+        text = str(item or "").strip()
+        if text:
+            normalized.append(text)
+    return normalized
+
+
+def _build_human_confirmation_ack(sub_questions: List[str]) -> str:
+    normalized = _normalize_pending_sub_questions(sub_questions)
+    if not normalized:
+        raise ValueError("pending_sub_questions must not be empty for human confirmation ACK")
+
+    preview = "\n".join(
+        f"{idx + 1}. {question}" for idx, question in enumerate(normalized[:3])
+    )
+    suffix = "\n..." if len(normalized) > 3 else ""
+    return (
+        "已收到请求，当前已生成子问题，正在等待确认后继续执行。\n"
+        "Status: waiting for confirmation.\n"
+        "请调用 /api/v1/recommend/confirm，并使用 action=confirm 或 action=edit。\n"
+        f"待确认子问题预览：\n{preview}{suffix}"
+    )
+
+
 def _extract_name_fact(query: str) -> Optional[str]:
     if not query or _is_asking_user_name(query):
         return None
@@ -205,6 +239,13 @@ def _is_asking_user_name(query: str) -> bool:
 
     lowered = normalized.lower()
     return ("what's my name" in lowered) or ("whats my name" in lowered)
+
+
+def _is_confirmation_short_query(query: str) -> bool:
+    normalized = (query or "").strip()
+    if not normalized:
+        return False
+    return CONFIRM_SHORT_QUERY_PATTERN.search(normalized) is not None
 
 
 def _get_or_create_session_state(session_id: str) -> Dict[str, Any]:
@@ -302,6 +343,89 @@ async def get_software_recommendation(request_data: RecommendationRequest):
                 awaiting_human_confirmation=False,
             )
 
+        if _is_confirmation_short_query(request_data.query):
+            logger.warning(
+                "HITL_CONFIRM_SHORTCUT session_id=%s query=%r",
+                session_id,
+                request_data.query,
+            )
+            config = {"configurable": {"thread_id": session_id}}
+            resume_payload = {
+                "action": "confirm",
+                "sub_questions": [],
+                "comment": request_data.query,
+            }
+            result = await run_agent_async(AGENT, Command(resume=resume_payload), config=config)
+            interrupt_payload = _extract_interrupt_payload(result)
+            if interrupt_payload and interrupt_payload.get("type") == "human_confirmation":
+                pending_sub_questions = _normalize_pending_sub_questions(
+                    interrupt_payload.get("sub_questions", [])
+                )
+                if pending_sub_questions:
+                    ack_message = _build_human_confirmation_ack(pending_sub_questions)
+                    logger.warning(
+                        "HITL_ACK_RETURN session_id=%s pending_count=%d source=confirm_shortcut",
+                        session_id,
+                        len(pending_sub_questions),
+                    )
+                    _append_session_messages(
+                        session_id,
+                        [
+                            {"role": "user", "content": request_data.query},
+                            {"role": "assistant", "content": ack_message},
+                        ],
+                    )
+                    return RecommendationResponse(
+                        status="awaiting_human_confirmation",
+                        final_answer=ack_message,
+                        candidates=[],
+                        mode="rag",
+                        iteration_count=0,
+                        coverage=0.0,
+                        session_id=session_id,
+                        awaiting_human_confirmation=True,
+                        pending_sub_questions=pending_sub_questions,
+                    )
+
+            final_answer = _get_value(result, "final_answer", "")
+            if final_answer:
+                _append_session_messages(
+                    session_id,
+                    [
+                        {"role": "user", "content": request_data.query},
+                        {"role": "assistant", "content": final_answer},
+                    ],
+                )
+                return RecommendationResponse(
+                    status="success",
+                    final_answer=final_answer,
+                    candidates=_get_value(result, "candidates", []),
+                    mode=_get_value(result, "mode", ""),
+                    iteration_count=_get_value(result, "iteration_count", 0),
+                    coverage=_get_value(result, "coverage", 0.0),
+                    session_id=session_id,
+                    awaiting_human_confirmation=False,
+                )
+
+            fallback_answer = "当前没有待确认任务，请直接提交新的需求问题。"
+            _append_session_messages(
+                session_id,
+                [
+                    {"role": "user", "content": request_data.query},
+                    {"role": "assistant", "content": fallback_answer},
+                ],
+            )
+            return RecommendationResponse(
+                status="success",
+                final_answer=fallback_answer,
+                candidates=[],
+                mode="chat",
+                iteration_count=0,
+                coverage=1.0,
+                session_id=session_id,
+                awaiting_human_confirmation=False,
+            )
+
         effective_query = request_data.query
         if known_name:
             effective_query = (
@@ -324,20 +448,41 @@ async def get_software_recommendation(request_data: RecommendationRequest):
         result = await run_agent_async(AGENT, state, config=config)
         interrupt_payload = _extract_interrupt_payload(result)
         if interrupt_payload and interrupt_payload.get("type") == "human_confirmation":
+            pending_sub_questions = _normalize_pending_sub_questions(
+                interrupt_payload.get("sub_questions", [])
+            )
+            if not pending_sub_questions:
+                logger.error(
+                    "HITL_ACK_ABORT session_id=%s reason=empty_sub_questions payload=%s",
+                    session_id,
+                    interrupt_payload,
+                )
+                raise RuntimeError(
+                    "Interrupted for human confirmation but no sub-questions were produced."
+                )
+            ack_message = _build_human_confirmation_ack(pending_sub_questions)
+            logger.warning(
+                "HITL_ACK_RETURN session_id=%s pending_count=%d",
+                session_id,
+                len(pending_sub_questions),
+            )
             _append_session_messages(
                 session_id,
-                [{"role": "user", "content": request_data.query}],
+                [
+                    {"role": "user", "content": request_data.query},
+                    {"role": "assistant", "content": ack_message},
+                ],
             )
             return RecommendationResponse(
                 status="awaiting_human_confirmation",
-                final_answer="",
+                final_answer=ack_message,
                 candidates=[],
                 mode="rag",
                 iteration_count=0,
                 coverage=0.0,
                 session_id=session_id,
                 awaiting_human_confirmation=True,
-                pending_sub_questions=interrupt_payload.get("sub_questions", []),
+                pending_sub_questions=pending_sub_questions,
             )
 
         final_answer = _get_value(result, "final_answer", "")
@@ -370,24 +515,79 @@ async def get_software_recommendation(request_data: RecommendationRequest):
 async def confirm_software_recommendation(request_data: RecommendationConfirmRequest):
     try:
         config = {"configurable": {"thread_id": request_data.session_id}}
+        edited_sub_questions = _normalize_pending_sub_questions(request_data.sub_questions or [])
+        effective_action = request_data.action
+        if effective_action == "edit" and not edited_sub_questions:
+            logger.warning(
+                "HITL_EDIT_EMPTY_SUBQ session_id=%s action=edit treated_as=confirm",
+                request_data.session_id,
+            )
+            effective_action = "confirm"
+
         resume_payload = {
-            "action": request_data.action,
-            "sub_questions": request_data.sub_questions or [],
+            "action": effective_action,
+            "sub_questions": edited_sub_questions if effective_action == "edit" else [],
             "comment": request_data.comment or "",
         }
         result = await run_agent_async(AGENT, Command(resume=resume_payload), config=config)
         interrupt_payload = _extract_interrupt_payload(result)
+
+        # Defensive loop breaker: confirm should consume the pending interrupt and continue.
+        if effective_action == "confirm":
+            for retry in range(2):
+                if not (interrupt_payload and interrupt_payload.get("type") == "human_confirmation"):
+                    break
+                logger.warning(
+                    "HITL_CONFIRM_REINTERRUPT session_id=%s retry=%d",
+                    request_data.session_id,
+                    retry + 1,
+                )
+                result = await run_agent_async(AGENT, Command(resume=resume_payload), config=config)
+                interrupt_payload = _extract_interrupt_payload(result)
+
         if interrupt_payload and interrupt_payload.get("type") == "human_confirmation":
+            if effective_action == "confirm":
+                logger.error(
+                    "HITL_CONFIRM_LOOP_DETECTED session_id=%s payload=%s",
+                    request_data.session_id,
+                    interrupt_payload,
+                )
+                raise RuntimeError(
+                    "Human confirmation loop detected: confirm action re-entered interrupt."
+                )
+
+            pending_sub_questions = _normalize_pending_sub_questions(
+                interrupt_payload.get("sub_questions", [])
+            )
+            if not pending_sub_questions:
+                logger.error(
+                    "HITL_ACK_ABORT session_id=%s reason=empty_sub_questions payload=%s",
+                    request_data.session_id,
+                    interrupt_payload,
+                )
+                raise RuntimeError(
+                    "Interrupted for human confirmation but no sub-questions were produced."
+                )
+            ack_message = _build_human_confirmation_ack(pending_sub_questions)
+            logger.warning(
+                "HITL_ACK_RETURN session_id=%s pending_count=%d",
+                request_data.session_id,
+                len(pending_sub_questions),
+            )
+            _append_session_messages(
+                request_data.session_id,
+                [{"role": "assistant", "content": ack_message}],
+            )
             return RecommendationResponse(
                 status="awaiting_human_confirmation",
-                final_answer="",
+                final_answer=ack_message,
                 candidates=[],
                 mode="rag",
                 iteration_count=0,
                 coverage=0.0,
                 session_id=request_data.session_id,
                 awaiting_human_confirmation=True,
-                pending_sub_questions=interrupt_payload.get("sub_questions", []),
+                pending_sub_questions=pending_sub_questions,
             )
 
         final_answer = _get_value(result, "final_answer", "")
@@ -436,11 +636,35 @@ async def upsert_session_state(session_id: str, request_data: SessionStateUpdate
 
 async def run_agent_async(agent, graph_input: Any, config: Optional[Dict[str, Any]] = None):
     """Run the agent asynchronously."""
+    checkpointer = getattr(agent, "checkpointer", None)
+    checkpointer_type = type(checkpointer).__name__
+    checkpointer_module = getattr(type(checkpointer), "__module__", "")
+
+    # SqliteSaver is sync-only in some LangGraph versions; avoid ainvoke NotImplementedError loop.
+    if (
+        checkpointer_type == "SqliteSaver"
+        and "langgraph.checkpoint.sqlite" in checkpointer_module
+        and ".aio" not in checkpointer_module
+    ):
+        return await asyncio.to_thread(agent.invoke, graph_input, config=config)
+
     try:
-        result = await agent.ainvoke(graph_input, config=config)
-        return result
+        return await agent.ainvoke(graph_input, config=config)
+    except (TypeError, NotImplementedError) as exc:
+        # Fallback for mixed-version environments with partial async support.
+        error_text = str(exc)
+        if (
+            "does not support async methods" not in error_text
+            and "AsyncSqliteSaver" not in error_text
+        ):
+            raise
+        logger.warning(
+            "Agent async invocation is unavailable for current checkpointer; "
+            "falling back to sync invoke in thread pool.",
+        )
+        return await asyncio.to_thread(agent.invoke, graph_input, config=config)
     except Exception as exc:
-        print(f"Error running agent: {exc}")
+        logger.exception("Error running agent: %s", exc)
         raise
 
 
@@ -495,3 +719,5 @@ async def initialize_database():
             status_code=500,
             detail=f"Error initializing database: {exc}",
         ) from exc
+
+

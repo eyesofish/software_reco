@@ -42,4 +42,5 @@ class AgentState(BaseModel):
     awaiting_human_confirmation: bool = False
     human_feedback: str = ""
     pending_sub_questions: List[str] = Field(default_factory=list)
+    human_confirmation_done: bool = False
     session_id: str = ""

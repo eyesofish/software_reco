@@ -17,16 +17,75 @@ from .nodes import (
     draw_image_node
 )
 import logging
+import atexit
+import sqlite3
 import time
 import os
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
+_SQLITE_CHECKPOINTER_RESOURCE = None
 
 try:
     from langgraph.checkpoint.sqlite import SqliteSaver  # type: ignore
-except Exception:  # pragma: no cover - optional dependency
-    SqliteSaver = None  # type: ignore
+    _SQLITE_CHECKPOINTER_IMPORT_ERROR = None
+    _SQLITE_CHECKPOINTER_IMPORT_SOURCE = "langgraph.checkpoint.sqlite"
+except Exception as primary_exc:  # pragma: no cover - optional dependency
+    try:
+        # Compatibility fallback for environments exposing sqlite saver via top-level package.
+        from langgraph_checkpoint.sqlite import SqliteSaver  # type: ignore
+        _SQLITE_CHECKPOINTER_IMPORT_ERROR = None
+        _SQLITE_CHECKPOINTER_IMPORT_SOURCE = "langgraph_checkpoint.sqlite"
+    except Exception as secondary_exc:  # pragma: no cover - optional dependency
+        _SQLITE_CHECKPOINTER_IMPORT_SOURCE = None
+        _SQLITE_CHECKPOINTER_IMPORT_ERROR = (
+            f"primary={primary_exc}; fallback={secondary_exc}"
+        )
+        SqliteSaver = None  # type: ignore
+
+
+def _build_sqlite_checkpointer(checkpoint_path: Path):
+    global _SQLITE_CHECKPOINTER_RESOURCE
+    if SqliteSaver is None:
+        raise RuntimeError("SqliteSaver is unavailable")
+
+    maybe_checkpointer = SqliteSaver.from_conn_string(str(checkpoint_path))
+    if hasattr(maybe_checkpointer, "put") and hasattr(maybe_checkpointer, "get_tuple"):
+        logger.info("Using SqliteSaver checkpointer at %s", checkpoint_path)
+        return maybe_checkpointer
+
+    # Some versions return a context manager that yields a saver.
+    enter = getattr(maybe_checkpointer, "__enter__", None)
+    exit_ = getattr(maybe_checkpointer, "__exit__", None)
+    if callable(enter) and callable(exit_):
+        saver = enter()
+        if not (hasattr(saver, "put") and hasattr(saver, "get_tuple")):
+            raise TypeError(
+                "SqliteSaver.from_conn_string() context manager returned invalid saver type: "
+                f"{type(saver).__name__}"
+            )
+        _SQLITE_CHECKPOINTER_RESOURCE = maybe_checkpointer
+        atexit.register(exit_, None, None, None)
+        logger.info(
+            "Using SqliteSaver checkpointer via context manager at %s", checkpoint_path
+        )
+        return saver
+
+    # Final fallback for compatibility with older/newer APIs.
+    logger.warning(
+        "SqliteSaver.from_conn_string returned %s; fallback to direct sqlite3 connection.",
+        type(maybe_checkpointer).__name__,
+    )
+    conn = sqlite3.connect(str(checkpoint_path), check_same_thread=False)
+    try:
+        saver = SqliteSaver(conn)
+    except Exception:
+        conn.close()
+        raise
+    _SQLITE_CHECKPOINTER_RESOURCE = conn
+    atexit.register(conn.close)
+    logger.info("Using SqliteSaver checkpointer via direct sqlite3 connection at %s", checkpoint_path)
+    return saver
 
 
 def _build_checkpointer():
@@ -34,12 +93,29 @@ def _build_checkpointer():
         os.getenv("LANGGRAPH_CHECKPOINT_PATH", ".runtime/langgraph_checkpoints.sqlite")
     )
     checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
+    logger.info(
+        "Initializing LangGraph checkpointer: path=%s sqlite_imported=%s import_source=%s",
+        checkpoint_path,
+        SqliteSaver is not None,
+        _SQLITE_CHECKPOINTER_IMPORT_SOURCE,
+    )
+
+    if SqliteSaver is None and _SQLITE_CHECKPOINTER_IMPORT_ERROR is not None:
+        logger.warning(
+            "SqliteSaver import unavailable, fallback to MemorySaver. "
+            "Install dependency with: pip install -U langgraph-checkpoint-sqlite",
+        )
 
     if SqliteSaver is not None:
         try:
-            return SqliteSaver.from_conn_string(str(checkpoint_path))
+            checkpointer = _build_sqlite_checkpointer(checkpoint_path)
+            return checkpointer
         except Exception as exc:  # pragma: no cover - defensive fallback
-            logger.warning("Failed to initialize SqliteSaver, fallback to MemorySaver: %s", exc)
+            logger.warning(
+                "Failed to initialize SqliteSaver at %s, fallback to MemorySaver (error_type=%s)",
+                checkpoint_path,
+                type(exc).__name__,
+            )
 
     logger.warning(
         "Using in-memory LangGraph checkpointer. Install sqlite checkpointer for durable resume."
@@ -48,6 +124,7 @@ def _build_checkpointer():
 
 
 _CHECKPOINTER = _build_checkpointer()
+logger.info("Active LangGraph checkpointer type: %s", type(_CHECKPOINTER).__name__)
 
 def create_rag_with_routing_agent():
     """创建带有路由功能的 RAG Agent 图"""

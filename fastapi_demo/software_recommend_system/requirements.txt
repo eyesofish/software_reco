@@ -1,6 +1,7 @@
 langgraph==1.0.6
 langgraph-checkpoint-sqlite>=2.0.0
 langchain-core==1.2.7
+langchain-tavily>=0.2.0
 openai==2.15.0
 chromadb==1.4.1
 pydantic==2.12.5

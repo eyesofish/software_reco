@@ -71,25 +71,47 @@ def similarity_search(query: str, k: int = 5) -> List[Document]:
         if "Collection [software_recommendations] does not exist" in str(e):
             logger.info("向量库无集合 software_recommendations，跳过 similarity_search。")
             return []
-        logger.error(f"向量库搜索失败: {str(e)}")
-        raise
+        logger.warning("向量库搜索失败，降级为空结果: %s", e)
+        return []
 
-# Tavily搜索工具
+# Tavily搜索工具（优先新实现，兼容旧实现）
 try:
-    from langchain_community.tools.tavily_search import TavilySearchResults
+    from langchain_tavily import TavilySearch  # type: ignore
+    _TAVILY_NEW_IMPORT_ERROR = None
+except Exception as exc:  # pragma: no cover - optional dependency
+    TavilySearch = None  # type: ignore
+    _TAVILY_NEW_IMPORT_ERROR = exc
 
-    tavily_api_key = os.getenv("TAVILY_API_KEY")
+try:
+    from langchain_community.tools.tavily_search import TavilySearchResults  # type: ignore
+    _TAVILY_LEGACY_IMPORT_ERROR = None
+except Exception as exc:  # pragma: no cover - optional dependency
+    TavilySearchResults = None  # type: ignore
+    _TAVILY_LEGACY_IMPORT_ERROR = exc
 
-    search_tool = None
-    if tavily_api_key:
+tavily_api_key = os.getenv("TAVILY_API_KEY")
+search_tool = None
+if tavily_api_key:
+    if TavilySearch is not None:
+        search_tool = TavilySearch(max_results=TAVILY_MAX_RESULTS)
+        logger.info("Using Tavily search implementation: langchain_tavily.TavilySearch")
+    elif TavilySearchResults is not None:
         search_tool = TavilySearchResults(max_results=TAVILY_MAX_RESULTS)
         search_tool.name = "search_tool"
         search_tool.description = "一个用于搜索最新信息的工具，当需要获取实时信息或补充知识时使用"
+        logger.warning(
+            "Using deprecated TavilySearchResults. Install langchain-tavily and prefer "
+            "langchain_tavily.TavilySearch."
+        )
     else:
-        logger.warning("TAVILY_API_KEY 未设置，跳过 Tavily 搜索工具。")
-except ImportError:
-    logger.warning("Tavily 搜索工具依赖未安装，请安装 langchain-community 以使用搜索功能")
-    search_tool = None
+        logger.warning(
+            "Tavily search dependencies unavailable; install with: pip install -U langchain-tavily "
+            "(fallback legacy package: langchain-community). new_import_error=%s legacy_import_error=%s",
+            _TAVILY_NEW_IMPORT_ERROR,
+            _TAVILY_LEGACY_IMPORT_ERROR,
+        )
+else:
+    logger.warning("TAVILY_API_KEY 未设置，跳过 Tavily 搜索工具。")
 
 def _tavily_search(query: str) -> List[Document]:
     if not search_tool:
@@ -102,8 +124,8 @@ def _tavily_search(query: str) -> List[Document]:
         else:
             raw_results = search_tool(query)
     except Exception as exc:
-        logger.error(f"Tavily 搜索失败: {str(exc)}")
-        raise
+        logger.warning("Tavily 搜索失败，降级为空结果: %s", exc)
+        return []
 
     if not raw_results:
         return []
