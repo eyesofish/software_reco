@@ -7,6 +7,7 @@ import Store from '~/services/store'
 import { I18N, type AppLanguage, setStoredLanguage, useAppLanguage } from '~/services/language'
 import { disConfig, useConfig } from '~/stores/config'
 import { toggleAutoSaveChats, updateConfig } from '~/stores/config/actions'
+import { useAppTheme } from '~/theme'
 import Button from '~/components/button'
 import { ColumnContainer, Filler, RowContainer } from '~/components/containers'
 import Footer from '~/components/footer'
@@ -28,10 +29,10 @@ export default function Config () {
   const text = I18N[language]
   const [modelName, setModelName] = useState(config.modelName)
   const [modelUrl, setModelUrl] = useState(config.modelUrl)
-  const [theme, setTheme] = useState<ThemeOption>('dark')
   const [enableSplash, setEnableSplash] = useState(true)
   const [starSpeed, setStarSpeed] = useState(1)
   const [fontSize, setFontSize] = useState(16)
+  const { themeName, setThemeName } = useAppTheme()
   const navigate = useNavigate()
 
   function applyFontSize (value: number) {
@@ -52,16 +53,12 @@ export default function Config () {
     disConfig(updateConfig({
       ...config, modelName, modelUrl
     }))
-    localStorage.setItem('theme', theme)
-    document.documentElement.setAttribute('data-theme', theme)
     navigate('/')
   }
 
   function handleThemeChange (event: ChangeEvent<HTMLSelectElement>) {
     const value = event.target.value as ThemeOption
-    setTheme(value)
-    localStorage.setItem('theme', value)
-    document.documentElement.setAttribute('data-theme', value)
+    setThemeName(value)
   }
 
   function handleLanguageChange (event: ChangeEvent<HTMLSelectElement>) {
@@ -89,13 +86,6 @@ export default function Config () {
 
   useEffect(() => {
     scroller(rowContainerRef, 1)
-  }, [])
-
-  useEffect(() => {
-    const savedTheme = localStorage.getItem('theme')
-    const initialTheme = savedTheme === 'light' ? 'light' : 'dark'
-    setTheme(initialTheme)
-    document.documentElement.setAttribute('data-theme', initialTheme)
   }, [])
 
   useEffect(() => {
@@ -151,7 +141,7 @@ export default function Config () {
           <Filler height={fillerRef.current.height} />
           <ThemeContainer>
             <ThemeLabel htmlFor='theme'>{text.theme}</ThemeLabel>
-            <ThemeSelect id='theme' value={theme} onChange={handleThemeChange}>
+            <ThemeSelect id='theme' value={themeName} onChange={handleThemeChange}>
               <option value='dark'>{text.dark}</option>
               <option value='light'>{text.light}</option>
             </ThemeSelect>

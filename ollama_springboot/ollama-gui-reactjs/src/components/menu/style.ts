@@ -27,7 +27,7 @@ export const ChatRow = styled.div`
 
 export const Chat = styled(Link)`
   border-radius: 4px;
-  color: rgba(255,255,255,0.25);
+  color: ${({ theme }) => theme.colors.menuText};
   cursor: pointer;
   display: block;
   flex: 1;
@@ -39,16 +39,16 @@ export const Chat = styled(Link)`
   width: 100%;
 
   &:hover {
-    background-color: rgba(255,255,255,0.25);
-    box-shadow: 0 0 0 4px rgba(0, 122, 255, 0.2);
-    color: #fff;
+    background-color: ${({ theme }) => theme.colors.menuHoverBg};
+    box-shadow: 0 0 0 4px ${({ theme }) => theme.colors.accentFocus};
+    color: ${({ theme }) => theme.colors.menuTextActive};
   }
 `
 
 export const DeleteButton = styled.button`
   background: transparent;
   border: none;
-  color: rgba(255, 255, 255, 0.75);
+  color: ${({ theme }) => theme.colors.menuText};
   cursor: pointer;
   font-size: 18px;
   line-height: 1;
@@ -57,7 +57,7 @@ export const DeleteButton = styled.button`
   transition: color 0.2s ease, opacity 0.2s ease;
 
   &:hover {
-    color: #fff;
+    color: ${({ theme }) => theme.colors.menuTextActive};
   }
 `
 
@@ -69,7 +69,10 @@ export const ChatsContainer = styled.div`
 `
 
 export const Container = styled.div<{ isMobile : boolean }>`
-  background-color: rgba(0,0,0,0.2);
+  background-color: ${({ theme }) => theme.colors.menuBg};
+  border-right: 1px solid ${({ theme }) => theme.colors.menuBorder};
+  box-shadow: ${({ theme }) => theme.colors.menuShadow};
+  color: ${({ theme }) => theme.colors.menuText};
   display: flex;
   flex-direction: column;
   height: 100%;

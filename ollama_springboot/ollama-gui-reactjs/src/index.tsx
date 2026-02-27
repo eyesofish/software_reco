@@ -4,6 +4,7 @@ import { RouterProvider } from 'react-router-dom'
 
 import '~/index.css'
 import router from '~/router'
+import { AppThemeProvider } from '~/theme'
 
 const root = ReactDOM.createRoot(
   document.getElementById('root') as HTMLElement
@@ -11,6 +12,8 @@ const root = ReactDOM.createRoot(
 
 root.render(
   <React.StrictMode>
-    <RouterProvider router={router} />
+    <AppThemeProvider>
+      <RouterProvider router={router} />
+    </AppThemeProvider>
   </React.StrictMode>
 )

@@ -1,4 +1,5 @@
-﻿import { useEffect, useRef } from 'react'
+import { useEffect, useRef } from 'react'
+import { useTheme } from 'styled-components'
 
 import { I18N, useAppLanguage } from '~/services/language'
 import '~/styles/splash.css'
@@ -23,9 +24,20 @@ function getStarSpeedMultiplier () {
   return Math.min(2, Math.max(0.1, parsed))
 }
 
+function hexToRgb (hex: string) {
+  const trimmed = hex.replace('#', '')
+  if (trimmed.length !== 6) return { r: 255, g: 255, b: 255 }
+  const r = parseInt(trimmed.substring(0, 2), 16)
+  const g = parseInt(trimmed.substring(2, 4), 16)
+  const b = parseInt(trimmed.substring(4, 6), 16)
+  if (Number.isNaN(r) || Number.isNaN(g) || Number.isNaN(b)) return { r: 255, g: 255, b: 255 }
+  return { r, g, b }
+}
+
 export default function SplashScreen () {
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const language = useAppLanguage()
+  const theme = useTheme()
 
   useEffect(() => {
     const canvas = canvasRef.current
@@ -41,6 +53,7 @@ export default function SplashScreen () {
     let height = 0
     let stars: Star[] = []
     const speedMultiplier = getStarSpeedMultiplier()
+    const starRgb = hexToRgb(theme.colors.splashStar)
 
     function createStar (initialY ?: number) : Star {
       return {
@@ -66,7 +79,7 @@ export default function SplashScreen () {
 
     function drawFrame () {
       drawContext.clearRect(0, 0, width, height)
-      drawContext.fillStyle = '#030612'
+      drawContext.fillStyle = theme.colors.splashCanvasBg
       drawContext.fillRect(0, 0, width, height)
 
       const now = performance.now() * 0.0015
@@ -83,7 +96,7 @@ export default function SplashScreen () {
         const alpha = Math.max(0.12, Math.min(1, star.alpha + twinkle))
 
         drawContext.beginPath()
-        drawContext.fillStyle = `rgba(255, 255, 255, ${alpha})`
+        drawContext.fillStyle = `rgba(${starRgb.r}, ${starRgb.g}, ${starRgb.b}, ${alpha})`
         drawContext.arc(star.x, star.y, star.radius, 0, Math.PI * 2)
         drawContext.fill()
       }
@@ -99,7 +112,7 @@ export default function SplashScreen () {
       window.cancelAnimationFrame(frameId)
       window.removeEventListener('resize', resetCanvas)
     }
-  }, [])
+  }, [theme])
 
   return (
     <div className='splash-container'>

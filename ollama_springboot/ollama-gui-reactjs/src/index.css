@@ -5,23 +5,6 @@
 
 :root {
   --app-font-size: 16px;
-  --bg-color: #1C1C1E;
-  --config-input-bg-color: rgba(255, 255, 255, 0.25);
-  --config-input-border-color: #dcdcdc;
-  --config-input-placeholder-color: rgba(248, 248, 248, 0.75);
-  --config-input-text-color: #ffffff;
-  --config-toggle-label-color: #f8f8f8;
-  --text-color: #F8F8F8;
-}
-
-:root[data-theme='light'] {
-  --bg-color: #F4F4F5;
-  --config-input-bg-color: rgba(255, 255, 255, 0.88);
-  --config-input-border-color: #c7c7cf;
-  --config-input-placeholder-color: rgba(28, 28, 30, 0.5);
-  --config-input-text-color: #1c1c1e;
-  --config-toggle-label-color: #1c1c1e;
-  --text-color: #1C1C1E;
 }
 
 * {
@@ -35,21 +18,21 @@
 }
 
 a {
-  color: #007aff
+  color: var(--color-link)
 }
 
 a:hover {
-  color: #005bb5;
+  color: var(--color-link-hover);
 }
 
 a:active {
-  color: #004a99;
+  color: var(--color-link-active);
 }
 
 body {
   align-items: center;
-  background-color: var(--bg-color);
-  color: var(--text-color);
+  background-color: var(--color-bg);
+  color: var(--color-text);
   display: flex;
   height: 100svh;
   justify-content: center;
@@ -72,20 +55,20 @@ body {
 }
 
 ::-webkit-scrollbar-track {
-  background: #f1f1f1;
+  background: var(--scroll-track);
   border-radius: 6px;
 }
 
 ::-webkit-scrollbar-thumb {
-  background: rgba(0, 0, 0, 0.3);
-  border: 3px solid #f1f1f1;
+  background: var(--scroll-thumb);
+  border: 3px solid var(--scroll-track);
   border-radius: 6px;
 }
 
 ::-webkit-scrollbar-thumb:hover {
-  background: rgba(0, 0, 0, 0.5);
+  background: var(--scroll-thumb-hover);
 }
 
 ::-webkit-scrollbar-thumb:active {
-  background: rgba(0, 0, 0, 0.7);
+  background: var(--scroll-thumb-hover);
 }

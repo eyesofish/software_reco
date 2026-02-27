@@ -17,16 +17,17 @@ export const ThemeLabel = styled.label`
 `
 
 export const ThemeSelect = styled.select`
-  background-color: rgba(255,255,255,0.25);
-  border: 1px solid #dcdcdc;
+  background-color: ${({ theme }) => theme.colors.inputBg};
+  border: 1px solid ${({ theme }) => theme.colors.inputBorder};
   border-radius: 8px;
-  color: inherit;
+  box-shadow: ${({ theme }) => theme.colors.shadowLow};
+  color: ${({ theme }) => theme.colors.inputText};
   outline: none;
   padding: 12px 16px;
   width: 100%;
 
   &:focus {
-    border-color: #007aff;
-    box-shadow: 0 0 0 4px rgba(0, 122, 255, 0.2);
+    border-color: ${({ theme }) => theme.colors.accent};
+    box-shadow: 0 0 0 4px ${({ theme }) => theme.colors.accentFocus};
   }
 `

@@ -1,9 +1,9 @@
 import styled from 'styled-components'
 
 export const Ball = styled.span<{ checked : boolean }>`
-  background-color: white;
+  background-color: ${({ theme }) => theme.colors.toggleKnob};
   border-radius: 50%;
-  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.2);
+  box-shadow: ${({ theme }) => theme.colors.shadowLow};
   height: 26px;
   left: 4px;
   position: absolute;
@@ -19,7 +19,7 @@ export const Checkbox = styled.input`
 
 export const Container = styled.div`
   align-items: center;
-  color: var(--config-toggle-label-color);
+  color: ${({ theme }) => theme.colors.textPrimary};
   display: flex;
   justify-content: space-between;
   transition: color 0.3s ease;
@@ -27,7 +27,7 @@ export const Container = styled.div`
 `
 
 export const Label = styled.label<{ checked : boolean }>`
-  background-color: ${({ checked }) => (checked ? '#007aff' : '#ccc')};
+  background-color: ${({ checked, theme }) => (checked ? theme.colors.toggleTrackChecked : theme.colors.toggleTrack)};
   border-radius: 34px;
   cursor: pointer;
   display: block;
@@ -37,7 +37,7 @@ export const Label = styled.label<{ checked : boolean }>`
   width: 100%;
 
   &:before {
-    background-color: #f0f0f5;
+    background-color: ${({ theme }) => theme.colors.surfaceMuted};
     border-radius: inherit;
     content: '';
     height: 100%;

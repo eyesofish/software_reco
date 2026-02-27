@@ -1,11 +1,11 @@
 import styled from 'styled-components'
 
 export const Input = styled.input`
-  background-color: var(--config-input-bg-color);
-  border: 1px solid var(--config-input-border-color);
+  background-color: ${({ theme }) => theme.colors.inputBg};
+  border: 1px solid ${({ theme }) => theme.colors.inputBorder};
   border-radius: 8px;
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
-  color: var(--config-input-text-color);
+  box-shadow: ${({ theme }) => theme.colors.shadowLow};
+  color: ${({ theme }) => theme.colors.inputText};
   margin-right: 8px;
   outline: none;
   overflow-y: hidden;
@@ -15,12 +15,12 @@ export const Input = styled.input`
   width: 100%;
 
   &::placeholder {
-    color: var(--config-input-placeholder-color);
+    color: ${({ theme }) => theme.colors.inputPlaceholder};
     transition: color 0.3s;
   }
 
   &:focus {
-    border-color: #007aff;
-    box-shadow: 0 0 0 4px rgba(0, 122, 255, 0.2);
+    border-color: ${({ theme }) => theme.colors.accent};
+    box-shadow: 0 0 0 4px ${({ theme }) => theme.colors.accentFocus};
   }
 `

@@ -12,8 +12,10 @@
 }
 
 .assistantMessage pre {
-  background-color: rgba(0, 0, 0, 0.2);
+  background-color: var(--color-assistant-pre);
   border-radius: 8px;
+  border: 1px solid var(--color-code-border);
+  color: var(--color-text);
   margin: 8px 0;
   overflow-x: auto;
   padding: 8px;
@@ -24,20 +26,21 @@
 }
 
 .userMessage {
-  background-color: rgba(255,255,255,0.25);
+  background-color: var(--color-user-bubble);
   border-radius: 8px;
   margin-bottom: 12px;
   margin-left: auto;
+  color: var(--color-text);
   padding: 8px;
   width: fit-content;
 }
 
 .hitlPanel {
-  background: linear-gradient(135deg, #f2efe5 0%, #e9dcc7 100%);
-  border: 1px solid #d6c6aa;
+  background: var(--color-hitl-bg);
+  border: 1px solid var(--color-hitl-border);
   border-radius: 12px;
-  box-shadow: 0 8px 20px rgba(0, 0, 0, 0.14);
-  color: #2f2617;
+  box-shadow: var(--shadow-medium);
+  color: var(--color-hitl-text);
   margin-bottom: 12px;
   padding: 12px;
   width: 90%;
@@ -62,10 +65,10 @@
 }
 
 .hitlConfirmButton {
-  background-color: #106f5a;
+  background-color: var(--color-hitl-button-bg);
   border: none;
   border-radius: 8px;
-  color: #fff;
+  color: var(--color-hitl-button-text);
   cursor: pointer;
   font-family: "Trebuchet MS", "Noto Sans SC", sans-serif;
   font-size: 15px;
@@ -74,6 +77,6 @@
 }
 
 .hitlConfirmButton:disabled {
-  background-color: #88a499;
+  background-color: var(--color-hitl-button-disabled);
   cursor: not-allowed;
 }
