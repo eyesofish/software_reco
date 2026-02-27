@@ -13,6 +13,7 @@ import Store from '~/services/store'
 import { disChats, useChats } from '~/stores/chats'
 import { addMessage } from '~/stores/chats/actions'
 import { useConfig } from '~/stores/config'
+import { useAppLanguage } from '~/services/language'
 import About from '~/components/about'
 import Button from '~/components/button'
 import { ColumnContainer, RowContainer } from '~/components/containers'
@@ -35,6 +36,7 @@ export default function Chat () {
   const [confirmLoading, setConfirmLoading] = useState(false)
   const chats = useChats('chats')
   const { autoSaveChats, modelName, modelUrl } = useConfig('config')
+  const language = useAppLanguage()
   const activeConversationId = useRef<string|undefined>(undefined)
   const activeSessionId = useRef<string|undefined>(undefined)
   const renderCount = useRef(0)
@@ -317,7 +319,7 @@ export default function Chat () {
 
         <InputContainer>
           <TextArea
-            placeholder='Message Ollama'
+            placeholder={language === 'zh' ? '有问题，尽管问' : 'ask any questions'}
             ref={textAreaRef}
           />
           <Button onClick={requestHandler}>
