@@ -28,6 +28,7 @@ app:
   fastapi:
     base-url: http://127.0.0.1:8000
     recommend-path: /api/v1/recommend
+    confirm-path: /api/v1/recommend/confirm
     session-state-path: /api/v1/session-state
   cors:
     allowed-origins: http://localhost:3000,http://127.0.0.1:3000

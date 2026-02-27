@@ -1,4 +1,4 @@
-import { Messages, ModelResponse } from '~/entities/messages'
+import { ConfirmPayload, Messages, ModelResponse } from '~/entities/messages'
 
 function resolveConversationId (messages : Messages) : string|undefined {
   for (let i = messages.length - 1; i >= 0; i--) {
@@ -42,19 +42,38 @@ export default async function requester (
       },
       body: JSON.stringify(payload)
     })
-    const decoder = new TextDecoder()
-    response.body?.pipeTo(new WritableStream({
-      write: chunk => {
-        try {
-          onData(JSON.parse(decoder.decode(chunk)))
-        }
-        catch (error) {
-          onError(error)
-        }
-      }
-    }))
+    if (!response.ok) {
+      throw new Error(`HTTP ${response.status}`)
+    }
+    const responsePayload = await response.json() as ModelResponse
+    onData(responsePayload)
   }
   catch (error) {
     onError(error)
   }
+}
+
+export function resolveConfirmUrl (chatUrl : string) : string {
+  const trimmed = chatUrl.trim().replace(/\/+$/, '')
+  if (trimmed.endsWith('/api/chat')) {
+    return `${trimmed}/confirm`
+  }
+  return `${trimmed}/confirm`
+}
+
+export async function confirmRequester (
+  confirmUrl : string,
+  payload : ConfirmPayload
+) : Promise<ModelResponse> {
+  const response = await fetch(confirmUrl, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify(payload)
+  })
+  if (!response.ok) {
+    throw new Error(`HTTP ${response.status}`)
+  }
+  return await response.json() as ModelResponse
 }

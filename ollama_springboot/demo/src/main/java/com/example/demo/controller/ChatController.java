@@ -11,9 +11,11 @@ import com.example.demo.dto.RecommendRequest;
 import com.example.demo.dto.RecommendResponse;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.http.HttpStatus;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RestController;
+import org.springframework.web.server.ResponseStatusException;
 
 import java.util.ArrayList;
 import java.util.Collections;
@@ -49,6 +51,9 @@ public class ChatController {
     };
     private static final Set<String> INVALID_NAME_VALUES = Set.of(
             "\u4ec0\u4e48", "\u8c01", "\u5565", "\u54ea\u4f4d", "\u540d\u5b57", "\u59d3\u540d", "name", "what", "who"
+    );
+    private static final Pattern CONFIRM_ONLY_PATTERN = Pattern.compile(
+            "(?i)^\\s*(?:\\u786e\\u8ba4|\\u7ee7\\u7eed|\\u7ee7\\u7eed\\u5427|\\u597d\\u7684|\\u597d|ok|okay|yes|y|go on|continue)\\s*[.!?\\u3002\\uff01\\uff1f]*\\s*$"
     );
 
     private final FastApiClient fastApiClient;
@@ -102,6 +107,20 @@ public class ChatController {
             return buildResponse(request, memoryAnswer, conversation.getId(), conversation.getId());
         }
 
+        if (isConfirmOnlyInput(query)) {
+            String blockedMessage = "Detected confirmation text. Please use the UI confirm button instead of sending a new question.";
+            conversationService.appendMessage(conversation, "assistant", blockedMessage);
+            return buildResponse(
+                    request.getModel(),
+                    blockedMessage,
+                    conversation.getId(),
+                    conversation.getId(),
+                    "success",
+                    false,
+                    List.of()
+            );
+        }
+
         String enrichedQuery = buildQueryWithContext(
                 query,
                 facts,
@@ -123,10 +142,18 @@ public class ChatController {
             logger.warn("FastAPI recommend failed: {}", ex.getMessage());
         }
 
+        String status = "success";
+        boolean awaiting = false;
+        List<String> pendingSubQuestions = List.of();
         String content = "";
-        if (fastapi != null && fastapi.getFinalAnswer() != null) {
-            content = fastapi.getFinalAnswer();
-        } else if (fastapi == null && query != null && !query.isBlank()) {
+
+        if (fastapi != null) {
+            status = firstNonBlank(fastapi.getStatus(), "success");
+            awaiting = Boolean.TRUE.equals(fastapi.getAwaitingHumanConfirmation());
+            pendingSubQuestions = normalizeSubQuestions(fastapi.getPendingSubQuestions());
+            content = firstNonBlank(fastapi.getFinalAnswer(), "");
+        } else if (query != null && !query.isBlank()) {
+            status = "error";
             content = "FastAPI service unavailable. Please try again.";
         }
 
@@ -134,11 +161,93 @@ public class ChatController {
             conversationService.appendMessage(conversation, "assistant", content);
         }
 
-        String sessionId = (fastapi != null && fastapi.getSessionId() != null && !fastapi.getSessionId().isBlank())
-                ? fastapi.getSessionId()
-                : conversation.getId();
+        String sessionId = firstNonBlank(
+                fastapi == null ? null : fastapi.getSessionId(),
+                conversation.getId()
+        );
+        logger.info(
+                "chat response status={}, awaiting={}, pending_count={}, session_id={}",
+                status,
+                awaiting,
+                pendingSubQuestions.size(),
+                sessionId
+        );
+        return buildResponse(
+                request.getModel(),
+                content,
+                conversation.getId(),
+                sessionId,
+                status,
+                awaiting,
+                pendingSubQuestions
+        );
+    }
 
-        return buildResponse(request, content, conversation.getId(), sessionId);
+    @PostMapping("/api/chat/confirm")
+    public OllamaChatResponse confirm(@RequestBody Map<String, Object> request) {
+        String requestSessionId = firstNonBlank(
+                asText(request.get("session_id")),
+                asText(request.get("conversation_id"))
+        );
+        if (requestSessionId == null) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "session_id is required");
+        }
+
+        ConversationEntity conversation = conversationService.ensureConversation(
+                requestSessionId,
+                "HITL confirmation",
+                asText(request.get("model"))
+        );
+
+        String action = normalizeConfirmAction(asText(request.get("action")));
+        List<String> subQuestions = normalizeSubQuestions(request.get("sub_questions"));
+        if ("edit".equals(action) && subQuestions.isEmpty()) {
+            action = "confirm";
+        }
+        String comment = firstNonBlank(asText(request.get("comment")), "confirm");
+
+        RecommendResponse fastapi;
+        try {
+            fastapi = fastApiClient.confirm(conversation.getId(), action, subQuestions, comment);
+        } catch (Exception ex) {
+            logger.warn("FastAPI confirm failed: {}", ex.getMessage());
+            fastapi = null;
+        }
+
+        String status = firstNonBlank(fastapi == null ? null : fastapi.getStatus(), "error");
+        boolean awaiting = fastapi != null && Boolean.TRUE.equals(fastapi.getAwaitingHumanConfirmation());
+        List<String> pendingSubQuestions = normalizeSubQuestions(fastapi == null ? null : fastapi.getPendingSubQuestions());
+        String content = firstNonBlank(
+                fastapi == null ? null : fastapi.getFinalAnswer(),
+                fastapi == null ? "FastAPI confirm unavailable. Please try again." : ""
+        );
+
+        if (content != null && !content.isBlank()) {
+            conversationService.appendMessage(conversation, "assistant", content);
+        }
+
+        String sessionId = firstNonBlank(
+                fastapi == null ? null : fastapi.getSessionId(),
+                conversation.getId()
+        );
+        logger.info(
+                "chat confirm response status={}, awaiting={}, pending_count={}, session_id={}, action={}",
+                status,
+                awaiting,
+                pendingSubQuestions.size(),
+                sessionId,
+                action
+        );
+
+        return buildResponse(
+                firstNonBlank(asText(request.get("model")), conversation.getModelName(), "fastapi-hitl"),
+                content,
+                conversation.getId(),
+                sessionId,
+                status,
+                awaiting,
+                pendingSubQuestions
+        );
     }
 
     private void logIncomingMessages(OllamaChatRequest request) {
@@ -291,14 +400,95 @@ public class ChatController {
         return normalized.length() > 300 ? normalized.substring(0, 300) : normalized;
     }
 
-    private String firstNonBlank(String first, String second) {
-        if (first != null && !first.isBlank()) {
-            return first;
+    private boolean isConfirmOnlyInput(String text) {
+        if (text == null) {
+            return false;
         }
-        if (second != null && !second.isBlank()) {
-            return second;
+        return CONFIRM_ONLY_PATTERN.matcher(text.trim()).matches();
+    }
+
+    private String normalizeConfirmAction(String action) {
+        String normalized = firstNonBlank(action, "confirm");
+        if (normalized == null) {
+            return "confirm";
+        }
+        normalized = normalized.trim().toLowerCase(Locale.ROOT);
+        if ("edit".equals(normalized)) {
+            return "edit";
+        }
+        return "confirm";
+    }
+
+    private List<String> normalizeSubQuestions(List<String> raw) {
+        if (raw == null || raw.isEmpty()) {
+            return List.of();
+        }
+        List<String> cleaned = new ArrayList<>();
+        for (String item : raw) {
+            String text = firstNonBlank(item);
+            if (text != null) {
+                cleaned.add(text);
+            }
+        }
+        return cleaned;
+    }
+
+    private List<String> normalizeSubQuestions(Object raw) {
+        if (!(raw instanceof List<?> list) || list.isEmpty()) {
+            return List.of();
+        }
+        List<String> cleaned = new ArrayList<>();
+        for (Object item : list) {
+            String text = firstNonBlank(asText(item));
+            if (text != null) {
+                cleaned.add(text);
+            }
+        }
+        return cleaned;
+    }
+
+    private String asText(Object value) {
+        if (value == null) {
+            return null;
+        }
+        return value.toString();
+    }
+
+    private String firstNonBlank(String... values) {
+        if (values == null || values.length == 0) {
+            return null;
+        }
+        for (String value : values) {
+            if (value != null && !value.isBlank()) {
+                return value.trim();
+            }
         }
         return null;
+    }
+
+    private OllamaChatResponse buildResponse(
+            String model,
+            String content,
+            String conversationId,
+            String sessionId,
+            String status,
+            boolean awaitingHumanConfirmation,
+            List<String> pendingSubQuestions
+    ) {
+        Message message = new Message();
+        message.setRole("assistant");
+        message.setContent(content);
+
+        OllamaChatResponse response = new OllamaChatResponse();
+        response.setModel(model);
+        response.setMessage(message);
+        response.setDone(true);
+        response.setStatus(status);
+        response.setAwaitingHumanConfirmation(awaitingHumanConfirmation);
+        response.setPendingSubQuestions(pendingSubQuestions == null ? List.of() : pendingSubQuestions);
+        response.setConversationId(conversationId);
+        response.setSessionId(sessionId);
+        return response;
     }
 
     private OllamaChatResponse buildResponse(
@@ -307,16 +497,14 @@ public class ChatController {
             String conversationId,
             String sessionId
     ) {
-        Message message = new Message();
-        message.setRole("assistant");
-        message.setContent(content);
-
-        OllamaChatResponse response = new OllamaChatResponse();
-        response.setModel(request.getModel());
-        response.setMessage(message);
-        response.setDone(true);
-        response.setConversationId(conversationId);
-        response.setSessionId(sessionId);
-        return response;
+        return buildResponse(
+                request.getModel(),
+                content,
+                conversationId,
+                sessionId,
+                "success",
+                false,
+                List.of()
+        );
     }
 }

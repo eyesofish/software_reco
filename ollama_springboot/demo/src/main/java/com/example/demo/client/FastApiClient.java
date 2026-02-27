@@ -14,6 +14,7 @@ import org.springframework.stereotype.Component;
 import org.springframework.web.client.RestTemplate;
 
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 
 @Component
@@ -21,15 +22,18 @@ public class FastApiClient {
     private static final Logger logger = LoggerFactory.getLogger(FastApiClient.class);
     private final RestTemplate restTemplate;
     private final String recommendUrl;
+    private final String confirmUrl;
     private final String sessionStateUrl;
 
     public FastApiClient(
             RestTemplate restTemplate,
             @Value("${app.fastapi.base-url}") String baseUrl,
             @Value("${app.fastapi.recommend-path}") String recommendPath,
+            @Value("${app.fastapi.confirm-path:/api/v1/recommend/confirm}") String confirmPath,
             @Value("${app.fastapi.session-state-path:/api/v1/session-state}") String sessionStatePath) {
         this.restTemplate = restTemplate;
         this.recommendUrl = baseUrl + recommendPath;
+        this.confirmUrl = baseUrl + confirmPath;
         this.sessionStateUrl = baseUrl + sessionStatePath;
     }
 
@@ -57,6 +61,29 @@ public class FastApiClient {
                 entity,
                 RecommendResponse.class);
 
+        return response.getBody();
+    }
+
+    public RecommendResponse confirm(String sessionId, String action, List<String> subQuestions, String comment) {
+        HttpHeaders headers = new HttpHeaders();
+        headers.setContentType(MediaType.APPLICATION_JSON);
+
+        Map<String, Object> payload = new HashMap<>();
+        payload.put("session_id", sessionId);
+        payload.put("action", action);
+        payload.put("sub_questions", subQuestions == null ? List.of() : subQuestions);
+        payload.put("comment", comment == null ? "" : comment);
+
+        HttpEntity<Map<String, Object>> entity = new HttpEntity<>(payload, headers);
+
+        logger.info("FastAPI confirm request url={}, payload={}", confirmUrl, payload);
+
+        ResponseEntity<RecommendResponse> response = restTemplate.exchange(
+                confirmUrl,
+                HttpMethod.POST,
+                entity,
+                RecommendResponse.class
+        );
         return response.getBody();
     }
 

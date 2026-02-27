@@ -10,7 +10,14 @@ export type Messages = Message[]
 
 export type Chats = Message[][]
 
-interface ModelDefaultResponse {
+interface HitlEnvelope {
+  status ?: string,
+  awaiting_human_confirmation ?: boolean,
+  pending_sub_questions ?: string[],
+  final_answer ?: string
+}
+
+interface ModelDefaultResponse extends HitlEnvelope {
   created_at : string,
   done : boolean,
   message : Message,
@@ -19,7 +26,7 @@ interface ModelDefaultResponse {
   session_id ?: string
 }
 
-interface ModelFinalResponse {
+interface ModelFinalResponse extends HitlEnvelope {
   created_at : string,
   done : boolean,
   done_reason : string,
@@ -35,3 +42,10 @@ interface ModelFinalResponse {
 }
 
 export type ModelResponse = ModelDefaultResponse | ModelFinalResponse
+
+export interface ConfirmPayload {
+  session_id : string,
+  action : 'confirm' | 'edit',
+  sub_questions : string[],
+  comment : string
+}
