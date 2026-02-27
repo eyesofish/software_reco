@@ -6,7 +6,8 @@ import { Input } from './style'
 interface InputProps {
   onChange : (e : React.ChangeEvent<HTMLInputElement>) => void,
   placeholder : string,
-  value : string
+  value : string,
+  readOnly ?: boolean
 }
 
 

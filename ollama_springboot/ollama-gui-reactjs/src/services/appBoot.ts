@@ -3,6 +3,7 @@ import { disChats } from '~/stores/chats'
 import { loadChats } from '~/stores/chats/actions'
 import { disConfig } from '~/stores/config'
 import { updateConfig } from '~/stores/config/actions'
+import { sanitizeConfig } from '~/config/defaults'
 
 export default class AppBoot {
 
@@ -23,9 +24,12 @@ export default class AppBoot {
   }
 
   private static updateConfigHandler () {
-    const config = Store.get('config')
-    if (!config) return
+    const rawConfig = Store.get('config')
+    const { config, changed } = sanitizeConfig(rawConfig)
     disConfig(updateConfig(config))
+    if (changed) {
+      Store.set('config', config)
+    }
   }
 
 }

@@ -1,13 +1,10 @@
 import { createStore } from 'react-hooks-global-state'
 
 import reducer from './reducer'
+import { getDefaultConfig } from '~/config/defaults'
 
 export const STATE = {
-  config: {
-    autoSaveChats: false,
-    modelName: 'llama3',
-    modelUrl: 'http://localhost:8080/api/chat'
-  }
+  config: getDefaultConfig()
 }
 
 export const {

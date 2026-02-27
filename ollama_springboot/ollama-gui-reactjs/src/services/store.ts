@@ -12,7 +12,12 @@ export default class Store {
   static get (key : keyof typeof KEYS) {
     if (!KEYS[key]) throw new Error(`Key not allowed: ${key}`)
     const value = localStorage.getItem(key)
-    return value ? JSON.parse(value) : null
+    if (!value) return null
+    try {
+      return JSON.parse(value)
+    } catch {
+      return null
+    }
   }
 
   static set (key : keyof typeof KEYS, value : any) {

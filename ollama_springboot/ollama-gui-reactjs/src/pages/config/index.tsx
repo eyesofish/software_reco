@@ -15,6 +15,7 @@ import Menu from '~/components/menu'
 import TextInput from '~/components/textInput'
 import Toggle from '~/components/toggle'
 import { ButtonsContainer, ThemeContainer, ThemeLabel, ThemeSelect } from './style'
+import { getDefaultConfig, sanitizeConfig } from '~/config/defaults'
 
 type ThemeOption = 'dark' | 'light'
 
@@ -50,9 +51,11 @@ export default function Config () {
   }
 
   function handleSave () {
-    disConfig(updateConfig({
+    const { config: safeConfig } = sanitizeConfig({
       ...config, modelName, modelUrl
-    }))
+    })
+    disConfig(updateConfig(safeConfig))
+    Store.set('config', safeConfig)
     navigate('/')
   }
 
@@ -125,6 +128,19 @@ export default function Config () {
     Store.set('config', config)
   }, [config])
 
+  useEffect(() => {
+    setModelName(config.modelName)
+    setModelUrl(config.modelUrl)
+  }, [config.modelName, config.modelUrl])
+
+  function handleResetConfig () {
+    const defaults = getDefaultConfig()
+    disConfig(updateConfig(defaults))
+    Store.set('config', defaults)
+    setModelName(defaults.modelName)
+    setModelUrl(defaults.modelUrl)
+  }
+
   return (
     <RowContainer ref={rowContainerRef}>
       <Menu scrollRef={rowContainerRef} />
@@ -138,6 +154,10 @@ export default function Config () {
               <option value='zh'>{text.chinese}</option>
             </ThemeSelect>
           </ThemeContainer>
+          <Filler height={fillerRef.current.height} />
+          <p style={{ fontSize: 13, color: 'var(--color-text-muted)', textAlign: 'left' }}>
+            {text.configSource}
+          </p>
           <Filler height={fillerRef.current.height} />
           <ThemeContainer>
             <ThemeLabel htmlFor='theme'>{text.theme}</ThemeLabel>
@@ -194,14 +214,23 @@ export default function Config () {
           <TextInput
             placeholder={text.modelUrl} value={modelUrl}
             onChange={e => setModelUrl(e.target.value)}
+            readOnly
           />
+          <p style={{ fontSize: 12, color: 'var(--color-text-muted)', marginTop: 6, textAlign: 'left' }}>
+            {text.modelUrlWarning}
+          </p>
           <Filler height={fillerRef.current.height} />
           <TextInput
             placeholder={text.modelName} value={modelName}
             onChange={e => setModelName(e.target.value)}
+            readOnly
           />
+          <p style={{ fontSize: 12, color: 'var(--color-text-muted)', marginTop: 6, textAlign: 'left' }}>
+            {text.modelNameNote}
+          </p>
           <Filler height={fillerRef.current.height} />
           <ButtonsContainer>
+            <Button onClick={handleResetConfig}>{text.resetConfig}</Button>
             <Button onClick={handleClearAll}>{text.clearAll}</Button>
             <Button onClick={() => navigate(ROUTES.GO_BACK)}>{text.chat}</Button>
             <Button onClick={handleSave}>{text.save}</Button>
