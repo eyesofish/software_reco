@@ -17,11 +17,11 @@ export const ThemeLabel = styled.label`
 `
 
 export const ThemeSelect = styled.select`
-  background-color: ${({ theme }) => theme.colors.inputBg};
-  border: 1px solid ${({ theme }) => theme.colors.inputBorder};
+  background-color: ${({ theme }) => theme.colors.menuBg};
+  border: 1px solid ${({ theme }) => theme.colors.menuBorder};
   border-radius: 8px;
   box-shadow: ${({ theme }) => theme.colors.shadowLow};
-  color: ${({ theme }) => theme.colors.inputText};
+  color: ${({ theme }) => theme.colors.menuText};
   appearance: none;
   outline: none;
   padding: 12px 16px;
@@ -30,10 +30,17 @@ export const ThemeSelect = styled.select`
   &:focus {
     border-color: ${({ theme }) => theme.colors.accent};
     box-shadow: 0 0 0 4px ${({ theme }) => theme.colors.accentFocus};
+    color: ${({ theme }) => theme.colors.menuTextActive};
   }
 
   option {
-    background: ${({ theme }) => theme.colors.inputBg};
-    color: ${({ theme }) => theme.colors.inputText};
+    background: ${({ theme }) => theme.colors.menuBg};
+    color: ${({ theme }) => theme.colors.menuTextActive};
+  }
+
+  option:checked,
+  option:hover {
+    background: ${({ theme }) => theme.colors.menuHoverBg};
+    color: ${({ theme }) => theme.colors.menuTextActive};
   }
 `
