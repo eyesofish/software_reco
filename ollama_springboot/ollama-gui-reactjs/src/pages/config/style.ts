@@ -22,6 +22,7 @@ export const ThemeSelect = styled.select`
   border-radius: 8px;
   box-shadow: ${({ theme }) => theme.colors.shadowLow};
   color: ${({ theme }) => theme.colors.inputText};
+  appearance: none;
   outline: none;
   padding: 12px 16px;
   width: 100%;
@@ -29,5 +30,10 @@ export const ThemeSelect = styled.select`
   &:focus {
     border-color: ${({ theme }) => theme.colors.accent};
     box-shadow: 0 0 0 4px ${({ theme }) => theme.colors.accentFocus};
+  }
+
+  option {
+    background: ${({ theme }) => theme.colors.inputBg};
+    color: ${({ theme }) => theme.colors.inputText};
   }
 `
