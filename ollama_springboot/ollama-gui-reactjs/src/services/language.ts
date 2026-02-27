@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+ï»¿import { useEffect, useState } from 'react'
 
 export type AppLanguage = 'en' | 'zh'
 
@@ -27,7 +27,7 @@ export const I18N = {
     modelNameNote: 'For record only; does not change the recommendation model.',
     modelUrlWarning: 'This URL is protected. Changing it incorrectly will break chat requests.',
     resetConfig: 'Reset config',
-    configSource: 'Current config is loaded from localStorage.',
+    configSource: 'Current config is loaded from localStorage',
     save: 'Save',
     saveAllChats: 'Save all chats',
     splashTitle: 'Software Recommendation System',
@@ -35,28 +35,28 @@ export const I18N = {
     chinese: 'Chinese'
   },
   zh: {
-    aboutDescription: 'ÕâÊÇÒ»¸ö»ùÓÚ´óÓïÑÔÄ£ĞÍµÄÈí¼şÍÆ¼öÏµÍ³¡£',
-    animationSpeed: '¶¯»­ËÙ¶È',
-    chat: 'ÁÄÌì',
-    clearAll: 'Çå¿ÕÈ«²¿',
-    clearAllConfirm: 'È·¶¨ÒªÉ¾³ıËùÓĞÄÚÈİÂğ£¿\n´Ë²Ù×÷ÎŞ·¨³·Ïú¡£',
-    dark: 'ÉîÉ«',
-    enableSplashAnimation: 'ÆôÓÃÆô¶¯¶¯»­',
-    english: 'Ó¢ÎÄ',
-    language: 'ÓïÑÔ',
-    light: 'Ç³É«',
-    fontSize: '×ÖÌå´óĞ¡',
-    modelName: 'Ä£ĞÍÃû³Æ',
-    modelUrl: 'Ä£ĞÍ URL',
-    modelNameNote: '½öÓÃÓÚ¼ÇÂ¼£¬²»Ó°ÏìÍÆ¼öÄ£ĞÍÑ¡Ôñ¡£',
-    modelUrlWarning: '´ËµØÖ·ÊÜ±£»¤£¬ĞŞ¸Ä´íÎó»áµ¼ÖÂÎŞ·¨¶Ô»°¡£',
-    resetConfig: 'ÖØÖÃÅäÖÃ',
-    configSource: 'µ±Ç°ÅäÖÃÀ´Ô´£ºlocalStorage¡£',
-    save: '±£´æ',
-    saveAllChats: '±£´æËùÓĞÁÄÌì',
-    splashTitle: 'Èí¼şÍÆ¼öÏµÍ³',
-    theme: 'Ö÷Ìâ',
-    chinese: 'ÖĞÎÄ'
+    aboutDescription: 'è¿™æ˜¯ä¸€ä¸ªåŸºäºå¤§è¯­è¨€æ¨¡å‹çš„è½¯ä»¶æ¨èç³»ç»Ÿã€‚',
+    animationSpeed: 'åŠ¨ç”»é€Ÿåº¦',
+    chat: 'èŠå¤©',
+    clearAll: 'æ¸…ç©ºå…¨éƒ¨',
+    clearAllConfirm: 'ç¡®å®šè¦åˆ é™¤æ‰€æœ‰å†…å®¹å—ï¼Ÿ\næ­¤æ“ä½œæ— æ³•æ’¤é”€ã€‚',
+    dark: 'æ·±è‰²',
+    enableSplashAnimation: 'å¯ç”¨å¯åŠ¨åŠ¨ç”»',
+    english: 'è‹±æ–‡',
+    language: 'è¯­è¨€',
+    light: 'æµ…è‰²',
+    fontSize: 'å­—ä½“å¤§å°',
+    modelName: 'æ¨¡å‹åç§°',
+    modelUrl: 'æ¨¡å‹ URL',
+    modelNameNote: 'ä»…ç”¨äºè®°å½•ï¼Œä¸å½±å“æ¨èæ¨¡å‹é€‰æ‹©ã€‚',
+    modelUrlWarning: 'æ­¤åœ°å€å—ä¿æŠ¤ï¼Œä¿®æ”¹é”™è¯¯ä¼šå¯¼è‡´æ— æ³•å¯¹è¯ã€‚',
+    resetConfig: 'é‡ç½®é…ç½®',
+    configSource: 'å½“å‰é…ç½®æ¥æºï¼šlocalStorage',
+    save: 'ä¿å­˜',
+    saveAllChats: 'ä¿å­˜æ‰€æœ‰èŠå¤©',
+    splashTitle: 'è½¯ä»¶æ¨èç³»ç»Ÿ',
+    theme: 'ä¸»é¢˜',
+    chinese: 'ä¸­æ–‡'
   }
 } as const
 
