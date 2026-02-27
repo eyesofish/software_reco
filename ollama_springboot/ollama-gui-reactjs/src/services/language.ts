@@ -11,7 +11,7 @@ function normalizeLanguage (value: string | null): AppLanguage {
 
 export const I18N = {
   en: {
-    aboutDescription: 'This is a software recommendation system based on large language models.',
+    aboutDescription: 'This is a software recommendation system based on large language models',
     animationSpeed: 'Animation speed',
     chat: 'Chat',
     clearAll: 'Clear all',
@@ -22,7 +22,7 @@ export const I18N = {
     language: 'Language',
     light: 'Light',
     fontSize: 'Font size',
-    modelName: 'Model Name',
+    modelName: 'qwen',
     modelUrl: 'Model URL',
     modelNameNote: 'For record only; does not change the recommendation model.',
     modelUrlWarning: 'This URL is protected. Changing it incorrectly will break chat requests.',
@@ -35,7 +35,7 @@ export const I18N = {
     chinese: 'Chinese'
   },
   zh: {
-    aboutDescription: '这是一个基于大语言模型的软件推荐系统。',
+    aboutDescription: '这是一个基于大语言模型的软件推荐系统',
     animationSpeed: '动画速度',
     chat: '聊天',
     clearAll: '清空全部',
@@ -46,7 +46,7 @@ export const I18N = {
     language: '语言',
     light: '浅色',
     fontSize: '字体大小',
-    modelName: '模型名称',
+    modelName: '千问',
     modelUrl: '模型 URL',
     modelNameNote: '仅用于记录，不影响推荐模型选择。',
     modelUrlWarning: '此地址受保护，修改错误会导致无法对话。',

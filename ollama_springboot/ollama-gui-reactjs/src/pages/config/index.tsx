@@ -28,7 +28,7 @@ export default function Config () {
   const config = useConfig('config')
   const language = useAppLanguage()
   const text = I18N[language]
-  const [modelName, setModelName] = useState(config.modelName)
+  const [modelName, setModelName] = useState(language === 'zh' ? '千问' : 'qwen')
   const [modelUrl, setModelUrl] = useState(config.modelUrl)
   const [enableSplash, setEnableSplash] = useState(true)
   const [starSpeed, setStarSpeed] = useState(1)
@@ -129,9 +129,9 @@ export default function Config () {
   }, [config])
 
   useEffect(() => {
-    setModelName(config.modelName)
+    setModelName(language === 'zh' ? '千问' : 'qwen')
     setModelUrl(config.modelUrl)
-  }, [config.modelName, config.modelUrl])
+  }, [config.modelUrl, language])
 
   function handleResetConfig () {
     const defaults = getDefaultConfig()
