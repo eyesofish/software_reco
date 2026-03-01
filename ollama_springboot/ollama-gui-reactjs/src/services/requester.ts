@@ -1,235 +1,136 @@
-import { ConfirmPayload, Messages, ModelResponse, RecommendTaskStateResponse, SessionStateResponse } from '~/entities/messages'
+import {
+  ConversationCreateRequest,
+  ConversationCreateResponse,
+  RecommendTaskConfirmRequest,
+  RecommendTaskCreateRequest,
+  RecommendTaskStateResponse
+} from '~/entities/messages'
 
-function resolveConversationId (messages : Messages) : string|undefined {
-  for (let i = messages.length - 1; i >= 0; i--) {
-    const message = messages[i]
-    const candidate = message.conversationId || message.sessionId
-    if (candidate && candidate.trim()) {
-      return candidate.trim()
-    }
-  }
-  return undefined
+function trimUrl (value : string) {
+  return value.trim().replace(/\/+$/, '')
 }
 
-export default async function requester (
+export function resolveApiBase (modelUrl : string) : string {
+  const trimmed = trimUrl(modelUrl)
+
+  if (/\/api\/chat(?:\/confirm)?$/i.test(trimmed)) {
+    return trimmed.replace(/\/api\/chat(?:\/confirm)?$/i, '')
+  }
+
+  if (/\/api\/v1\/recommend(?:\/confirm)?$/i.test(trimmed)) {
+    return trimmed.replace(/\/api\/v1\/recommend(?:\/confirm)?$/i, '')
+  }
+
+  return trimmed
+}
+
+function resolveConversationsUrl (modelUrl : string) {
+  return `${resolveApiBase(modelUrl)}/api/v1/conversations`
+}
+
+function resolveRecommendUrl (modelUrl : string) {
+  return `${resolveApiBase(modelUrl)}/api/v1/recommend`
+}
+
+function resolveTaskUrl (modelUrl : string, taskId : string) {
+  const encoded = encodeURIComponent(taskId)
+  return `${resolveApiBase(modelUrl)}/api/v1/tasks/${encoded}`
+}
+
+function resolveConversationTasksUrl (modelUrl : string, conversationId : string) {
+  const encoded = encodeURIComponent(conversationId)
+  return `${resolveApiBase(modelUrl)}/api/v1/conversations/${encoded}/tasks`
+}
+
+function resolveConfirmUrlByTask (
   modelUrl : string,
-  modelName : string,
-  messages : Messages,
-  conversationId : string|undefined,
-  onData : (response : ModelResponse) => void,
-  onError : (error : unknown) => void
+  taskId : string,
+  action : 'confirm' | 'edit'
 ) {
-  try {
-    const payloadMessages = messages.map(({ role, content }) => ({ role, content }))
-    const effectiveConversationId = conversationId || resolveConversationId(messages)
-    const payload : {
-      model: string,
-      messages: Array<{ role: string, content: string }>,
-      conversation_id?: string
-    } = {
-      model: modelName,
-      messages: payloadMessages
-    }
-    if (effectiveConversationId) {
-      payload.conversation_id = effectiveConversationId
-    }
-
-    const response = await fetch(modelUrl, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify(payload)
-    })
-    if (!response.ok) {
-      throw new Error(`HTTP ${response.status}`)
-    }
-    const responsePayload = await response.json() as ModelResponse
-    onData(responsePayload)
-  }
-  catch (error) {
-    onError(error)
-  }
+  const encodedTaskId = encodeURIComponent(taskId)
+  const encodedAction = encodeURIComponent(action)
+  return `${resolveApiBase(modelUrl)}/api/v1/recommend/confirm?taskId=${encodedTaskId}&action=${encodedAction}`
 }
 
-export function resolveConfirmUrl (chatUrl : string) : string {
-  const trimmed = chatUrl.trim().replace(/\/+$/, '')
-  if (trimmed.endsWith('/api/chat')) {
-    return `${trimmed}/confirm`
-  }
-  return `${trimmed}/confirm`
-}
-
-export function resolveSessionStateUrl (chatUrl : string, sessionId : string) : string {
-  const trimmed = chatUrl.trim().replace(/\/+$/, '')
-  const encodedSessionId = encodeURIComponent(sessionId)
-
-  if (/\/api\/chat(?:\/confirm)?$/.test(trimmed)) {
-    const base = trimmed.replace(/\/api\/chat(?:\/confirm)?$/, '')
-    return `${base}/api/session-state/${encodedSessionId}`
-  }
-
-  if (/\/api\/v1\/recommend(?:\/confirm)?$/.test(trimmed)) {
-    const base = trimmed.replace(/\/api\/v1\/recommend(?:\/confirm)?$/, '')
-    return `${base}/api/v1/session-state/${encodedSessionId}`
-  }
-
-  if (trimmed.endsWith('/api/session-state') || trimmed.endsWith('/api/v1/session-state')) {
-    return `${trimmed}/${encodedSessionId}`
-  }
-
-  return `${trimmed.replace(/\/api\/chat\/confirm$/, '').replace(/\/api\/chat$/, '')}/api/v1/session-state/${encodedSessionId}`
-}
-
-export async function getSessionState (
-  chatUrl : string,
-  sessionId : string,
-  signal ?: AbortSignal
-) : Promise<SessionStateResponse> {
-  const response = await fetch(resolveSessionStateUrl(chatUrl, sessionId), {
-    method: 'GET',
+async function requestJson<T> (
+  url : string,
+  init : RequestInit = {}
+) : Promise<T> {
+  const response = await fetch(url, {
     headers: {
-      'Content-Type': 'application/json'
+      'Content-Type': 'application/json',
+      ...(init.headers || {})
     },
+    ...init
+  })
+
+  if (!response.ok) {
+    const rawBody = await response.text()
+    const bodyPreview = rawBody.slice(0, 300)
+    throw new Error(`HTTP ${response.status}: ${bodyPreview}`)
+  }
+
+  return await response.json() as T
+}
+
+export async function createConversationRequester (
+  modelUrl : string,
+  payload : ConversationCreateRequest = {},
+  signal ?: AbortSignal
+) : Promise<ConversationCreateResponse> {
+  return await requestJson<ConversationCreateResponse>(resolveConversationsUrl(modelUrl), {
+    method: 'POST',
+    body: JSON.stringify(payload),
     signal
   })
-  if (!response.ok) {
-    throw new Error(`HTTP ${response.status}`)
-  }
-  return await response.json() as SessionStateResponse
 }
 
-export function resolveTaskStateUrl (chatUrl : string, taskId : string) : string {
-  const trimmed = chatUrl.trim().replace(/\/+$/, '')
-  const encodedTaskId = encodeURIComponent(taskId)
-
-  if (/\/api\/chat(?:\/confirm)?$/.test(trimmed)) {
-    const base = trimmed.replace(/\/api\/chat(?:\/confirm)?$/, '')
-    return `${base}/api/v1/recommend/task/${encodedTaskId}`
-  }
-
-  if (/\/api\/v1\/recommend(?:\/confirm)?$/.test(trimmed)) {
-    const base = trimmed.replace(/\/api\/v1\/recommend(?:\/confirm)?$/, '')
-    return `${base}/api/v1/recommend/task/${encodedTaskId}`
-  }
-
-  if (trimmed.endsWith('/api/v1/recommend/task')) {
-    return `${trimmed}/${encodedTaskId}`
-  }
-
-  return `${trimmed.replace(/\/api\/chat\/confirm$/, '').replace(/\/api\/chat$/, '')}/api/v1/recommend/task/${encodedTaskId}`
-}
-
-export async function getRecommendTaskState (
-  chatUrl : string,
-  taskId : string
-) : Promise<RecommendTaskStateResponse> {
-  const response = await fetch(resolveTaskStateUrl(chatUrl, taskId), {
-    method: 'GET',
-    headers: {
-      'Content-Type': 'application/json'
-    }
-  })
-  if (!response.ok) {
-    throw new Error(`HTTP ${response.status}`)
-  }
-  return await response.json() as RecommendTaskStateResponse
-}
-
-export interface SessionStatePollOptions {
-  intervalMs ?: number,
-  timeoutMs ?: number,
-  shouldStop ?: () => boolean,
+export async function createRecommendTaskRequester (
+  modelUrl : string,
+  payload : RecommendTaskCreateRequest,
   signal ?: AbortSignal
-}
-
-export interface SessionStatePollResult {
-  status : 'resolved' | 'timeout' | 'stopped',
-  state ?: SessionStateResponse
-}
-
-function sleep (ms : number, signal ?: AbortSignal) : Promise<void> {
-  return new Promise((resolve) => {
-    if (signal?.aborted) {
-      resolve()
-      return
-    }
-
-    const onAbort = () => {
-      clearTimeout(timer)
-      signal?.removeEventListener('abort', onAbort)
-      resolve()
-    }
-    const timer = setTimeout(() => {
-      signal?.removeEventListener('abort', onAbort)
-      resolve()
-    }, ms)
-    signal?.addEventListener('abort', onAbort, { once: true })
-  })
-}
-
-export async function pollSessionState (
-  chatUrl : string,
-  sessionId : string,
-  onState : (state : SessionStateResponse) => boolean|Promise<boolean>,
-  options : SessionStatePollOptions = {}
-) : Promise<SessionStatePollResult> {
-  const intervalMs = options.intervalMs ?? 2000
-  const timeoutMs = options.timeoutMs ?? 90_000
-  const startedAt = Date.now()
-
-  while (Date.now() - startedAt <= timeoutMs) {
-    if (options.signal?.aborted) {
-      return { status: 'stopped' }
-    }
-
-    if (options.shouldStop?.()) {
-      return { status: 'stopped' }
-    }
-
-    try {
-      const state = await getSessionState(chatUrl, sessionId, options.signal)
-      const shouldStopPolling = await onState(state)
-      if (shouldStopPolling) {
-        return {
-          status: 'resolved',
-          state
-        }
-      }
-    }
-    catch (error) {
-      if (options.signal?.aborted) {
-        return { status: 'stopped' }
-      }
-      console.warn('session-state-poll-failed', {
-        session_id: sessionId,
-        error
-      })
-    }
-
-    if (Date.now() - startedAt >= timeoutMs) {
-      break
-    }
-
-    await sleep(intervalMs, options.signal)
-  }
-
-  return { status: 'timeout' }
-}
-
-export async function confirmRequester (
-  confirmUrl : string,
-  payload : ConfirmPayload
-) : Promise<ModelResponse> {
-  const response = await fetch(confirmUrl, {
+) : Promise<RecommendTaskStateResponse> {
+  return await requestJson<RecommendTaskStateResponse>(resolveRecommendUrl(modelUrl), {
     method: 'POST',
-    headers: {
-      'Content-Type': 'application/json'
-    },
-    body: JSON.stringify(payload)
+    body: JSON.stringify(payload),
+    signal
   })
-  if (!response.ok) {
-    throw new Error(`HTTP ${response.status}`)
-  }
-  return await response.json() as ModelResponse
 }
+
+export async function confirmTaskRequester (
+  modelUrl : string,
+  taskId : string,
+  action : 'confirm' | 'edit' = 'confirm',
+  payload : RecommendTaskConfirmRequest = {},
+  signal ?: AbortSignal
+) : Promise<RecommendTaskStateResponse> {
+  return await requestJson<RecommendTaskStateResponse>(resolveConfirmUrlByTask(modelUrl, taskId, action), {
+    method: 'POST',
+    body: JSON.stringify(payload),
+    signal
+  })
+}
+
+export async function getTaskStateRequester (
+  modelUrl : string,
+  taskId : string,
+  signal ?: AbortSignal
+) : Promise<RecommendTaskStateResponse> {
+  return await requestJson<RecommendTaskStateResponse>(resolveTaskUrl(modelUrl, taskId), {
+    method: 'GET',
+    signal
+  })
+}
+
+export async function listConversationTasksRequester (
+  modelUrl : string,
+  conversationId : string,
+  signal ?: AbortSignal
+) : Promise<RecommendTaskStateResponse[]> {
+  return await requestJson<RecommendTaskStateResponse[]>(resolveConversationTasksUrl(modelUrl, conversationId), {
+    method: 'GET',
+    signal
+  })
+}
+
+export const getRecommendTaskState = getTaskStateRequester

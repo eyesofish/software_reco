@@ -14,8 +14,10 @@ import org.springframework.stereotype.Component;
 import org.springframework.web.client.RestTemplate;
 
 import java.util.HashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 @Component
 public class FastApiClient {
@@ -84,7 +86,18 @@ public class FastApiClient {
                 entity,
                 RecommendResponse.class
         );
-        return response.getBody();
+        RecommendResponse body = response.getBody();
+        if (body == null) {
+            throw new IllegalStateException("FastAPI confirm returned empty body");
+        }
+        logger.info(
+                "FastAPI confirm response status={}, awaiting={}, pending_count={}, session_id={}",
+                body.getStatus(),
+                Boolean.TRUE.equals(body.getAwaitingHumanConfirmation()),
+                countSubQuestionItems(body.getPendingSubQuestions()),
+                body.getSessionId()
+        );
+        return body;
     }
 
     public Map<String, Object> getSessionState(String sessionId) {
@@ -117,5 +130,43 @@ public class FastApiClient {
                 entity,
                 Map.class
         );
+    }
+
+    private int countSubQuestionItems(Object raw) {
+        if (raw == null) {
+            return 0;
+        }
+        Set<String> unique = new LinkedHashSet<>();
+        collectSubQuestionItems(raw, unique, 0);
+        return unique.size();
+    }
+
+    private void collectSubQuestionItems(Object raw, Set<String> output, int depth) {
+        if (raw == null || depth > 8) {
+            return;
+        }
+        if (raw instanceof String text) {
+            String normalized = text.trim();
+            if (!normalized.isEmpty()) {
+                output.add(normalized);
+            }
+            return;
+        }
+        if (raw instanceof Map<?, ?> mapValue) {
+            for (Object value : mapValue.values()) {
+                collectSubQuestionItems(value, output, depth + 1);
+            }
+            return;
+        }
+        if (raw instanceof Iterable<?> iterable) {
+            for (Object value : iterable) {
+                collectSubQuestionItems(value, output, depth + 1);
+            }
+            return;
+        }
+        String normalized = raw.toString().trim();
+        if (!normalized.isEmpty()) {
+            output.add(normalized);
+        }
     }
 }

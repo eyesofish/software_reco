@@ -8,8 +8,6 @@ import com.example.demo.conversation.service.RecommendTaskStateService;
 import com.example.demo.dto.Message;
 import com.example.demo.dto.OllamaChatRequest;
 import com.example.demo.dto.OllamaChatResponse;
-import com.example.demo.dto.RecommendRequest;
-import com.example.demo.dto.RecommendResponse;
 import com.example.demo.dto.RecommendTaskStateResponse;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -19,9 +17,11 @@ import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RestController;
 import org.springframework.web.server.ResponseStatusException;
 
+import java.lang.reflect.Array;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -56,6 +56,9 @@ public class ChatController {
     );
     private static final Pattern CONFIRM_ONLY_PATTERN = Pattern.compile(
             "(?i)^\\s*(?:\\u786e\\u8ba4|\\u7ee7\\u7eed|\\u7ee7\\u7eed\\u5427|\\u597d\\u7684|\\u597d|ok|okay|yes|y|go on|continue)\\s*[.!?\\u3002\\uff01\\uff1f]*\\s*$"
+    );
+    private static final Pattern QUOTED_STRING_PATTERN = Pattern.compile(
+            "'((?:\\\\.|[^'])*)'|\"((?:\\\\.|[^\"])*)\""
     );
 
     private final FastApiClient fastApiClient;
@@ -94,7 +97,6 @@ public class ChatController {
         );
 
         ConversationMessageEntity userMessage = conversationService.appendMessage(conversation, "user", query);
-        recommendTaskStateService.markGenerating(conversation.getId());
 
         Map<String, String> extractedFacts = extractFactsForSessionUpdate(query);
         for (Map.Entry<String, String> fact : extractedFacts.entrySet()) {
@@ -142,51 +144,26 @@ public class ChatController {
             logger.warn("FastAPI session-state sync failed: {}", ex.getMessage());
         }
 
-        RecommendResponse fastapi = null;
-        try {
-            fastapi = fastApiClient.recommend(
-                    new RecommendRequest(enrichedQuery, 60, 3, conversation.getId())
-            );
-        } catch (Exception ex) {
-            logger.warn("FastAPI recommend failed: {}", ex.getMessage());
-        }
-
-        String status = "success";
-        boolean awaiting = false;
-        List<String> pendingSubQuestions = List.of();
-        String content = "";
-
-        if (fastapi != null) {
-            status = firstNonBlank(fastapi.getStatus(), "success");
-            awaiting = Boolean.TRUE.equals(fastapi.getAwaitingHumanConfirmation());
-            pendingSubQuestions = normalizeSubQuestions(fastapi.getPendingSubQuestions());
-            content = firstNonBlank(fastapi.getFinalAnswer(), "");
-        } else if (query != null && !query.isBlank()) {
-            status = "error";
-            content = "FastAPI service unavailable. Please try again.";
-        }
-
-        if (content != null && !content.isBlank()) {
-            conversationService.appendMessage(conversation, "assistant", content);
-        }
-        recommendTaskStateService.markFromResponse(
+        RecommendTaskStateService.RecommendTaskCreateOutcome taskOutcome = recommendTaskStateService.createRecommendTask(
                 conversation.getId(),
-                status,
-                awaiting,
-                pendingSubQuestions,
-                content
+                enrichedQuery,
+                60,
+                3,
+                request.getModel()
         );
-
-        String sessionId = firstNonBlank(
-                fastapi == null ? null : fastapi.getSessionId(),
-                conversation.getId()
-        );
+        RecommendTaskStateResponse taskState = taskOutcome.taskState();
+        String status = firstNonBlank(taskState.getStatus(), "FAILED");
+        boolean awaiting = "PENDING_CONFIRM".equalsIgnoreCase(status);
+        List<String> pendingSubQuestions = normalizeSubQuestions(taskState.getSubQuestions());
+        String content = firstNonBlank(taskOutcome.assistantMessage(), taskState.getFinalResult(), "");
+        String sessionId = firstNonBlank(taskState.getTaskId(), conversation.getId());
         logger.info(
-                "chat response status={}, awaiting={}, pending_count={}, session_id={}",
+                "chat response status={}, awaiting={}, pending_count={}, task_id={}, conversation_id={}",
                 status,
                 awaiting,
                 pendingSubQuestions.size(),
-                sessionId
+                sessionId,
+                conversation.getId()
         );
         return buildResponse(
                 request.getModel(),
@@ -202,15 +179,36 @@ public class ChatController {
     @PostMapping("/api/chat/confirm")
     public OllamaChatResponse confirm(@RequestBody Map<String, Object> request) {
         String requestSessionId = firstNonBlank(
+                asText(request.get("task_id")),
                 asText(request.get("session_id")),
                 asText(request.get("conversation_id"))
         );
         if (requestSessionId == null) {
-            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "session_id is required");
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "task_id or session_id is required");
         }
 
+        String resolvedTaskId = recommendTaskStateService.resolveTaskId(requestSessionId);
+        if (resolvedTaskId == null) {
+            RecommendTaskStateResponse expiredState = recommendTaskStateService.getTaskState(requestSessionId);
+            return buildResponse(
+                    firstNonBlank(asText(request.get("model")), "fastapi-hitl"),
+                    firstNonBlank(expiredState.getErrorMessage(), ""),
+                    firstNonBlank(asText(request.get("conversation_id")), requestSessionId),
+                    requestSessionId,
+                    firstNonBlank(expiredState.getStatus(), "EXPIRED"),
+                    false,
+                    List.of()
+            );
+        }
+
+        RecommendTaskStateResponse currentState = recommendTaskStateService.getTaskState(resolvedTaskId);
+        String conversationId = firstNonBlank(
+                currentState.getConversationId(),
+                asText(request.get("conversation_id")),
+                requestSessionId
+        );
         ConversationEntity conversation = conversationService.ensureConversation(
-                requestSessionId,
+                conversationId,
                 "HITL confirmation",
                 asText(request.get("model"))
         );
@@ -221,69 +219,27 @@ public class ChatController {
             action = "confirm";
         }
         String comment = firstNonBlank(asText(request.get("comment")), "confirm");
-
-        RecommendTaskStateResponse currentState = recommendTaskStateService.getTaskState(conversation.getId());
-        String currentStatus = firstNonBlank(currentState.getStatus(), "PENDING_CONFIRM");
-        boolean alreadyPastConfirm = !"PENDING_CONFIRM".equalsIgnoreCase(currentStatus);
-        if ("confirm".equals(action) && alreadyPastConfirm) {
-            String existingFinal = firstNonBlank(currentState.getFinalResult(), "");
-            List<String> existingSubQuestions = normalizeSubQuestions(currentState.getSubQuestions());
-            boolean awaiting = "PENDING_CONFIRM".equalsIgnoreCase(currentStatus);
-            logger.info(
-                    "chat confirm idempotent-hit status={}, awaiting={}, pending_count={}, session_id={}",
-                    currentStatus,
-                    awaiting,
-                    existingSubQuestions.size(),
-                    conversation.getId()
-            );
-            return buildResponse(
-                    firstNonBlank(asText(request.get("model")), conversation.getModelName(), "fastapi-hitl"),
-                    existingFinal,
-                    conversation.getId(),
-                    conversation.getId(),
-                    currentStatus,
-                    awaiting,
-                    awaiting ? existingSubQuestions : List.of()
-            );
-        }
-
-        RecommendResponse fastapi;
-        try {
-            fastapi = fastApiClient.confirm(conversation.getId(), action, subQuestions, comment);
-        } catch (Exception ex) {
-            logger.warn("FastAPI confirm failed: {}", ex.getMessage());
-            fastapi = null;
-        }
-
-        String status = firstNonBlank(
-                fastapi == null ? null : fastapi.getStatus(),
-                firstNonBlank(currentStatus, "PENDING_CONFIRM")
-        );
-        boolean awaiting = fastapi != null
-                ? Boolean.TRUE.equals(fastapi.getAwaitingHumanConfirmation())
-                : "PENDING_CONFIRM".equalsIgnoreCase(status);
-        List<String> pendingSubQuestions = fastapi != null
-                ? normalizeSubQuestions(fastapi.getPendingSubQuestions())
-                : normalizeSubQuestions(currentState.getSubQuestions());
-        String content = firstNonBlank(fastapi == null ? null : fastapi.getFinalAnswer(), "");
-
-        if (content != null && !content.isBlank()) {
-            conversationService.appendMessage(conversation, "assistant", content);
-        }
-        recommendTaskStateService.markFromResponse(
-                conversation.getId(),
-                status,
-                awaiting,
-                pendingSubQuestions,
-                content
-        );
-
-        String sessionId = firstNonBlank(
-                fastapi == null ? null : fastapi.getSessionId(),
-                conversation.getId()
-        );
         logger.info(
-                "chat confirm response status={}, awaiting={}, pending_count={}, session_id={}, action={}",
+                "chat confirm request received session_id={}, conversation_id={}, action={}, pending_count={}",
+                requestSessionId,
+                conversation.getId(),
+                action,
+                subQuestions.size()
+        );
+
+        RecommendTaskStateResponse confirmedState = recommendTaskStateService.confirmTask(
+                resolvedTaskId,
+                action,
+                subQuestions,
+                comment
+        );
+        String status = firstNonBlank(confirmedState.getStatus(), "FAILED");
+        boolean awaiting = "PENDING_CONFIRM".equalsIgnoreCase(status);
+        List<String> pendingSubQuestions = normalizeSubQuestions(confirmedState.getSubQuestions());
+        String content = firstNonBlank(confirmedState.getFinalResult(), "");
+        String sessionId = firstNonBlank(confirmedState.getTaskId(), resolvedTaskId);
+        logger.info(
+                "chat confirm response status={}, awaiting={}, pending_count={}, task_id={}, action={}",
                 status,
                 awaiting,
                 pendingSubQuestions.size(),
@@ -472,31 +428,117 @@ public class ChatController {
     }
 
     private List<String> normalizeSubQuestions(List<String> raw) {
-        if (raw == null || raw.isEmpty()) {
-            return List.of();
-        }
-        List<String> cleaned = new ArrayList<>();
-        for (String item : raw) {
-            String text = firstNonBlank(item);
-            if (text != null) {
-                cleaned.add(text);
-            }
-        }
-        return cleaned;
+        return normalizeSubQuestions((Object) raw);
     }
 
     private List<String> normalizeSubQuestions(Object raw) {
-        if (!(raw instanceof List<?> list) || list.isEmpty()) {
+        if (raw == null) {
             return List.of();
         }
-        List<String> cleaned = new ArrayList<>();
-        for (Object item : list) {
-            String text = firstNonBlank(asText(item));
-            if (text != null) {
-                cleaned.add(text);
-            }
+
+        LinkedHashSet<String> unique = new LinkedHashSet<>();
+        collectSubQuestions(raw, unique, 0);
+        return new ArrayList<>(unique);
+    }
+
+    private void collectSubQuestions(Object raw, Set<String> output, int depth) {
+        if (raw == null || depth > 12) {
+            return;
         }
-        return cleaned;
+
+        if (raw instanceof String textValue) {
+            String text = firstNonBlank(textValue);
+            if (text == null) {
+                return;
+            }
+
+            if (looksLikeSerializedSubQuestionPayload(text)) {
+                List<String> extracted = extractQuotedSegments(text);
+                if (!extracted.isEmpty()) {
+                    output.addAll(extracted);
+                    return;
+                }
+            }
+
+            output.add(text);
+            return;
+        }
+
+        if (raw instanceof Map<?, ?> mapValue) {
+            List<Object> preferred = new ArrayList<>();
+            for (Map.Entry<?, ?> entry : mapValue.entrySet()) {
+                String key = firstNonBlank(asText(entry.getKey()));
+                if (key == null) {
+                    continue;
+                }
+                String normalizedKey = key.toLowerCase(Locale.ROOT);
+                if ("sub_questions".equals(normalizedKey) || "pending_sub_questions".equals(normalizedKey)) {
+                    preferred.add(entry.getValue());
+                }
+            }
+
+            if (!preferred.isEmpty()) {
+                for (Object value : preferred) {
+                    collectSubQuestions(value, output, depth + 1);
+                }
+                return;
+            }
+
+            for (Object value : mapValue.values()) {
+                collectSubQuestions(value, output, depth + 1);
+            }
+            return;
+        }
+
+        if (raw instanceof Iterable<?> iterable) {
+            for (Object item : iterable) {
+                collectSubQuestions(item, output, depth + 1);
+            }
+            return;
+        }
+
+        if (raw.getClass().isArray()) {
+            int length = Array.getLength(raw);
+            for (int i = 0; i < length; i++) {
+                collectSubQuestions(Array.get(raw, i), output, depth + 1);
+            }
+            return;
+        }
+
+        String text = firstNonBlank(asText(raw));
+        if (text != null) {
+            output.add(text);
+        }
+    }
+
+    private boolean looksLikeSerializedSubQuestionPayload(String text) {
+        String normalized = firstNonBlank(text);
+        if (normalized == null) {
+            return false;
+        }
+        if (!normalized.startsWith("{") && !normalized.startsWith("[")) {
+            return false;
+        }
+        String lowered = normalized.toLowerCase(Locale.ROOT);
+        return lowered.contains("sub_questions") || lowered.contains("pending_sub_questions");
+    }
+
+    private List<String> extractQuotedSegments(String raw) {
+        List<String> extracted = new ArrayList<>();
+        Matcher matcher = QUOTED_STRING_PATTERN.matcher(raw);
+        while (matcher.find()) {
+            String candidate = matcher.group(1) != null ? matcher.group(1) : matcher.group(2);
+            String text = firstNonBlank(candidate);
+            if (text == null) {
+                continue;
+            }
+            String lowered = text.toLowerCase(Locale.ROOT);
+            if ("sub_questions".equals(lowered) || "pending_sub_questions".equals(lowered)) {
+                continue;
+            }
+            extracted.add(text);
+        }
+        return extracted;
     }
 
     private String asText(Object value) {

@@ -69,16 +69,59 @@ export interface SessionStateResponse {
   pendingSubQuestions ?: string[]
 }
 
+export type BackendTaskStatus =
+  | 'PENDING_CONFIRM'
+  | 'CONFIRMED'
+  | 'GENERATING'
+  | 'DONE'
+  | 'FAILED'
+  | 'EXPIRED'
+  | string
+
 export interface RecommendTaskStateResponse {
   task_id ?: string,
   taskId ?: string,
-  status : 'PENDING_CONFIRM' | 'CONFIRMED' | 'GENERATING' | 'DONE' | 'FAILED' | string,
-  sub_questions ?: string[],
-  subQuestions ?: string[],
+  conversation_id ?: string,
+  conversationId ?: string,
+  status : BackendTaskStatus,
+  pending_sub_questions ?: unknown,
+  pendingSubQuestions ?: unknown,
+  sub_questions ?: unknown,
+  subQuestions ?: unknown,
   final_result ?: string,
   finalResult ?: string,
+  error_message ?: string,
+  errorMessage ?: string,
+  progress ?: number,
+  last_heartbeat_at ?: string,
+  lastHeartbeatAt ?: string,
+  expire_at ?: string,
+  expireAt ?: string,
   created_at ?: string,
   createdAt ?: string,
   updated_at ?: string,
   updatedAt ?: string
+}
+
+export interface ConversationCreateRequest {
+  title ?: string,
+  model_name ?: string
+}
+
+export interface ConversationCreateResponse {
+  conversation_id : string,
+  created_at ?: string
+}
+
+export interface RecommendTaskCreateRequest {
+  query : string,
+  conversation_id ?: string,
+  session_id ?: string,
+  timeout ?: number,
+  max_iterations ?: number
+}
+
+export interface RecommendTaskConfirmRequest {
+  sub_questions ?: string[],
+  comment ?: string
 }

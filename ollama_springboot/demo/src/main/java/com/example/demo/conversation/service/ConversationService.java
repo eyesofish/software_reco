@@ -249,8 +249,11 @@ public class ConversationService {
     @Transactional(readOnly = true)
     public List<ConversationMessageEntity> getSessionMessages(String conversationId, int limit) {
         int size = Math.max(1, Math.min(limit, 200));
-        List<ConversationMessageEntity> messages =
-                messageRepository.findByConversation_IdOrderByCreatedAtDesc(conversationId, PageRequest.of(0, size)).getContent();
+        List<ConversationMessageEntity> messages = new ArrayList<>(
+                messageRepository
+                        .findByConversation_IdOrderByCreatedAtDesc(conversationId, PageRequest.of(0, size))
+                        .getContent()
+        );
         Collections.reverse(messages);
         return messages;
     }

@@ -2,8 +2,6 @@ package com.example.demo.dto;
 
 import com.fasterxml.jackson.annotation.JsonProperty;
 
-import java.util.List;
-
 public class RecommendResponse {
     private String status;
     @JsonProperty("final_answer")
@@ -11,7 +9,7 @@ public class RecommendResponse {
     @JsonProperty("awaiting_human_confirmation")
     private Boolean awaitingHumanConfirmation;
     @JsonProperty("pending_sub_questions")
-    private List<String> pendingSubQuestions;
+    private Object pendingSubQuestions;
     @JsonProperty("session_id")
     private String sessionId;
 
@@ -21,8 +19,8 @@ public class RecommendResponse {
     public void setFinalAnswer(String finalAnswer) { this.finalAnswer = finalAnswer; }
     public Boolean getAwaitingHumanConfirmation() { return awaitingHumanConfirmation; }
     public void setAwaitingHumanConfirmation(Boolean awaitingHumanConfirmation) { this.awaitingHumanConfirmation = awaitingHumanConfirmation; }
-    public List<String> getPendingSubQuestions() { return pendingSubQuestions; }
-    public void setPendingSubQuestions(List<String> pendingSubQuestions) { this.pendingSubQuestions = pendingSubQuestions; }
+    public Object getPendingSubQuestions() { return pendingSubQuestions; }
+    public void setPendingSubQuestions(Object pendingSubQuestions) { this.pendingSubQuestions = pendingSubQuestions; }
     public String getSessionId() { return sessionId; }
     public void setSessionId(String sessionId) { this.sessionId = sessionId; }
 }

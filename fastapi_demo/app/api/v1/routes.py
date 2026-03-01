@@ -1,5 +1,6 @@
 import logging
 import json
+import ast
 import os
 import re
 import time
@@ -161,15 +162,67 @@ def _extract_interrupt_payload(result: Any) -> Optional[Dict[str, Any]]:
 
 
 def _normalize_pending_sub_questions(raw: Any) -> List[str]:
-    if isinstance(raw, str):
-        raw = [raw]
-    if not isinstance(raw, list):
-        return []
     normalized: List[str] = []
-    for item in raw:
-        text = str(item or "").strip()
+    seen = set()
+
+    def append_unique(value: str) -> None:
+        text = str(value or "").strip()
+        if not text or text in seen:
+            return
+        seen.add(text)
+        normalized.append(text)
+
+    def try_parse_structured_text(text: str) -> Optional[Any]:
+        stripped = text.strip()
+        if not stripped or stripped[0] not in {"[", "{"}:
+            return None
+        try:
+            return json.loads(stripped)
+        except Exception:
+            pass
+        try:
+            return ast.literal_eval(stripped)
+        except Exception:
+            return None
+
+    def collect(value: Any) -> None:
+        if value is None:
+            return
+
+        if isinstance(value, str):
+            text = value.strip()
+            if not text:
+                return
+            parsed = try_parse_structured_text(text)
+            if parsed is not None:
+                collect(parsed)
+                return
+            append_unique(text)
+            return
+
+        if isinstance(value, dict):
+            preferred: List[Any] = []
+            for key in ("sub_questions", "pending_sub_questions"):
+                if key in value:
+                    preferred.append(value.get(key))
+            if preferred:
+                for item in preferred:
+                    collect(item)
+                return
+            for nested in value.values():
+                collect(nested)
+            return
+
+        if isinstance(value, (list, tuple, set)):
+            for item in value:
+                collect(item)
+            return
+
+        text = str(value).strip()
         if text:
-            normalized.append(text)
+            append_unique(text)
+
+    collect(raw)
     return normalized
 
 
@@ -569,7 +622,6 @@ async def get_software_recommendation(request_data: RecommendationRequest):
 @router.post("/recommend/confirm", response_model=RecommendationResponse)
 async def confirm_software_recommendation(request_data: RecommendationConfirmRequest):
     try:
-        config = {"configurable": {"thread_id": request_data.session_id}}
         edited_sub_questions = _normalize_pending_sub_questions(request_data.sub_questions or [])
         effective_action = request_data.action
         if effective_action == "edit" and not edited_sub_questions:
@@ -578,6 +630,15 @@ async def confirm_software_recommendation(request_data: RecommendationConfirmReq
                 request_data.session_id,
             )
             effective_action = "confirm"
+        logger.warning(
+            "HITL_CONFIRM_REQUEST_RECEIVED session_id=%s action=%s pending_count=%d comment=%r",
+            request_data.session_id,
+            effective_action,
+            len(edited_sub_questions),
+            request_data.comment or "",
+        )
+
+        config = {"configurable": {"thread_id": request_data.session_id}}
 
         resume_payload = {
             "action": effective_action,
@@ -633,6 +694,11 @@ async def confirm_software_recommendation(request_data: RecommendationConfirmReq
                 request_data.session_id,
                 [{"role": "assistant", "content": ack_message}],
             )
+            logger.warning(
+                "HITL_CONFIRM_RESPONSE session_id=%s status=awaiting_human_confirmation pending_count=%d",
+                request_data.session_id,
+                len(pending_sub_questions),
+            )
             return RecommendationResponse(
                 status="awaiting_human_confirmation",
                 final_answer=ack_message,
@@ -652,6 +718,11 @@ async def confirm_software_recommendation(request_data: RecommendationConfirmReq
                 [{"role": "assistant", "content": final_answer}],
             )
 
+        logger.warning(
+            "HITL_CONFIRM_RESPONSE session_id=%s status=success final_answer_len=%d",
+            request_data.session_id,
+            len(final_answer or ""),
+        )
         return RecommendationResponse(
             status="success",
             final_answer=final_answer,
@@ -663,6 +734,12 @@ async def confirm_software_recommendation(request_data: RecommendationConfirmReq
             awaiting_human_confirmation=False,
         )
     except Exception as exc:
+        logger.exception(
+            "HITL_CONFIRM_REQUEST_FAILED session_id=%s action=%s error=%s",
+            getattr(request_data, "session_id", None),
+            getattr(request_data, "action", None),
+            exc,
+        )
         raise HTTPException(
             status_code=500,
             detail=f"Error processing request: {exc}",
@@ -778,5 +855,3 @@ async def initialize_database():
             status_code=500,
             detail=f"Error initializing database: {exc}",
         ) from exc
-
-

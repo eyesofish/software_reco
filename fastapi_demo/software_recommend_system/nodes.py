@@ -6,8 +6,10 @@ import openai
 import time
 import re
 import json
+import ast
 from datetime import datetime
 import logging
+from langgraph.func import task
 from langgraph.types import interrupt
 
 # 导入新的工具系统
@@ -222,7 +224,19 @@ def routing_node(state: AgentState) -> Dict[str, Any]:
         tech_hits[:8],
     )
     return {"mode": mode}
-
+@task
+def normalize_query_with_llm(model: str, prompt: str, query: str):
+    client = _get_openai_client()
+    response = client.chat.completions.create(
+        model=model,
+        messages=[
+            {"role": "system", "content": prompt},
+            {"role": "user", "content": query},
+        ],
+        temperature=0.2,
+    )
+    return response
+    
 def query_normalization_node(state: AgentState) -> Dict[str, Any]:
     """查询规范化节点"""
     user_query = _get_field(state, "user_query", "")
@@ -269,16 +283,8 @@ def query_normalization_node(state: AgentState) -> Dict[str, Any]:
     ])
 
     try:
-        client = _get_openai_client()
-        response = client.chat.completions.create(
-            model=settings.LLM_MODEL,
-            messages=[
-                {"role": "system", "content": prompt},
-                {"role": "user", "content": user_query}
-            ],
-            temperature=0.2
-        )
-
+        future = normalize_query_with_llm(model=settings.LLM_MODEL, prompt=prompt, query=user_query)
+        response = future.result()
         content = ""
         if hasattr(response, "choices") and response.choices:
             first_choice = response.choices[0]
@@ -337,7 +343,18 @@ def query_normalization_node(state: AgentState) -> Dict[str, Any]:
         "normalized_query": normalized_query,
         "constraints": constraints
     }
-
+@task
+def sub_question_generation_with_llm(model: str, prompt: str, query: str):
+    client = _get_openai_client()
+    response = client.chat.completions.create(
+        model=model,
+        messages=[
+            {"role": "system", "content": prompt},
+            {"role": "user", "content": query},
+        ],
+        temperature=0.3,
+    )
+    return response
 def sub_question_generation_node(state: AgentState) -> Dict[str, Any]:
     """Sub-question generation node."""
     normalized_query = _get_field(state, "normalized_query", "")
@@ -346,14 +363,7 @@ def sub_question_generation_node(state: AgentState) -> Dict[str, Any]:
     logger.info(f"Generating sub-questions for query: {normalized_query}")
 
     sub_questions = []
-    try:
-        client = _get_openai_client()
-        response = client.chat.completions.create(
-            model=settings.LLM_MODEL,
-            messages=[
-                {
-                    "role": "system",
-                    "content": "\n".join(
+    prompt="\n".join(
                         [
                             "You are a requirements analysis assistant for a software recommendation system.",
                             "What core problem should this software solve, and who are the target users?",
@@ -363,19 +373,14 @@ def sub_question_generation_node(state: AgentState) -> Dict[str, Any]:
                             "What data types are involved, and is a database or vector database required?",
                             "What is the final delivery format of the software (web service, API, or tool platform)?",
                             "Return only a JSON array or a JSON object containing the sub_questions field. Do not output any other text."
-                        ]
-                    )
-                },
-                {
-                    "role": "user",
-                    "content": json.dumps(
-                        {"query": normalized_query, "constraints": constraints},
-                        ensure_ascii=False
-                    )
-                }
-            ],
-            temperature=0.3
+                        ])
+    try:
+        future = sub_question_generation_with_llm(
+            model=settings.LLM_MODEL,
+            prompt=prompt,
+            query=normalized_query,
         )
+        response = future.result()
 
         content = ""
         if hasattr(response, "choices") and response.choices:
@@ -388,13 +393,9 @@ def sub_question_generation_node(state: AgentState) -> Dict[str, Any]:
                 content = getattr(message, "content", "") if message else ""
 
         parsed = json.loads(content) if content else []
-        if isinstance(parsed, dict):
-            parsed = parsed.get("sub_questions", [])
-
-        if not isinstance(parsed, list):
+        sub_questions = _normalize_sub_questions(parsed)
+        if not sub_questions:
             raise ValueError("LLM response format is not a sub-question list")
-
-        sub_questions = [str(item).strip() for item in parsed if str(item).strip()]
     except Exception as e:
         logger.error(f"Failed to generate sub-questions with LLM: {str(e)}")
 
@@ -420,15 +421,67 @@ def sub_question_generation_node(state: AgentState) -> Dict[str, Any]:
 
 
 def _normalize_sub_questions(raw: Any) -> List[str]:
-    if isinstance(raw, str):
-        raw = [raw]
-    if not isinstance(raw, list):
-        return []
     cleaned: List[str] = []
-    for item in raw:
-        text = str(item).strip()
+    seen = set()
+
+    def append_unique(value: str) -> None:
+        text = str(value or "").strip()
+        if not text or text in seen:
+            return
+        seen.add(text)
+        cleaned.append(text)
+
+    def try_parse_structured_text(text: str) -> Any:
+        stripped = text.strip()
+        if not stripped or stripped[0] not in {"[", "{"}:
+            return None
+        try:
+            return json.loads(stripped)
+        except Exception:
+            pass
+        try:
+            return ast.literal_eval(stripped)
+        except Exception:
+            return None
+
+    def collect(value: Any) -> None:
+        if value is None:
+            return
+
+        if isinstance(value, str):
+            text = value.strip()
+            if not text:
+                return
+            parsed = try_parse_structured_text(text)
+            if parsed is not None:
+                collect(parsed)
+                return
+            append_unique(text)
+            return
+
+        if isinstance(value, dict):
+            preferred: List[Any] = []
+            for key in ("sub_questions", "pending_sub_questions"):
+                if key in value:
+                    preferred.append(value.get(key))
+            if preferred:
+                for item in preferred:
+                    collect(item)
+                return
+            for nested in value.values():
+                collect(nested)
+            return
+
+        if isinstance(value, (list, tuple, set)):
+            for item in value:
+                collect(item)
+            return
+
+        text = str(value).strip()
         if text:
-            cleaned.append(text)
+            append_unique(text)
+
+    collect(raw)
     return cleaned
 
 
@@ -457,9 +510,7 @@ def human_confirmation_node(state: AgentState) -> Dict[str, Any]:
 
     request_payload = {
         "type": "human_confirmation",
-        "query": _get_field(state, "user_query", ""),
         "sub_questions": original_sub_questions,
-        "instruction": "Return JSON only: {\"action\":\"confirm|edit\", \"sub_questions\":[...], \"comment\":\"...\"}",
     }
 
     logger.warning(
