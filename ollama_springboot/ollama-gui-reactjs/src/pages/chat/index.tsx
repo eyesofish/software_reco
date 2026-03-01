@@ -18,29 +18,65 @@ export default function Chat () {
     textAreaRef,
     messages,
     hasTalk,
+    taskId,
+    taskStatus,
+    subQuestions,
+    finalResult,
     loading,
-    confirmLoading,
-    isAwaitingConfirmation,
-    pendingSubQuestions,
-    pendingSessionId,
+    error,
     handleDeleteChat,
     requestHandler,
     handleConfirmClicked
   } = useChatLogic()
 
+  const isConfirming = taskStatus === 'CONFIRMING'
+  const showConfirming = isConfirming
+  const showGenerating = taskStatus === 'GENERATING'
+  const hasFinalInMessages = finalResult.trim().length > 0
+    && messages.some(
+      (message) => message.role === 'assistant' && message.content.trim() === finalResult.trim()
+    )
+  const showFinalResult = taskStatus === 'DONE' && finalResult.trim().length > 0 && !hasFinalInMessages
+
   return (
     <ChatErrorBoundary>
       <RowContainer ref={rowContainerRef}>
-        <Menu loading={loading || confirmLoading} onDeleteChat={handleDeleteChat} scrollRef={rowContainerRef} />
+        <Menu onDeleteChat={handleDeleteChat} scrollRef={rowContainerRef} />
         <ColumnContainer style={{ padding: 8, paddingRight: 0 }}>
-          { (loading || confirmLoading) && <Loading src={LOADING} /> }
+          { (loading || showConfirming) && <Loading src={LOADING} /> }
           { hasTalk ? <MessageList messages={messages} /> : <About /> }
+
+          {showConfirming && (
+            <div className='hitlPanel'>
+              <div className='hitlPanelTitle'>Confirming...</div>
+              <p>Submitting confirmation and syncing task state.</p>
+            </div>
+          )}
+
+          {showGenerating && (
+            <div className='hitlPanel'>
+              <div className='hitlPanelTitle'>Generating final result...</div>
+              <p>The backend is still processing your request.</p>
+            </div>
+          )}
+
+          {showFinalResult && (
+            <div className='hitlPanel'>
+              <div className='hitlPanelTitle'>Final result</div>
+              <p>{finalResult}</p>
+            </div>
+          )}
+
+          {taskStatus === 'ERROR' && error && (
+            <p className='systemMessage'>{error}</p>
+          )}
+
           <ConfirmationPanel
-            confirmLoading={confirmLoading}
-            isAwaitingConfirmation={isAwaitingConfirmation}
+            isConfirming={isConfirming}
             onConfirm={handleConfirmClicked}
-            pendingSessionId={pendingSessionId}
-            pendingSubQuestions={pendingSubQuestions}
+            subQuestions={subQuestions}
+            taskId={taskId}
+            taskStatus={taskStatus}
           />
           <ChatInput
             language={language}

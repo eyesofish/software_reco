@@ -1,89 +1,64 @@
-import { RefObject, useEffect, useReducer, useRef } from 'react'
+import { RefObject, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
 
 import ROUTES from '~/constants/routes'
 import {
-  CONFIRM_PENDING_STORAGE_PREFIX,
-  CONFIRM_RETRY_INTERVAL_TICKS,
-  CONFIRM_STATUS_POLL_INTERVAL_MS,
-  CONFIRM_STATUS_POLL_TIMEOUT_MS,
+  CHAT_CONVERSATION_IDS_STORAGE_KEY,
+  CONFIRM_FAILED_MESSAGE,
   CONFIRM_GUIDE_MESSAGE,
   CONFIRM_ONLY_PATTERN,
-  PENDING_LINE_PATTERN,
-  RECOVERY_POLL_INTERVAL_MS,
-  RECOVERY_POLL_TIMEOUT_MS,
   REQUEST_FAILED_MESSAGE,
   TASK_ID_STORAGE_PREFIX,
-  WAITING_ACK_PATTERN
+  TASK_POLL_INTERVAL_MS
 } from '~/constants/chat'
-import { ConfirmPayload, Message, ModelResponse, SessionStateMessage, SessionStateResponse } from '~/entities/messages'
+import {
+  Message,
+  RecommendTaskStateResponse
+} from '~/entities/messages'
 import createAssistantMessage from '~/services/createAssistantMessage'
 import createUserMessage from '~/services/createUserMessage'
 import getChatIndex from '~/services/getChatIndex'
-import requester, { confirmRequester, getRecommendTaskState, getSessionState, pollSessionState, resolveConfirmUrl } from '~/services/requester'
 import scroller from '~/services/scroller'
 import Store from '~/services/store'
 import { disChats, useChats } from '~/stores/chats'
-import { addMessage, loadChats } from '~/stores/chats/actions'
+import { addMessage } from '~/stores/chats/actions'
 import { useConfig } from '~/stores/config'
+import {
+  confirmTaskRequester,
+  createConversationRequester,
+  createRecommendTaskRequester,
+  getTaskStateRequester,
+  listConversationTasksRequester
+} from '~/services/requester'
+import useTaskPolling from './hooks/useTaskPolling'
+
+export type TaskStatus =
+  | 'IDLE'
+  | 'PENDING_CONFIRM'
+  | 'CONFIRMING'
+  | 'GENERATING'
+  | 'DONE'
+  | 'ERROR'
 
 export interface ChatState {
   currentChatId : number|null,
+  conversationId ?: string,
+  taskId ?: string,
+  taskStatus : TaskStatus,
+  subQuestions : string[],
+  finalResult : string,
   loading : boolean,
-  isAwaitingConfirmation : boolean,
-  pendingSubQuestions : string[],
-  pendingSessionId : string|undefined,
-  confirmLoading : boolean
+  error ?: string
 }
 
-type ChatAction =
-  | { type : 'SET_CURRENT_CHAT_ID', payload : number|null }
-  | { type : 'SET_LOADING', payload : boolean }
-  | { type : 'SET_CONFIRM_LOADING', payload : boolean }
-  | {
-    type : 'SET_CONFIRMATION_STATE',
-    payload : {
-      isAwaitingConfirmation : boolean,
-      pendingSubQuestions : string[],
-      pendingSessionId : string|undefined
-    }
-  }
-  | { type : 'RESET_CONFIRMATION_STATE' }
-
-const INITIAL_CHAT_STATE : ChatState = {
-  currentChatId: null,
-  loading: true,
-  isAwaitingConfirmation: false,
-  pendingSubQuestions: [],
-  pendingSessionId: undefined,
-  confirmLoading: false
-}
-
-function chatStateReducer (state : ChatState, action : ChatAction) : ChatState {
-  switch (action.type) {
-    case 'SET_CURRENT_CHAT_ID':
-      return { ...state, currentChatId: action.payload }
-    case 'SET_LOADING':
-      return { ...state, loading: action.payload }
-    case 'SET_CONFIRM_LOADING':
-      return { ...state, confirmLoading: action.payload }
-    case 'SET_CONFIRMATION_STATE':
-      return {
-        ...state,
-        isAwaitingConfirmation: action.payload.isAwaitingConfirmation,
-        pendingSubQuestions: action.payload.pendingSubQuestions,
-        pendingSessionId: action.payload.pendingSessionId
-      }
-    case 'RESET_CONFIRMATION_STATE':
-      return {
-        ...state,
-        isAwaitingConfirmation: false,
-        pendingSubQuestions: [],
-        pendingSessionId: undefined
-      }
-    default:
-      return state
-  }
+interface ConversationTaskSnapshot {
+  conversationId : string,
+  activeTaskId ?: string,
+  taskStatus : TaskStatus,
+  subQuestions : string[],
+  finalResult : string,
+  loading : boolean,
+  error ?: string
 }
 
 interface UseChatLogicResult {
@@ -91,1071 +66,855 @@ interface UseChatLogicResult {
   textAreaRef : RefObject<HTMLTextAreaElement>,
   messages : Message[],
   hasTalk : boolean,
+  taskId : string|undefined,
+  taskStatus : TaskStatus,
+  subQuestions : string[],
+  finalResult : string,
   loading : boolean,
-  confirmLoading : boolean,
-  isAwaitingConfirmation : boolean,
-  pendingSubQuestions : string[],
-  pendingSessionId : string|undefined,
+  error : string|undefined,
   handleDeleteChat : (chatId : number) => void,
   requestHandler : () => void,
   handleConfirmClicked : () => Promise<void>
 }
 
-interface ConfirmPendingState {
-  sessionId : string,
-  conversationId ?: string,
-  pendingSubQuestions : string[],
-  updatedAt : number
+const DEFAULT_VIEW_STATE : ChatState = {
+  currentChatId: null,
+  conversationId: undefined,
+  taskId: undefined,
+  taskStatus: 'IDLE',
+  subQuestions: [],
+  finalResult: '',
+  loading: false,
+  error: undefined
+}
+
+function normalizeText (value : unknown) {
+  return String(value || '').trim()
+}
+
+function extractQuotedStrings (raw : string) : string[] {
+  const matches = raw.match(/'(?:\\.|[^'\\])*'|"(?:\\.|[^"\\])*"/g) || []
+  const extracted : string[] = []
+
+  for (const match of matches) {
+    if (match.length < 2) continue
+    const quote = match[0]
+    const body = match.slice(1, -1)
+    const unescaped = quote === '\''
+      ? body.replace(/\\'/g, '\'').replace(/\\\\/g, '\\')
+      : body.replace(/\\"/g, '"').replace(/\\\\/g, '\\')
+    const text = normalizeText(unescaped)
+    if (!text) continue
+    if (text === 'sub_questions' || text === 'pending_sub_questions') continue
+    extracted.push(text)
+  }
+
+  return extracted
+}
+
+function parseStructuredSubQuestionString (raw : string) : unknown {
+  const text = normalizeText(raw)
+  if (!text || (text[0] !== '{' && text[0] !== '[')) {
+    return undefined
+  }
+
+  try {
+    return JSON.parse(text)
+  }
+  catch {
+    const extracted = extractQuotedStrings(text)
+    return extracted.length > 0 ? extracted : undefined
+  }
+}
+
+function collectSubQuestions (raw : unknown, output : string[], seen : Set<string>) {
+  if (raw == null) return
+
+  if (typeof raw === 'string') {
+    const text = normalizeText(raw)
+    if (!text) return
+
+    const parsed = parseStructuredSubQuestionString(text)
+    if (parsed !== undefined) {
+      collectSubQuestions(parsed, output, seen)
+      return
+    }
+
+    if ((text.startsWith('{') || text.startsWith('['))
+      && (text.includes('sub_questions') || text.includes('pending_sub_questions'))) {
+      return
+    }
+
+    if (!seen.has(text)) {
+      seen.add(text)
+      output.push(text)
+    }
+    return
+  }
+
+  if (Array.isArray(raw)) {
+    for (const item of raw) {
+      collectSubQuestions(item, output, seen)
+    }
+    return
+  }
+
+  if (typeof raw === 'object') {
+    const record = raw as Record<string, unknown>
+    const preferred = [record.sub_questions, record.pending_sub_questions]
+      .filter((item) => item !== undefined)
+    if (preferred.length > 0) {
+      for (const item of preferred) {
+        collectSubQuestions(item, output, seen)
+      }
+      return
+    }
+
+    for (const value of Object.values(record)) {
+      collectSubQuestions(value, output, seen)
+    }
+    return
+  }
+
+  const text = normalizeText(raw)
+  if (!text || seen.has(text)) return
+  seen.add(text)
+  output.push(text)
+}
+
+function normalizeSubQuestions (raw : unknown) : string[] {
+  const normalized : string[] = []
+  collectSubQuestions(raw, normalized, new Set())
+  return normalized
+}
+
+function normalizeTaskStatus (
+  rawStatus : unknown,
+  subQuestions : string[],
+  finalResult : string,
+  errorMessage : string
+) : TaskStatus {
+  const normalized = normalizeText(rawStatus).toUpperCase()
+
+  if (normalized === 'PENDING_CONFIRM') {
+    return 'PENDING_CONFIRM'
+  }
+
+  if (normalized === 'CONFIRMED' || normalized === 'GENERATING' || normalized === 'CONFIRMING') {
+    return 'GENERATING'
+  }
+
+  if (normalized === 'DONE' || normalized === 'SUCCESS') {
+    return 'DONE'
+  }
+
+  if (normalized === 'FAILED' || normalized === 'EXPIRED' || normalized === 'ERROR') {
+    return 'ERROR'
+  }
+
+  if (subQuestions.length > 0) {
+    return 'PENDING_CONFIRM'
+  }
+
+  if (errorMessage) {
+    return 'ERROR'
+  }
+
+  if (finalResult) {
+    // Non-DONE backend statuses must never be rendered as completed.
+    return 'GENERATING'
+  }
+
+  return 'IDLE'
+}
+
+function taskStorageKey (conversationId : string) {
+  return `${TASK_ID_STORAGE_PREFIX}${conversationId}`
+}
+
+function readConversationIdsStorage () : string[] {
+  try {
+    const raw = localStorage.getItem(CHAT_CONVERSATION_IDS_STORAGE_KEY)
+    if (!raw) return []
+    const parsed = JSON.parse(raw)
+    if (!Array.isArray(parsed)) return []
+    return parsed.map((item) => normalizeText(item))
+  }
+  catch {
+    return []
+  }
+}
+
+function writeConversationIdsStorage (value : string[]) {
+  try {
+    localStorage.setItem(CHAT_CONVERSATION_IDS_STORAGE_KEY, JSON.stringify(value))
+  }
+  catch {
+    // ignore storage failures
+  }
+}
+
+function toErrorMessage (error : unknown, fallback = REQUEST_FAILED_MESSAGE) {
+  if (error instanceof Error && error.message.trim()) {
+    return error.message
+  }
+  if (typeof error === 'string' && error.trim()) {
+    return error
+  }
+  return fallback
+}
+
+function buildSnapshotFromTask (
+  fallbackConversationId : string,
+  taskState : RecommendTaskStateResponse,
+  loading : boolean
+) : ConversationTaskSnapshot {
+  const conversationId = normalizeText(taskState.conversation_id || taskState.conversationId) || fallbackConversationId
+  const taskId = normalizeText(taskState.task_id || taskState.taskId)
+  const subQuestions = normalizeSubQuestions(
+    taskState.pending_sub_questions
+    ?? taskState.pendingSubQuestions
+    ?? taskState.sub_questions
+    ?? taskState.subQuestions
+  )
+  const finalResult = normalizeText(taskState.final_result ?? taskState.finalResult)
+  const errorMessage = normalizeText(taskState.error_message ?? taskState.errorMessage)
+
+  const taskStatus = normalizeTaskStatus(taskState.status, subQuestions, finalResult, errorMessage)
+
+  return {
+    conversationId,
+    activeTaskId: taskId || undefined,
+    taskStatus,
+    subQuestions: taskStatus === 'PENDING_CONFIRM' ? subQuestions : [],
+    finalResult: taskStatus === 'DONE' ? finalResult : '',
+    loading: taskStatus === 'PENDING_CONFIRM' ? false : loading,
+    error: taskStatus === 'ERROR' ? (errorMessage || REQUEST_FAILED_MESSAGE) : undefined
+  }
+}
+
+function resolveConversationIdFromMessages (messages : Message[]|undefined) : string|undefined {
+  if (!messages || messages.length === 0) return undefined
+
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const candidate = normalizeText(messages[i].conversationId)
+    if (candidate) return candidate
+  }
+
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const candidate = normalizeText(messages[i].sessionId)
+    if (candidate) return candidate
+  }
+
+  return undefined
+}
+
+function isTerminalTaskStatus (status : TaskStatus) {
+  return status === 'DONE' || status === 'ERROR' || status === 'IDLE'
 }
 
 export default function useChatLogic () : UseChatLogicResult {
   const navigate = useNavigate()
   const { chat } = useParams()
-  const [chatState, dispatch] = useReducer(chatStateReducer, INITIAL_CHAT_STATE)
   const chats = useChats('chats')
-  const { autoSaveChats, modelName, modelUrl } = useConfig('config')
-  const activeConversationId = useRef<string|undefined>(undefined)
-  const activeSessionId = useRef<string|undefined>(undefined)
-  const shouldRestoreHistoryOnEnter = useRef(true)
-  const renderCount = useRef(0)
+  const { autoSaveChats, modelUrl } = useConfig('config')
+
+  const [chatState, setChatState] = useState<ChatState>(DEFAULT_VIEW_STATE)
+
   const rowContainerRef = useRef<HTMLDivElement>(null)
   const textAreaRef = useRef<HTMLTextAreaElement>(null)
+
   const chatsRef = useRef(chats)
   const currentChatIdRef = useRef<number|null>(null)
-  const recoveryAttemptRef = useRef(0)
-  const recoveryAbortControllerRef = useRef<AbortController|null>(null)
-  const confirmPollAttemptRef = useRef(0)
-  const confirmPollAbortControllerRef = useRef<AbortController|null>(null)
-  const confirmPollTargetRef = useRef<string|undefined>(undefined)
-  const {
-    currentChatId,
-    loading,
-    isAwaitingConfirmation,
-    pendingSubQuestions,
-    pendingSessionId,
-    confirmLoading
-  } = chatState
+  const activeConversationIdRef = useRef<string|undefined>(undefined)
+  const destroyedRef = useRef(false)
+  const renderCountRef = useRef(0)
+  const bootstrapTokenRef = useRef(0)
 
-  function setCurrentChatId (chatId : number|null) {
-    dispatch({ type: 'SET_CURRENT_CHAT_ID', payload: chatId })
-  }
+  const conversationSnapshotsRef = useRef<Record<string, ConversationTaskSnapshot>>({})
 
-  function setLoading (nextLoading : boolean) {
-    dispatch({ type: 'SET_LOADING', payload: nextLoading })
-  }
+  const pollTaskContextRef = useRef<{ taskId ?: string, conversationId ?: string }>({})
+  const confirmInFlightRef = useRef(false)
 
-  function setConfirmLoading (nextLoading : boolean) {
-    dispatch({ type: 'SET_CONFIRM_LOADING', payload: nextLoading })
-  }
+  const applySnapshot = useCallback((snapshot : ConversationTaskSnapshot) => {
+    conversationSnapshotsRef.current[snapshot.conversationId] = snapshot
 
-  function setConfirmationState (
-    awaiting : boolean,
-    pending : string[],
-    sessionId ?: string
-  ) {
-    dispatch({
-      type: 'SET_CONFIRMATION_STATE',
-      payload: {
-        isAwaitingConfirmation: awaiting,
-        pendingSubQuestions: pending,
-        pendingSessionId: sessionId
+    if (snapshot.activeTaskId) {
+      try {
+        localStorage.setItem(taskStorageKey(snapshot.conversationId), snapshot.activeTaskId)
       }
+      catch {
+        // ignore storage failures
+      }
+    }
+
+    if (activeConversationIdRef.current !== snapshot.conversationId) {
+      return
+    }
+
+    setChatState((prev) => ({
+      ...prev,
+      conversationId: snapshot.conversationId,
+      taskId: snapshot.activeTaskId,
+      taskStatus: snapshot.taskStatus,
+      subQuestions: snapshot.subQuestions,
+      finalResult: snapshot.finalResult,
+      loading: snapshot.loading,
+      error: snapshot.error
+    }))
+  }, [])
+
+  const setSnapshotPatch = useCallback((conversationId : string, patch : Partial<ConversationTaskSnapshot>) => {
+    const current = conversationSnapshotsRef.current[conversationId] || {
+      conversationId,
+      activeTaskId: undefined,
+      taskStatus: 'IDLE' as TaskStatus,
+      subQuestions: [],
+      finalResult: '',
+      loading: false,
+      error: undefined
+    }
+
+    const nextTaskStatus = patch.taskStatus ?? current.taskStatus
+    const nextLoading = patch.loading ?? current.loading
+
+    applySnapshot({
+      ...current,
+      ...patch,
+      loading: nextTaskStatus === 'PENDING_CONFIRM' ? false : nextLoading,
+      conversationId
     })
-  }
+  }, [applySnapshot])
 
-  function resetConfirmationState () {
-    dispatch({ type: 'RESET_CONFIRMATION_STATE' })
-  }
+  const appendAssistantMessage = useCallback((chatId : number, content : string, conversationId ?: string, taskId ?: string) => {
+    const text = normalizeText(content)
+    if (!text) return
 
-  function resolveConversationRefs (messages : Message[]|undefined) : {
-    conversationId ?: string,
-    sessionId ?: string
-  } {
-    if (!messages || messages.length === 0) {
-      return {}
+    const existing = chatsRef.current[chatId] || []
+    const duplicated = existing.some(
+      (message) => message.role === 'assistant' && normalizeText(message.content) === text
+    )
+    if (duplicated) return
+
+    disChats(addMessage({
+      index: chatId,
+      message: createAssistantMessage(text, conversationId, taskId)
+    }))
+  }, [])
+
+  const { startPolling, stopPolling } = useTaskPolling({
+    modelUrl,
+    intervalMs: TASK_POLL_INTERVAL_MS,
+    onTask : (taskState) => {
+      const conversationId = normalizeText(taskState.conversation_id || taskState.conversationId)
+        || pollTaskContextRef.current.conversationId
+      if (!conversationId) return
+
+      const snapshot = buildSnapshotFromTask(conversationId, taskState, false)
+      applySnapshot(snapshot)
+
+      if (snapshot.taskStatus === 'DONE' && snapshot.finalResult) {
+        const activeChatId = currentChatIdRef.current
+        if (activeChatId !== null && activeConversationIdRef.current === conversationId) {
+          appendAssistantMessage(activeChatId, snapshot.finalResult, conversationId, snapshot.activeTaskId)
+        }
+      }
+
+      if (isTerminalTaskStatus(snapshot.taskStatus)) {
+        pollTaskContextRef.current = {}
+      }
+    },
+    onError : (error) => {
+      const conversationId = pollTaskContextRef.current.conversationId
+      if (!conversationId) return
+      setSnapshotPatch(conversationId, {
+        loading: false,
+        taskStatus: 'ERROR',
+        error: toErrorMessage(error)
+      })
+      pollTaskContextRef.current = {}
     }
-    for (let i = messages.length - 1; i >= 0; i--) {
-      const message = messages[i]
-      const conversationId = message.conversationId?.trim()
-      const sessionId = message.sessionId?.trim()
-      if (conversationId || sessionId) {
-        return { conversationId, sessionId }
+  })
+
+  const stopActivePolling = useCallback(() => {
+    stopPolling()
+    pollTaskContextRef.current = {}
+  }, [stopPolling])
+
+  const startPollingForTask = useCallback((conversationId : string, taskId : string) => {
+    const normalizedConversationId = normalizeText(conversationId)
+    const normalizedTaskId = normalizeText(taskId)
+    if (!normalizedConversationId || !normalizedTaskId) return
+
+    pollTaskContextRef.current = {
+      conversationId: normalizedConversationId,
+      taskId: normalizedTaskId
+    }
+
+    startPolling(normalizedTaskId)
+  }, [startPolling])
+
+  const syncTaskState = useCallback(async (
+    conversationId : string,
+    taskId : string,
+    loading : boolean
+  ) => {
+    const taskState = await getTaskStateRequester(modelUrl, taskId)
+    const snapshot = buildSnapshotFromTask(conversationId, taskState, loading)
+    applySnapshot(snapshot)
+
+    if (snapshot.taskStatus === 'DONE' && snapshot.finalResult) {
+      const chatId = currentChatIdRef.current
+      if (chatId !== null && activeConversationIdRef.current === snapshot.conversationId) {
+        appendAssistantMessage(chatId, snapshot.finalResult, snapshot.conversationId, snapshot.activeTaskId)
       }
     }
-    return {}
-  }
 
-  function isConfirmationOnlyText (text : string) : boolean {
-    return CONFIRM_ONLY_PATTERN.test(text.trim())
-  }
-
-  function generateSessionId () : string {
-    if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
-      return crypto.randomUUID()
+    if (snapshot.activeTaskId && snapshot.taskStatus === 'GENERATING') {
+      startPollingForTask(snapshot.conversationId, snapshot.activeTaskId)
     }
-    return `${Date.now()}-${Math.random().toString(16).slice(2)}`
-  }
 
-  function taskStorageKey (chatId : number) : string {
-    return `${TASK_ID_STORAGE_PREFIX}${chatId}`
-  }
+    return snapshot
+  }, [applySnapshot, appendAssistantMessage, modelUrl, startPollingForTask])
 
-  function readStoredTaskId (chatId : number|null) : string|undefined {
-    if (chatId === null) return undefined
-    try {
-      const candidate = localStorage.getItem(taskStorageKey(chatId))?.trim()
-      return candidate || undefined
-    } catch {
-      return undefined
+  const getConversationIdForChat = useCallback((chatId : number) => {
+    const messages = chatsRef.current[chatId] || []
+    const fromMessages = resolveConversationIdFromMessages(messages)
+    if (fromMessages) return fromMessages
+
+    const mapping = readConversationIdsStorage()
+    const fromStorage = normalizeText(mapping[chatId])
+    return fromStorage || undefined
+  }, [])
+
+  const setConversationIdForChat = useCallback((chatId : number, conversationId : string) => {
+    const mapping = readConversationIdsStorage()
+    while (mapping.length <= chatId) {
+      mapping.push('')
     }
-  }
+    mapping[chatId] = conversationId
+    writeConversationIdsStorage(mapping)
+  }, [])
 
-  function storeTaskId (chatId : number|null, taskId ?: string) {
-    if (chatId === null) return
-    const value = String(taskId || '').trim()
-    try {
-      if (!value) {
-        localStorage.removeItem(taskStorageKey(chatId))
+  const deleteConversationIdForChat = useCallback((chatId : number) => {
+    const mapping = readConversationIdsStorage()
+    if (chatId < 0 || chatId >= mapping.length) return
+    mapping.splice(chatId, 1)
+    writeConversationIdsStorage(mapping)
+  }, [])
+
+  const loadConversationState = useCallback(async (chatId : number, conversationId : string, token : number) => {
+    setSnapshotPatch(conversationId, { loading: true, error: undefined })
+
+    const snapshot = conversationSnapshotsRef.current[conversationId]
+    let candidateTaskId = normalizeText(snapshot?.activeTaskId)
+
+    if (!candidateTaskId) {
+      try {
+        candidateTaskId = normalizeText(localStorage.getItem(taskStorageKey(conversationId)))
+      }
+      catch {
+        candidateTaskId = ''
+      }
+    }
+
+    if (!candidateTaskId) {
+      try {
+        const tasks = await listConversationTasksRequester(modelUrl, conversationId)
+        const firstTask = tasks[0]
+        candidateTaskId = normalizeText(firstTask?.task_id || firstTask?.taskId)
+      }
+      catch (error) {
+        if (token !== bootstrapTokenRef.current || destroyedRef.current) return
+        setSnapshotPatch(conversationId, {
+          loading: false,
+          taskStatus: 'ERROR',
+          error: toErrorMessage(error)
+        })
         return
       }
-      localStorage.setItem(taskStorageKey(chatId), value)
-    } catch {
-      // localStorage unavailable
     }
-  }
 
-  function confirmPendingStorageKey (chatId : number) : string {
-    return `${CONFIRM_PENDING_STORAGE_PREFIX}${chatId}`
-  }
+    if (!candidateTaskId) {
+      if (token !== bootstrapTokenRef.current || destroyedRef.current) return
+      setSnapshotPatch(conversationId, {
+        activeTaskId: undefined,
+        taskStatus: 'IDLE',
+        subQuestions: [],
+        finalResult: '',
+        loading: false,
+        error: undefined
+      })
+      return
+    }
 
-  function readConfirmPendingState (chatId : number|null) : ConfirmPendingState|undefined {
-    if (chatId === null) return undefined
     try {
-      const raw = localStorage.getItem(confirmPendingStorageKey(chatId))
-      if (!raw) return undefined
-      const parsed = JSON.parse(raw) as Partial<ConfirmPendingState>
-      const sessionId = String(parsed.sessionId || '').trim()
-      if (!sessionId) return undefined
-      return {
-        sessionId,
-        conversationId: String(parsed.conversationId || '').trim() || undefined,
-        pendingSubQuestions: normalizePendingSubQuestions(parsed.pendingSubQuestions),
-        updatedAt: Number(parsed.updatedAt || Date.now())
+      const synced = await syncTaskState(conversationId, candidateTaskId, false)
+      if (token !== bootstrapTokenRef.current || destroyedRef.current) return
+
+      if (synced.taskStatus === 'GENERATING' && synced.activeTaskId) {
+        startPollingForTask(conversationId, synced.activeTaskId)
       }
-    } catch {
-      return undefined
     }
-  }
-
-  function storeConfirmPendingState (
-    chatId : number|null,
-    sessionId : string,
-    conversationId ?: string,
-    pending : string[] = []
-  ) {
-    if (chatId === null) return
-    const normalizedSessionId = String(sessionId || '').trim()
-    if (!normalizedSessionId) return
-    try {
-      const payload : ConfirmPendingState = {
-        sessionId: normalizedSessionId,
-        conversationId: String(conversationId || '').trim() || undefined,
-        pendingSubQuestions: normalizePendingSubQuestions(pending),
-        updatedAt: Date.now()
-      }
-      localStorage.setItem(confirmPendingStorageKey(chatId), JSON.stringify(payload))
-    } catch {
-      // localStorage unavailable
+    catch (error) {
+      if (token !== bootstrapTokenRef.current || destroyedRef.current) return
+      setSnapshotPatch(conversationId, {
+        loading: false,
+        taskStatus: 'ERROR',
+        error: toErrorMessage(error)
+      })
     }
-  }
 
-  function clearConfirmPendingState (chatId : number|null) {
-    if (chatId === null) return
-    try {
-      localStorage.removeItem(confirmPendingStorageKey(chatId))
-    } catch {
-      // localStorage unavailable
+    if (token !== bootstrapTokenRef.current || destroyedRef.current) return
+    scroller(rowContainerRef, 1)
+
+    const currentMessages = chatsRef.current[chatId] || []
+    if (currentMessages.length === 0) {
+      return
     }
-  }
+  }, [modelUrl, setSnapshotPatch, startPollingForTask, syncTaskState])
 
-  function normalizeTaskStatus (status : unknown) : string {
-    return String(status || '').trim().toUpperCase()
-  }
+  const handleDeleteChat = useCallback((chatId : number) => {
+    deleteConversationIdForChat(chatId)
+    const deletedConversationId = getConversationIdForChat(chatId)
+    if (deletedConversationId) {
+      delete conversationSnapshotsRef.current[deletedConversationId]
+    }
 
-  function isTerminalTaskStatus (status : string, finalResult : string) : boolean {
-    if (finalResult.trim()) return true
-    return status === 'DONE' || status === 'FAILED'
-  }
+    if (currentChatIdRef.current !== chatId) return
 
-  async function sleepWithAbort (ms : number, signal ?: AbortSignal) : Promise<void> {
-    await new Promise<void>((resolve) => {
-      if (signal?.aborted) {
-        resolve()
-        return
-      }
-      const onAbort = () => {
-        clearTimeout(timer)
-        signal?.removeEventListener('abort', onAbort)
-        resolve()
-      }
-      const timer = setTimeout(() => {
-        signal?.removeEventListener('abort', onAbort)
-        resolve()
-      }, ms)
-      signal?.addEventListener('abort', onAbort, { once: true })
+    stopActivePolling()
+    activeConversationIdRef.current = undefined
+    setChatState({
+      ...DEFAULT_VIEW_STATE,
+      currentChatId: null
     })
-  }
+  }, [deleteConversationIdForChat, getConversationIdForChat, stopActivePolling])
 
-  function buildMessageKey (role : Message['role'], content : string) : string {
-    return `${role}::${content.trim()}`
-  }
+  const tryConfirmCurrentTask = useCallback(async () : Promise<boolean> => {
+    const chatId = currentChatIdRef.current
+    const conversationId = activeConversationIdRef.current
+    if (chatId === null || !conversationId) return false
 
-  function buildMessageOccurrences (
-    messages : Array<Pick<Message, 'role' | 'content'>>
-  ) : Map<string, number> {
-    const occurrences = new Map<string, number>()
-    for (const message of messages) {
-      const key = buildMessageKey(message.role, message.content)
-      occurrences.set(key, (occurrences.get(key) || 0) + 1)
+    const currentSnapshot = conversationSnapshotsRef.current[conversationId]
+    const taskId = normalizeText(currentSnapshot?.activeTaskId || chatState.taskId)
+    if (!taskId) {
+      return false
     }
-    return occurrences
-  }
 
-  function mergeRestoredWithLocalMessages (
-    localMessages : Message[],
-    restoredMessages : Message[]
-  ) : Message[] {
-    if (localMessages.length === 0) return restoredMessages
-    if (restoredMessages.length === 0) return localMessages
+    let effectiveSnapshot = currentSnapshot
+    const localStatus = effectiveSnapshot?.taskStatus || chatState.taskStatus
+    const localSubQuestions = effectiveSnapshot?.subQuestions || chatState.subQuestions
 
-    const restoredOccurrences = buildMessageOccurrences(restoredMessages)
-    const localOnlyMessages : Message[] = []
-
-    for (const message of localMessages) {
-      const key = buildMessageKey(message.role, message.content)
-      const remaining = restoredOccurrences.get(key) || 0
-      if (remaining > 0) {
-        restoredOccurrences.set(key, remaining - 1)
-        continue
+    if (localStatus !== 'PENDING_CONFIRM' || localSubQuestions.length === 0) {
+      try {
+        effectiveSnapshot = await syncTaskState(conversationId, taskId, false)
       }
-      localOnlyMessages.push(message)
-    }
-
-    return [...restoredMessages, ...localOnlyMessages]
-  }
-
-  function cancelRecoveryPolling () {
-    recoveryAttemptRef.current += 1
-    recoveryAbortControllerRef.current?.abort()
-    recoveryAbortControllerRef.current = null
-  }
-
-  function cancelConfirmStatusPolling () {
-    confirmPollAttemptRef.current += 1
-    confirmPollAbortControllerRef.current?.abort()
-    confirmPollAbortControllerRef.current = null
-    confirmPollTargetRef.current = undefined
-  }
-
-  function isImmediateDuplicateMessage (
-    chatId : number,
-    role : Message['role'],
-    content : string
-  ) : boolean {
-    const currentMessages = chatsRef.current[chatId] || []
-    if (currentMessages.length === 0) return false
-    const lastMessage = currentMessages[currentMessages.length - 1]
-    return buildMessageKey(lastMessage.role, lastMessage.content) === buildMessageKey(role, content)
-  }
-
-  function hasAnyDuplicateMessage (
-    chatId : number,
-    role : Message['role'],
-    content : string
-  ) : boolean {
-    const currentMessages = chatsRef.current[chatId] || []
-    if (currentMessages.length === 0) return false
-    const candidateKey = buildMessageKey(role, content)
-    for (const message of currentMessages) {
-      if (buildMessageKey(message.role, message.content) === candidateKey) {
+      catch (error) {
+        setSnapshotPatch(conversationId, {
+          taskStatus: 'ERROR',
+          loading: false,
+          error: toErrorMessage(error)
+        })
         return true
       }
     }
-    return false
-  }
 
-  function handleDeleteChat (chatId : number) {
-    storeTaskId(chatId, undefined)
-    clearConfirmPendingState(chatId)
-    if (currentChatId !== chatId) return
-    cancelRecoveryPolling()
-    cancelConfirmStatusPolling()
-    setCurrentChatId(null)
-    shouldRestoreHistoryOnEnter.current = false
-    activeConversationId.current = undefined
-    activeSessionId.current = undefined
-    resetConfirmationState()
-    setConfirmLoading(false)
-    setLoading(false)
-  }
+    const status = effectiveSnapshot?.taskStatus || localStatus
+    const subQuestions = effectiveSnapshot?.subQuestions || localSubQuestions
 
-  function appendAssistantMessage (content : string, conversationId ?: string, sessionId ?: string) : boolean {
-    if (currentChatIdRef.current === null) return false
-    const rawContent = String(content || '')
-    if (!rawContent.trim()) return false
-    const chatId = currentChatIdRef.current
-    if (isImmediateDuplicateMessage(chatId, 'assistant', rawContent)) {
+    if (status !== 'PENDING_CONFIRM') {
       return false
     }
-    const assistantMessage = createAssistantMessage(rawContent, conversationId, sessionId)
-    disChats(addMessage({ index: chatId, message: assistantMessage }))
-    return true
-  }
 
-  function normalizeSessionMessages (messages : SessionStateMessage[]|undefined) : SessionStateMessage[] {
-    if (!Array.isArray(messages)) {
-      return []
+    if (confirmInFlightRef.current) {
+      return true
     }
 
-    const normalized : SessionStateMessage[] = []
-    for (const item of messages as Array<Partial<SessionStateMessage>>) {
-      const role = String(item.role || '').trim().toLowerCase()
-      const content = String(item.content || '')
-      if (!content.trim()) continue
-      if (role !== 'user' && role !== 'assistant' && role !== 'system') continue
-      normalized.push({ role: role as SessionStateMessage['role'], content })
-    }
-    return normalized
-  }
+    confirmInFlightRef.current = true
 
-  function appendRecoveredSessionMessages (
-    chatId : number,
-    messages : SessionStateMessage[]|undefined,
-    conversationId : string,
-    sessionId : string
-  ) : number {
-    const normalized = normalizeSessionMessages(messages)
-    if (normalized.length === 0) {
-      return 0
-    }
-
-    const currentMessages = chatsRef.current[chatId] || []
-    const existingOccurrences = buildMessageOccurrences(currentMessages)
-    const sourceSeenOccurrences = new Map<string, number>()
-    const recoveredMessages : Message[] = []
-    let nextTime = Date.now()
-
-    for (const message of normalized) {
-      if (message.role !== 'assistant' && message.role !== 'system') {
-        continue
-      }
-      const messageKey = buildMessageKey(message.role, message.content)
-      const nextSeen = (sourceSeenOccurrences.get(messageKey) || 0) + 1
-      sourceSeenOccurrences.set(messageKey, nextSeen)
-
-      const existingCount = existingOccurrences.get(messageKey) || 0
-      if (nextSeen <= existingCount) {
-        continue
-      }
-      existingOccurrences.set(messageKey, existingCount + 1)
-      recoveredMessages.push({
-        role: message.role,
-        content: message.content,
-        time: nextTime++,
-        conversationId,
-        sessionId
-      })
-    }
-
-    if (recoveredMessages.length === 0) {
-      return 0
-    }
-
-    const nextChats = [...chatsRef.current]
-    const prevMessages = Array.isArray(nextChats[chatId]) ? [...nextChats[chatId]] : []
-    nextChats[chatId] = [...prevMessages, ...recoveredMessages]
-    disChats(loadChats(nextChats))
-
-    return recoveredMessages.length
-  }
-
-  function normalizePendingSubQuestions (raw : unknown) : string[] {
-    if (!Array.isArray(raw)) {
-      return []
-    }
-    const normalized : string[] = []
-    for (const item of raw) {
-      const text = String(item || '').trim()
-      if (!text) continue
-      normalized.push(text)
-    }
-    return normalized
-  }
-
-  function parsePendingSubQuestionsFromText (content : string) : string[] {
-    const pending : string[] = []
-    const lines = content.split(/\r?\n/)
-    for (const line of lines) {
-      const matched = line.match(PENDING_LINE_PATTERN)
-      if (!matched) continue
-      const question = String(matched[1] || '').trim()
-      if (!question) continue
-      pending.push(question)
-    }
-    return pending
-  }
-
-  function resolveHitlStateFromSessionState (sessionState : SessionStateResponse) : {
-    awaiting : boolean,
-    pending : string[]
-  } {
-    const structuredPending = normalizePendingSubQuestions(
-      sessionState.pending_sub_questions ?? sessionState.pendingSubQuestions
-    )
-    const structuredAwaiting = sessionState.awaiting_human_confirmation ?? sessionState.awaitingHumanConfirmation
-
-    if (typeof structuredAwaiting === 'boolean') {
-      return {
-        awaiting: structuredAwaiting,
-        pending: structuredPending
-      }
-    }
-    if (structuredPending.length > 0) {
-      return {
-        awaiting: true,
-        pending: structuredPending
-      }
-    }
-
-    const restoredSessionMessages = normalizeSessionMessages(sessionState.messages)
-    for (let i = restoredSessionMessages.length - 1; i >= 0; i--) {
-      const message = restoredSessionMessages[i]
-      if (message.role !== 'assistant') continue
-      const content = String(message.content || '').trim()
-      if (!content) continue
-      const parsedPending = parsePendingSubQuestionsFromText(content)
-      const awaiting = WAITING_ACK_PATTERN.test(content) || parsedPending.length > 0
-      return {
-        awaiting,
-        pending: parsedPending
-      }
-    }
-
-    return {
-      awaiting: false,
-      pending: []
-    }
-  }
-
-  function applyRecoveredHitlState (
-    sessionState : SessionStateResponse,
-    sessionId : string
-  ) {
-    const hitl = resolveHitlStateFromSessionState(sessionState)
-    if (hitl.awaiting) {
-      setConfirmationState(true, hitl.pending, sessionId)
-      return
-    }
-
-    resetConfirmationState()
-  }
-
-  async function restoreMessagesFromSessionState (
-    chatId : number,
-    sessionId : string,
-    conversationId ?: string
-  ) {
-    try {
-      const sessionState = await getSessionState(modelUrl, sessionId)
-      const restoredSessionMessages = normalizeSessionMessages(sessionState.messages)
-      const resolvedConversationId = conversationId || sessionState.conversation_id || sessionId
-
-      if (restoredSessionMessages.length > 0) {
-        const baseTime = Date.now()
-        const restoredMessages : Message[] = restoredSessionMessages.map((message, index) => ({
-          role: message.role,
-          content: message.content,
-          time: baseTime + index,
-          conversationId: resolvedConversationId,
-          sessionId
-        }))
-
-        const nextChats = [...chatsRef.current]
-        const localMessages = Array.isArray(nextChats[chatId]) ? [...nextChats[chatId]] : []
-        nextChats[chatId] = mergeRestoredWithLocalMessages(localMessages, restoredMessages)
-        disChats(loadChats(nextChats))
-      }
-
-      activeConversationId.current = resolvedConversationId
-      activeSessionId.current = sessionId
-      applyRecoveredHitlState(sessionState, sessionId)
-
-      console.info('session-state-restored', {
-        session_id: sessionId,
-        restored_count: restoredSessionMessages.length
-      })
-    } catch (error) {
-      console.warn('session-state-restore-failed', {
-        session_id: sessionId,
-        error
-      })
-    }
-  }
-
-  async function restoreStateFromTaskState (
-    chatId : number,
-    taskId : string,
-    conversationId ?: string
-  ) : Promise<{
-    status : string,
-    awaiting : boolean,
-    pending : string[],
-    finalResult : string
-  }> {
-    try {
-      const taskState = await getRecommendTaskState(modelUrl, taskId)
-      const status = normalizeTaskStatus(taskState.status)
-      const finalResult = String(taskState.final_result ?? taskState.finalResult ?? '').trim()
-      const subQuestions = normalizePendingSubQuestions(
-        taskState.sub_questions ?? taskState.subQuestions
-      )
-      const resolvedConversationId = conversationId || activeConversationId.current || taskId
-
-      if (finalResult && !hasAnyDuplicateMessage(chatId, 'assistant', finalResult)) {
-        appendAssistantMessage(finalResult, resolvedConversationId, taskId)
-      }
-
-      if (status === 'PENDING_CONFIRM') {
-        setConfirmationState(true, subQuestions, taskId)
-      } else {
-        resetConfirmationState()
-      }
-
-      activeConversationId.current = resolvedConversationId
-      activeSessionId.current = taskId
-      storeTaskId(chatId, taskId)
-
-      console.info('task-state-restored', {
-        task_id: taskId,
-        status,
-        has_final_result: finalResult.length > 0,
-        pending_count: subQuestions.length
-      })
-
-      return {
-        status,
-        awaiting: status === 'PENDING_CONFIRM',
-        pending: subQuestions,
-        finalResult
-      }
-    } catch (error) {
-      console.warn('task-state-restore-failed', {
-        task_id: taskId,
-        error
-      })
-      return {
-        status: '',
-        awaiting: false,
-        pending: [],
-        finalResult: ''
-      }
-    }
-  }
-
-  function applyConfirmResponseState (
-    chatId : number,
-    fallbackSessionId : string,
-    response : ModelResponse
-  ) : {
-    sessionId : string,
-    conversationId : string,
-    awaiting : boolean,
-    pending : string[]
-  } {
-    const conversationId = String(
-      response.conversation_id || activeConversationId.current || fallbackSessionId
-    )
-    const sessionId = String(
-      response.session_id || activeSessionId.current || fallbackSessionId
-    )
-    const content = String(response.message?.content || response.final_answer || '')
-    const awaiting = response.awaiting_human_confirmation === true
-    const pending = normalizePendingSubQuestions(response.pending_sub_questions || [])
-
-    activeConversationId.current = conversationId
-    activeSessionId.current = sessionId
-    storeTaskId(chatId, sessionId)
-
-    if (content) {
-      appendAssistantMessage(content, conversationId, sessionId)
-    }
-
-    if (awaiting) {
-      setConfirmationState(true, pending, sessionId)
-      storeConfirmPendingState(chatId, sessionId, conversationId, pending)
-    } else {
-      resetConfirmationState()
-      clearConfirmPendingState(chatId)
-    }
-
-    return {
-      sessionId,
-      conversationId,
-      awaiting,
-      pending
-    }
-  }
-
-  async function submitConfirmSilently (
-    chatId : number,
-    sessionId : string,
-    subQuestions : string[] = []
-  ) : Promise<{
-    sessionId : string,
-    conversationId : string,
-    awaiting : boolean,
-    pending : string[]
-  }|undefined> {
-    const confirmPayload : ConfirmPayload = {
-      session_id: sessionId,
-      action: 'confirm',
-      sub_questions: subQuestions,
-      comment: 'confirm'
-    }
+    setSnapshotPatch(conversationId, {
+      loading: true,
+      taskStatus: 'CONFIRMING',
+      error: undefined
+    })
 
     try {
-      const confirmResponse = await confirmRequester(
-        resolveConfirmUrl(modelUrl),
-        confirmPayload
-      )
-      return applyConfirmResponseState(chatId, sessionId, confirmResponse)
-    } catch (error) {
-      console.warn('confirm-submit-failed', {
-        session_id: sessionId,
-        error
+      const confirmed = await confirmTaskRequester(modelUrl, taskId, 'confirm', {
+        sub_questions: subQuestions,
+        comment: 'confirm'
       })
-      return undefined
+
+      const snapshot = buildSnapshotFromTask(conversationId, confirmed, false)
+      applySnapshot(snapshot)
+
+      if (snapshot.taskStatus === 'DONE' && snapshot.finalResult) {
+        appendAssistantMessage(chatId, snapshot.finalResult, snapshot.conversationId, snapshot.activeTaskId)
+      }
+
+      if (snapshot.activeTaskId && snapshot.taskStatus === 'GENERATING') {
+        startPollingForTask(snapshot.conversationId, snapshot.activeTaskId)
+      }
+      return true
     }
-  }
+    catch (confirmError) {
+      try {
+        const recovered = await getTaskStateRequester(modelUrl, taskId)
+        const snapshot = buildSnapshotFromTask(conversationId, recovered, false)
+        applySnapshot(snapshot)
 
-  function startConfirmStatusPolling (
-    chatId : number,
-    sessionId : string,
-    conversationId ?: string,
-    pendingFromState : string[] = []
-  ) {
-    const normalizedSessionId = String(sessionId || '').trim()
-    if (!normalizedSessionId) return
-
-    const targetKey = `${chatId}:${normalizedSessionId}`
-    if (
-      confirmPollTargetRef.current === targetKey
-      && confirmPollAbortControllerRef.current
-      && !confirmPollAbortControllerRef.current.signal.aborted
-    ) {
-      return
-    }
-
-    cancelConfirmStatusPolling()
-    setConfirmLoading(true)
-    setConfirmationState(true, normalizePendingSubQuestions(pendingFromState), normalizedSessionId)
-    storeConfirmPendingState(chatId, normalizedSessionId, conversationId, pendingFromState)
-
-    const localAttemptId = ++confirmPollAttemptRef.current
-    const controller = new AbortController()
-    confirmPollAbortControllerRef.current = controller
-    confirmPollTargetRef.current = targetKey
-
-    void (async () => {
-      let retryTick = 0
-      let startedAt = Date.now()
-
-      while (
-        !controller.signal.aborted
-        && confirmPollAttemptRef.current === localAttemptId
-        && currentChatIdRef.current === chatId
-      ) {
-        if (retryTick % CONFIRM_RETRY_INTERVAL_TICKS === 0) {
-          const submitted = await submitConfirmSilently(chatId, normalizedSessionId)
-          if (controller.signal.aborted) return
-          if (submitted && !submitted.awaiting) {
-            clearConfirmPendingState(chatId)
-            setConfirmLoading(false)
-            cancelRecoveryPolling()
-            const recoveryController = new AbortController()
-            recoveryAbortControllerRef.current = recoveryController
-            void recoverMessagesByPolling(
-              chatId,
-              submitted.sessionId,
-              submitted.conversationId,
-              recoveryController.signal
-            )
-            return
-          }
+        if (snapshot.taskStatus === 'DONE' && snapshot.finalResult) {
+          appendAssistantMessage(chatId, snapshot.finalResult, snapshot.conversationId, snapshot.activeTaskId)
         }
 
-        const taskState = await restoreStateFromTaskState(chatId, normalizedSessionId, conversationId)
-        if (controller.signal.aborted) return
+        if (snapshot.activeTaskId && snapshot.taskStatus === 'GENERATING') {
+          startPollingForTask(snapshot.conversationId, snapshot.activeTaskId)
+        }
 
-        if (taskState.awaiting) {
-          setConfirmLoading(true)
-          setConfirmationState(true, taskState.pending, normalizedSessionId)
-          storeConfirmPendingState(chatId, normalizedSessionId, conversationId, taskState.pending)
-        } else {
-          clearConfirmPendingState(chatId)
-          setConfirmLoading(false)
-          if (!isTerminalTaskStatus(taskState.status, taskState.finalResult)) {
-            cancelRecoveryPolling()
-            const recoveryController = new AbortController()
-            recoveryAbortControllerRef.current = recoveryController
-            void recoverMessagesByPolling(
-              chatId,
-              normalizedSessionId,
-              conversationId,
-              recoveryController.signal
-            )
-          }
+        if (snapshot.taskStatus !== 'ERROR') {
+          return true
+        }
+      }
+      catch {
+        // fall through to explicit confirm error
+      }
+
+      setSnapshotPatch(conversationId, {
+        loading: false,
+        taskStatus: 'ERROR',
+        error: toErrorMessage(confirmError, CONFIRM_FAILED_MESSAGE)
+      })
+      return true
+    }
+    finally {
+      confirmInFlightRef.current = false
+    }
+  }, [
+    appendAssistantMessage,
+    applySnapshot,
+    chatState.subQuestions,
+    chatState.taskId,
+    chatState.taskStatus,
+    modelUrl,
+    setSnapshotPatch,
+    startPollingForTask,
+    syncTaskState
+  ])
+
+  const requestHandler = useCallback(() => {
+    const chatId = currentChatIdRef.current
+    if (chatId === null) return
+
+    if (chatState.taskStatus === 'CONFIRMING') return
+
+    const text = normalizeText(textAreaRef.current?.value)
+    if (!text) return
+
+    if (CONFIRM_ONLY_PATTERN.test(text)) {
+      if (textAreaRef.current) {
+        textAreaRef.current.value = ''
+        textAreaRef.current.focus()
+      }
+
+      void (async () => {
+        const handled = await tryConfirmCurrentTask()
+        if (handled) {
           return
         }
+        appendAssistantMessage(chatId, CONFIRM_GUIDE_MESSAGE, activeConversationIdRef.current, chatState.taskId)
+      })()
+      return
+    }
 
-        retryTick++
-        if (Date.now() - startedAt >= CONFIRM_STATUS_POLL_TIMEOUT_MS) {
-          startedAt = Date.now()
-          retryTick = 0
+    void (async () => {
+      let conversationId = activeConversationIdRef.current
+      if (!conversationId) {
+        try {
+          const createdConversation = await createConversationRequester(modelUrl)
+          conversationId = normalizeText(createdConversation.conversation_id)
+          if (!conversationId) {
+            throw new Error('Invalid conversation id returned from backend')
+          }
+          activeConversationIdRef.current = conversationId
+          setConversationIdForChat(chatId, conversationId)
         }
-        await sleepWithAbort(CONFIRM_STATUS_POLL_INTERVAL_MS, controller.signal)
+        catch (error) {
+          setChatState((prev) => ({
+            ...prev,
+            taskStatus: 'ERROR',
+            error: toErrorMessage(error)
+          }))
+          return
+        }
+      }
+
+      const taskConversationId = conversationId
+
+      disChats(addMessage({
+        index: chatId,
+        message: createUserMessage(text, taskConversationId)
+      }))
+
+      if (textAreaRef.current) {
+        textAreaRef.current.value = ''
+        textAreaRef.current.focus()
+      }
+
+      setSnapshotPatch(taskConversationId, {
+        taskStatus: 'GENERATING',
+        loading: true,
+        error: undefined,
+        subQuestions: [],
+        finalResult: ''
+      })
+
+      try {
+        const taskState = await createRecommendTaskRequester(modelUrl, {
+          query: text,
+          conversation_id: taskConversationId,
+          timeout: 60,
+          max_iterations: 3
+        })
+
+        const snapshot = buildSnapshotFromTask(taskConversationId, taskState, false)
+        applySnapshot(snapshot)
+
+        if (snapshot.taskStatus === 'DONE' && snapshot.finalResult) {
+          appendAssistantMessage(chatId, snapshot.finalResult, snapshot.conversationId, snapshot.activeTaskId)
+        }
+
+        if (snapshot.activeTaskId && snapshot.taskStatus === 'GENERATING') {
+          startPollingForTask(snapshot.conversationId, snapshot.activeTaskId)
+        }
+      }
+      catch (error) {
+        setSnapshotPatch(taskConversationId, {
+          loading: false,
+          taskStatus: 'ERROR',
+          error: toErrorMessage(error)
+        })
       }
     })()
-  }
+  }, [
+    appendAssistantMessage,
+    applySnapshot,
+    chatState.taskId,
+    chatState.taskStatus,
+    modelUrl,
+    setConversationIdForChat,
+    setSnapshotPatch,
+    startPollingForTask,
+    tryConfirmCurrentTask
+  ])
 
-  async function recoverMessagesByPolling (
-    chatId : number,
-    sessionId : string,
-    conversationId ?: string,
-    signal ?: AbortSignal
-  ) {
-    const localAttemptId = ++recoveryAttemptRef.current
-    const resolvedConversationId = conversationId || sessionId
-
-    try {
-      const result = await pollSessionState(
-        modelUrl,
-        sessionId,
-        (sessionState) => {
-          if (currentChatIdRef.current !== chatId) {
-            return true
-          }
-          const recoveredCount = appendRecoveredSessionMessages(
-            chatId,
-            sessionState.messages,
-            resolvedConversationId,
-            sessionId
-          )
-          const hitlState = resolveHitlStateFromSessionState(sessionState)
-          applyRecoveredHitlState(sessionState, sessionId)
-
-          if (recoveredCount > 0 || hitlState.awaiting) {
-            activeConversationId.current = resolvedConversationId
-            activeSessionId.current = sessionId
-            console.info('session-state-recovered-after-failure', {
-              session_id: sessionId,
-              recovered_count: recoveredCount
-            })
-            return true
-          }
-          return false
-        },
-        {
-          intervalMs: RECOVERY_POLL_INTERVAL_MS,
-          timeoutMs: RECOVERY_POLL_TIMEOUT_MS,
-          signal,
-          shouldStop: () => (
-            signal?.aborted === true
-            || recoveryAttemptRef.current !== localAttemptId
-            || currentChatIdRef.current !== chatId
-          )
-        }
-      )
-
-      if (!signal?.aborted && result.status === 'timeout') {
-        alert(REQUEST_FAILED_MESSAGE)
-      }
-    } catch (error) {
-      if (signal?.aborted) {
-        return
-      }
-      alert(REQUEST_FAILED_MESSAGE)
-      console.error(error)
-    } finally {
-      if (!signal?.aborted && recoveryAttemptRef.current === localAttemptId) {
-        setLoading(false)
-      }
-    }
-  }
-
-  function requestHandler () {
-    if (loading || confirmLoading || currentChatId === null) return
-    const messageText = getMessageText().trim()
-    if (!messageText) return
-
-    if (isConfirmationOnlyText(messageText)) {
-      clearTextArea()
-      appendAssistantMessage(
-        CONFIRM_GUIDE_MESSAGE,
-        activeConversationId.current,
-        activeSessionId.current
-      )
+  const handleConfirmClicked = useCallback(async () => {
+    const handled = await tryConfirmCurrentTask()
+    if (handled) {
       return
     }
 
-    cancelRecoveryPolling()
-    cancelConfirmStatusPolling()
-    clearConfirmPendingState(currentChatId)
-    setLoading(true)
-    shouldRestoreHistoryOnEnter.current = false
-    resetConfirmationState()
-
-    const currentMessages = chats[currentChatId] || []
-    const refs = resolveConversationRefs(currentMessages)
-    const stableSessionId = refs.sessionId || refs.conversationId || generateSessionId()
-    const stableConversationId = refs.conversationId || stableSessionId
-
-    activeConversationId.current = stableConversationId
-    activeSessionId.current = stableSessionId
-    storeTaskId(currentChatId, stableSessionId)
-
-    const userMessage = createUserMessage(
-      messageText,
-      stableConversationId,
-      stableSessionId
-    )
-    const messagesForRequest = [...currentMessages, userMessage]
-
-    clearTextArea()
-    disChats(addMessage({ index: currentChatId, message: userMessage }))
-
-    requester(
-      modelUrl,
-      modelName,
-      messagesForRequest,
-      stableConversationId,
-      responseHandler,
-      errorHandler
-    )
-  }
-
-  function responseHandler (response : ModelResponse) {
-    const conversationId = response.conversation_id || activeConversationId.current || response.session_id
-    const sessionId = response.session_id || activeSessionId.current || conversationId
-    const content = response.message?.content || response.final_answer || ''
-
-    activeConversationId.current = conversationId
-    activeSessionId.current = sessionId
-    storeTaskId(currentChatIdRef.current, sessionId)
-
-    if (content) {
-      appendAssistantMessage(content, conversationId, sessionId)
-    }
-
-    if (response.awaiting_human_confirmation) {
-      const pending = response.pending_sub_questions || []
-      setConfirmationState(true, pending, sessionId)
-      clearConfirmPendingState(currentChatIdRef.current)
-      setConfirmLoading(false)
-      console.info('recommend-awaiting', {
-        session_id: sessionId,
-        status: response.status,
-        pending_count: pending.length
-      })
-    } else {
-      resetConfirmationState()
-      clearConfirmPendingState(currentChatIdRef.current)
-      setConfirmLoading(false)
-    }
-
-    setLoading(false)
-  }
-
-  async function handleConfirmClicked () {
-    if (confirmLoading || !pendingSessionId || currentChatId === null) return
-
-    const sessionId = pendingSessionId
-    const conversationId = activeConversationId.current
-    const pending = [...pendingSubQuestions]
-
-    console.info('confirm-clicked', {
-      session_id: sessionId
-    })
-
-    setConfirmLoading(true)
-    setConfirmationState(true, pending, sessionId)
-    storeConfirmPendingState(currentChatId, sessionId, conversationId, pending)
-    startConfirmStatusPolling(currentChatId, sessionId, conversationId, pending)
-  }
-
-  function errorHandler (error : unknown) {
-    console.error(error)
-    const sessionId = activeSessionId.current?.trim()
-    const chatId = currentChatIdRef.current
-
-    if (!sessionId || chatId === null) {
-      alert(REQUEST_FAILED_MESSAGE)
-      setLoading(false)
+    const conversationId = activeConversationIdRef.current
+    if (!conversationId) {
       return
     }
 
-    console.warn('recommend-request-failed-start-recovery', {
-      session_id: sessionId,
-      error
+    setSnapshotPatch(conversationId, {
+      taskStatus: 'ERROR',
+      loading: false,
+      error: 'No pending confirmation task found. Please submit a new query first.'
     })
-
-    cancelRecoveryPolling()
-    const recoveryController = new AbortController()
-    recoveryAbortControllerRef.current = recoveryController
-    void recoverMessagesByPolling(chatId, sessionId, activeConversationId.current, recoveryController.signal)
-  }
-
-  function getMessageText () {
-    return textAreaRef.current?.value || ''
-  }
-
-  function clearTextArea () {
-    const textArea = textAreaRef.current
-    if (!textArea) return
-    textArea.value = ''
-    textArea.focus()
-  }
+  }, [
+    setSnapshotPatch,
+    tryConfirmCurrentTask
+  ])
 
   useEffect(() => {
     chatsRef.current = chats
   }, [chats])
 
   useEffect(() => {
-    currentChatIdRef.current = currentChatId
-  }, [currentChatId])
-
-  useEffect(() => {
-    renderCount.current++
     if (!autoSaveChats) return
-    if (renderCount.current < 3) return
+    renderCountRef.current += 1
+    if (renderCountRef.current < 3) return
     Store.set('chats', chats)
   }, [autoSaveChats, chats])
 
   useEffect(() => {
-    if (currentChatId === null) {
-      setLoading(false)
-      return
-    }
-    if (currentChatId < 0 || currentChatId > chats.length) {
+    const chatId = getChatIndex()
+    const token = ++bootstrapTokenRef.current
+
+    stopActivePolling()
+
+    if (chatId < 0 || chatId > chatsRef.current.length) {
       navigate(ROUTES.ROOT)
       return
     }
 
-    const currentMessages = chats[currentChatId]
-    // The slot may briefly be undefined while hydration happens.
-    // Explicitly end loading here to avoid getting stuck behind the spinner.
-    if (!Array.isArray(currentMessages)) {
-      setLoading(false)
+    currentChatIdRef.current = chatId
+    setChatState((prev) => ({ ...prev, currentChatId: chatId, loading: true, error: undefined }))
+
+    const currentMessages = chatsRef.current[chatId] || []
+    const resolvedConversationId = resolveConversationIdFromMessages(currentMessages) || getConversationIdForChat(chatId)
+
+    if (!resolvedConversationId) {
+      activeConversationIdRef.current = undefined
+      setChatState({
+        ...DEFAULT_VIEW_STATE,
+        currentChatId: chatId,
+        loading: false
+      })
       return
     }
 
-    scroller(rowContainerRef, 1)
-    const refs = resolveConversationRefs(currentMessages)
-    const restoreSessionId = refs.sessionId || refs.conversationId
-    const restoreConversationId = refs.conversationId || restoreSessionId
-    const restoreTaskId = readStoredTaskId(currentChatId) || restoreSessionId
-    activeConversationId.current = restoreConversationId
-    activeSessionId.current = restoreSessionId
-    storeTaskId(currentChatId, restoreTaskId)
+    activeConversationIdRef.current = resolvedConversationId
+    setConversationIdForChat(chatId, resolvedConversationId)
 
-    if (shouldRestoreHistoryOnEnter.current) {
-      shouldRestoreHistoryOnEnter.current = false
-
-      if (restoreSessionId || restoreTaskId) {
-        setLoading(true)
-        void (async () => {
-          let restoredTask : {
-            status : string,
-            awaiting : boolean,
-            pending : string[],
-            finalResult : string
-          }|undefined
-
-          if (restoreSessionId) {
-            await restoreMessagesFromSessionState(currentChatId, restoreSessionId, restoreConversationId)
-          }
-          if (restoreTaskId) {
-            restoredTask = await restoreStateFromTaskState(currentChatId, restoreTaskId, restoreConversationId)
-          }
-
-          const persistedConfirm = readConfirmPendingState(currentChatId)
-          const recoveredConfirmSessionId = persistedConfirm?.sessionId
-            || (restoredTask?.awaiting ? restoreTaskId : undefined)
-
-          if (recoveredConfirmSessionId) {
-            const recoveredPending = persistedConfirm?.pendingSubQuestions?.length
-              ? persistedConfirm.pendingSubQuestions
-              : (restoredTask?.pending || [])
-            startConfirmStatusPolling(
-              currentChatId,
-              recoveredConfirmSessionId,
-              restoreConversationId,
-              recoveredPending
-            )
-          } else {
-            clearConfirmPendingState(currentChatId)
-            setConfirmLoading(false)
-          }
-        })().finally(() => setLoading(false))
-        return
-      }
-
-      clearConfirmPendingState(currentChatId)
-      setConfirmLoading(false)
-      setLoading(false)
-      return
+    const existingSnapshot = conversationSnapshotsRef.current[resolvedConversationId]
+    if (existingSnapshot) {
+      applySnapshot(existingSnapshot)
+    } else {
+      setChatState((prev) => ({
+        ...prev,
+        currentChatId: chatId,
+        conversationId: resolvedConversationId,
+        taskStatus: 'IDLE',
+        subQuestions: [],
+        finalResult: '',
+        loading: true,
+        error: undefined
+      }))
     }
-  }, [chats, currentChatId, modelUrl, navigate])
+
+    void loadConversationState(chatId, resolvedConversationId, token)
+  }, [chat, chats.length, getConversationIdForChat, loadConversationState, navigate, setConversationIdForChat, stopActivePolling, applySnapshot])
 
   useEffect(() => {
-    cancelRecoveryPolling()
-    cancelConfirmStatusPolling()
-    textAreaRef.current?.focus()
-    shouldRestoreHistoryOnEnter.current = true
-    setCurrentChatId(getChatIndex())
-    activeConversationId.current = undefined
-    activeSessionId.current = undefined
-    resetConfirmationState()
-    setConfirmLoading(false)
-  }, [chat, modelUrl, navigate])
+    scroller(rowContainerRef, 1)
+  }, [chats, chatState.currentChatId])
 
   useEffect(() => {
     return () => {
-      recoveryAttemptRef.current += 1
-      recoveryAbortControllerRef.current?.abort()
-      recoveryAbortControllerRef.current = null
-      confirmPollAttemptRef.current += 1
-      confirmPollAbortControllerRef.current?.abort()
-      confirmPollAbortControllerRef.current = null
-      confirmPollTargetRef.current = undefined
+      destroyedRef.current = true
+      stopActivePolling()
     }
-  }, [])
+  }, [stopActivePolling])
 
-  const messages = currentChatId === null
-    ? []
-    : chats[currentChatId] || []
-  const hasTalk = messages.length > 0
+  const messages = useMemo(() => {
+    if (chatState.currentChatId === null) return []
+    return chats[chatState.currentChatId] || []
+  }, [chatState.currentChatId, chats])
 
   return {
     rowContainerRef,
     textAreaRef,
     messages,
-    hasTalk,
-    loading,
-    confirmLoading,
-    isAwaitingConfirmation,
-    pendingSubQuestions,
-    pendingSessionId,
+    hasTalk: messages.length > 0,
+    taskId: chatState.taskId,
+    taskStatus: chatState.taskStatus,
+    subQuestions: chatState.subQuestions,
+    finalResult: chatState.finalResult,
+    loading: chatState.loading,
+    error: chatState.error,
     handleDeleteChat,
     requestHandler,
     handleConfirmClicked
