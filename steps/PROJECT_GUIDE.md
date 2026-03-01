@@ -129,7 +129,6 @@ uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
 | `fastapi_demo/app/api/v1/models.py` | 请求/响应 Pydantic 模型 | 加字段、改参数校验 |
 | `fastapi_demo/app/api/v1/routes.py` | 所有 API 路由 + 会话状态维护 | 改接口行为、会话记忆策略 |
 | `fastapi_demo/app/api/v1/startup_ingest.py` | 启动自动文档入库 | 改启动扫描目录、文件解析、自动入库条件 |
-| `fastapi_demo/app/services/recommendation_service.py` | 旧服务层封装（当前主要走 routes 直调） | 想做服务层抽象时 |
 | `fastapi_demo/software_recommend_system/state.py` | Agent 全量状态结构 `AgentState` | 新增状态字段、修状态默认值 |
 | `fastapi_demo/software_recommend_system/rag_agent.py` | LangGraph 图编排 + checkpointer | 改流程拓扑、换持久化 checkpoint |
 | `fastapi_demo/software_recommend_system/nodes.py` | 具体节点实现（RAG/Chat/Draw） | 改检索逻辑、改回答生成 |
