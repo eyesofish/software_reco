@@ -11,6 +11,81 @@
   margin-bottom: 0;
 }
 
+.assistantMessage h1,
+.assistantMessage h2,
+.assistantMessage h3,
+.assistantMessage h4,
+.assistantMessage h5,
+.assistantMessage h6 {
+  font-weight: 700;
+  line-height: 1.35;
+  margin: 12px 0 8px;
+}
+
+.assistantMessage h1 {
+  font-size: 28px;
+}
+
+.assistantMessage h2 {
+  font-size: 24px;
+}
+
+.assistantMessage h3 {
+  font-size: 20px;
+}
+
+.assistantMessage h4 {
+  font-size: 18px;
+}
+
+.assistantMessage h5 {
+  font-size: 16px;
+}
+
+.assistantMessage h6 {
+  font-size: 14px;
+}
+
+.assistantMessage ul,
+.assistantMessage ol {
+  margin: 0 0 8px;
+  padding-left: 20px;
+}
+
+.assistantMessage li {
+  margin: 2px 0;
+}
+
+.assistantMessage a {
+  color: var(--color-link);
+  text-decoration: underline;
+}
+
+.assistantMessage blockquote {
+  border-left: 3px solid var(--color-code-border);
+  color: var(--color-text-muted);
+  margin: 8px 0;
+  padding: 4px 0 4px 10px;
+}
+
+.assistantMessage hr {
+  border-top: 1px solid var(--color-border);
+  margin: 10px 0;
+}
+
+.assistantMessage table {
+  border-collapse: collapse;
+  margin: 8px 0;
+  width: 100%;
+}
+
+.assistantMessage th,
+.assistantMessage td {
+  border: 1px solid var(--color-code-border);
+  padding: 6px 8px;
+  text-align: left;
+}
+
 .assistantMessage pre {
   background-color: var(--color-assistant-pre);
   border-radius: 8px;

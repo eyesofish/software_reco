@@ -10,6 +10,7 @@ import com.example.demo.dto.OllamaChatRequest;
 import com.example.demo.dto.OllamaChatResponse;
 import com.example.demo.dto.RecommendRequest;
 import com.example.demo.dto.RecommendResponse;
+import com.example.demo.dto.RecommendTaskStateResponse;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.http.HttpStatus;
@@ -220,7 +221,31 @@ public class ChatController {
             action = "confirm";
         }
         String comment = firstNonBlank(asText(request.get("comment")), "confirm");
-        recommendTaskStateService.markConfirmed(conversation.getId(), subQuestions);
+
+        RecommendTaskStateResponse currentState = recommendTaskStateService.getTaskState(conversation.getId());
+        String currentStatus = firstNonBlank(currentState.getStatus(), "PENDING_CONFIRM");
+        boolean alreadyPastConfirm = !"PENDING_CONFIRM".equalsIgnoreCase(currentStatus);
+        if ("confirm".equals(action) && alreadyPastConfirm) {
+            String existingFinal = firstNonBlank(currentState.getFinalResult(), "");
+            List<String> existingSubQuestions = normalizeSubQuestions(currentState.getSubQuestions());
+            boolean awaiting = "PENDING_CONFIRM".equalsIgnoreCase(currentStatus);
+            logger.info(
+                    "chat confirm idempotent-hit status={}, awaiting={}, pending_count={}, session_id={}",
+                    currentStatus,
+                    awaiting,
+                    existingSubQuestions.size(),
+                    conversation.getId()
+            );
+            return buildResponse(
+                    firstNonBlank(asText(request.get("model")), conversation.getModelName(), "fastapi-hitl"),
+                    existingFinal,
+                    conversation.getId(),
+                    conversation.getId(),
+                    currentStatus,
+                    awaiting,
+                    awaiting ? existingSubQuestions : List.of()
+            );
+        }
 
         RecommendResponse fastapi;
         try {
@@ -230,13 +255,17 @@ public class ChatController {
             fastapi = null;
         }
 
-        String status = firstNonBlank(fastapi == null ? null : fastapi.getStatus(), "error");
-        boolean awaiting = fastapi != null && Boolean.TRUE.equals(fastapi.getAwaitingHumanConfirmation());
-        List<String> pendingSubQuestions = normalizeSubQuestions(fastapi == null ? null : fastapi.getPendingSubQuestions());
-        String content = firstNonBlank(
-                fastapi == null ? null : fastapi.getFinalAnswer(),
-                fastapi == null ? "FastAPI confirm unavailable. Please try again." : ""
+        String status = firstNonBlank(
+                fastapi == null ? null : fastapi.getStatus(),
+                firstNonBlank(currentStatus, "PENDING_CONFIRM")
         );
+        boolean awaiting = fastapi != null
+                ? Boolean.TRUE.equals(fastapi.getAwaitingHumanConfirmation())
+                : "PENDING_CONFIRM".equalsIgnoreCase(status);
+        List<String> pendingSubQuestions = fastapi != null
+                ? normalizeSubQuestions(fastapi.getPendingSubQuestions())
+                : normalizeSubQuestions(currentState.getSubQuestions());
+        String content = firstNonBlank(fastapi == null ? null : fastapi.getFinalAnswer(), "");
 
         if (content != null && !content.isBlank()) {
             conversationService.appendMessage(conversation, "assistant", content);

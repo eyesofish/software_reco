@@ -7,11 +7,12 @@ export default function reducer (
   switch (action.type) {
     case 'ADD_MESSAGE': {
       const { index, message } = action.payload
-      if (Array.isArray(state.chats[index]))
-        state.chats[index].push(message)
-      else
-        state.chats[index] = [message]
-      return { chats: [...state.chats] }
+      const nextChats = [...state.chats]
+      const nextMessages = Array.isArray(nextChats[index])
+        ? [...nextChats[index], message]
+        : [message]
+      nextChats[index] = nextMessages
+      return { chats: nextChats }
     }
     case 'DELETE_CHAT': {
       const nextChats = state.chats.filter((_, index) => index !== action.payload)

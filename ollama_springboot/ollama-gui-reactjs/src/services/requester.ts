@@ -83,13 +83,15 @@ export function resolveSessionStateUrl (chatUrl : string, sessionId : string) : 
 
 export async function getSessionState (
   chatUrl : string,
-  sessionId : string
+  sessionId : string,
+  signal ?: AbortSignal
 ) : Promise<SessionStateResponse> {
   const response = await fetch(resolveSessionStateUrl(chatUrl, sessionId), {
     method: 'GET',
     headers: {
       'Content-Type': 'application/json'
-    }
+    },
+    signal
   })
   if (!response.ok) {
     throw new Error(`HTTP ${response.status}`)
@@ -137,7 +139,8 @@ export async function getRecommendTaskState (
 export interface SessionStatePollOptions {
   intervalMs ?: number,
   timeoutMs ?: number,
-  shouldStop ?: () => boolean
+  shouldStop ?: () => boolean,
+  signal ?: AbortSignal
 }
 
 export interface SessionStatePollResult {
@@ -145,9 +148,23 @@ export interface SessionStatePollResult {
   state ?: SessionStateResponse
 }
 
-function sleep (ms : number) : Promise<void> {
+function sleep (ms : number, signal ?: AbortSignal) : Promise<void> {
   return new Promise((resolve) => {
-    setTimeout(resolve, ms)
+    if (signal?.aborted) {
+      resolve()
+      return
+    }
+
+    const onAbort = () => {
+      clearTimeout(timer)
+      signal?.removeEventListener('abort', onAbort)
+      resolve()
+    }
+    const timer = setTimeout(() => {
+      signal?.removeEventListener('abort', onAbort)
+      resolve()
+    }, ms)
+    signal?.addEventListener('abort', onAbort, { once: true })
   })
 }
 
@@ -162,12 +179,16 @@ export async function pollSessionState (
   const startedAt = Date.now()
 
   while (Date.now() - startedAt <= timeoutMs) {
+    if (options.signal?.aborted) {
+      return { status: 'stopped' }
+    }
+
     if (options.shouldStop?.()) {
       return { status: 'stopped' }
     }
 
     try {
-      const state = await getSessionState(chatUrl, sessionId)
+      const state = await getSessionState(chatUrl, sessionId, options.signal)
       const shouldStopPolling = await onState(state)
       if (shouldStopPolling) {
         return {
@@ -177,6 +198,9 @@ export async function pollSessionState (
       }
     }
     catch (error) {
+      if (options.signal?.aborted) {
+        return { status: 'stopped' }
+      }
       console.warn('session-state-poll-failed', {
         session_id: sessionId,
         error
@@ -187,7 +211,7 @@ export async function pollSessionState (
       break
     }
 
-    await sleep(intervalMs)
+    await sleep(intervalMs, options.signal)
   }
 
   return { status: 'timeout' }
