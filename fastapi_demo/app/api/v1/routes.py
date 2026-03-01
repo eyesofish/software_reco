@@ -617,9 +617,11 @@ async def confirm_software_recommendation(request_data: RecommendationConfirmReq
 @router.get("/session-state/{session_id}", response_model=SessionStateResponse)
 async def get_session_state(session_id: str):
     state = _get_or_create_session_state(session_id)
+    messages = _normalize_session_messages(state.get("messages", []))
     return SessionStateResponse(
         session_id=session_id,
         facts=state.get("facts", {}),
+        messages=messages,
         updated_at=float(state.get("updated_at", time.time())),
     )
 
@@ -627,9 +629,11 @@ async def get_session_state(session_id: str):
 @router.put("/session-state/{session_id}", response_model=SessionStateResponse)
 async def upsert_session_state(session_id: str, request_data: SessionStateUpdateRequest):
     state = _merge_session_facts(session_id, request_data.facts or {})
+    messages = _normalize_session_messages(state.get("messages", []))
     return SessionStateResponse(
         session_id=session_id,
         facts=state.get("facts", {}),
+        messages=messages,
         updated_at=float(state.get("updated_at", time.time())),
     )
 

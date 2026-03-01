@@ -35,6 +35,16 @@
   width: fit-content;
 }
 
+.systemMessage {
+  background-color: var(--color-assistant-pre);
+  border-left: 3px solid var(--color-code-border);
+  border-radius: 6px;
+  color: var(--color-text);
+  font-size: 13px;
+  margin-bottom: 12px;
+  padding: 8px 10px;
+}
+
 .hitlPanel {
   background: var(--color-hitl-bg);
   border: 1px solid var(--color-hitl-border);

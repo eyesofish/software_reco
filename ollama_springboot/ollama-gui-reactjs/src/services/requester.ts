@@ -1,4 +1,4 @@
-import { ConfirmPayload, Messages, ModelResponse } from '~/entities/messages'
+import { ConfirmPayload, Messages, ModelResponse, SessionStateResponse } from '~/entities/messages'
 
 function resolveConversationId (messages : Messages) : string|undefined {
   for (let i = messages.length - 1; i >= 0; i--) {
@@ -59,6 +59,34 @@ export function resolveConfirmUrl (chatUrl : string) : string {
     return `${trimmed}/confirm`
   }
   return `${trimmed}/confirm`
+}
+
+export function resolveSessionStateUrl (chatUrl : string, sessionId : string) : string {
+  const trimmed = chatUrl.trim().replace(/\/+$/, '')
+  const encodedSessionId = encodeURIComponent(sessionId)
+
+  if (trimmed.endsWith('/api/chat')) {
+    const origin = new URL(trimmed).origin
+    return `${origin}/api/v1/session-state/${encodedSessionId}`
+  }
+
+  return `${trimmed.replace(/\/api\/chat\/confirm$/, '').replace(/\/api\/chat$/, '')}/api/v1/session-state/${encodedSessionId}`
+}
+
+export async function getSessionState (
+  chatUrl : string,
+  sessionId : string
+) : Promise<SessionStateResponse> {
+  const response = await fetch(resolveSessionStateUrl(chatUrl, sessionId), {
+    method: 'GET',
+    headers: {
+      'Content-Type': 'application/json'
+    }
+  })
+  if (!response.ok) {
+    throw new Error(`HTTP ${response.status}`)
+  }
+  return await response.json() as SessionStateResponse
 }
 
 export async function confirmRequester (

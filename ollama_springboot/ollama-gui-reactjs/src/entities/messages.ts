@@ -1,5 +1,5 @@
 export interface Message {
-  role : 'assistant' | 'user',
+  role : 'assistant' | 'user' | 'system',
   content : string,
   time : number,
   conversationId ?: string,
@@ -48,4 +48,16 @@ export interface ConfirmPayload {
   action : 'confirm' | 'edit',
   sub_questions : string[],
   comment : string
+}
+
+export interface SessionStateMessage {
+  role : 'assistant' | 'user' | 'system',
+  content : string
+}
+
+export interface SessionStateResponse {
+  session_id : string,
+  facts : Record<string, string>,
+  messages : SessionStateMessage[],
+  updated_at : number
 }

@@ -3,15 +3,15 @@ import { useNavigate, useParams } from 'react-router-dom'
 import ReactMarkdown from 'react-markdown'
 
 import ROUTES from '~/constants/routes'
-import { ConfirmPayload, Message, ModelResponse } from '~/entities/messages'
+import { ConfirmPayload, Message, ModelResponse, SessionStateMessage } from '~/entities/messages'
 import createAssistantMessage from '~/services/createAssistantMessage'
 import createUserMessage from '~/services/createUserMessage'
 import getChatIndex from '~/services/getChatIndex'
-import requester, { confirmRequester, resolveConfirmUrl } from '~/services/requester'
+import requester, { confirmRequester, getSessionState, resolveConfirmUrl } from '~/services/requester'
 import scroller from '~/services/scroller'
 import Store from '~/services/store'
 import { disChats, useChats } from '~/stores/chats'
-import { addMessage } from '~/stores/chats/actions'
+import { addMessage, loadChats } from '~/stores/chats/actions'
 import { useConfig } from '~/stores/config'
 import { useAppLanguage } from '~/services/language'
 import About from '~/components/about'
@@ -39,6 +39,7 @@ export default function Chat () {
   const language = useAppLanguage()
   const activeConversationId = useRef<string|undefined>(undefined)
   const activeSessionId = useRef<string|undefined>(undefined)
+  const shouldRestoreHistoryOnEnter = useRef(true)
   const renderCount = useRef(0)
   const rowContainerRef = useRef<HTMLDivElement>(null)
   const textAreaRef = useRef<HTMLTextAreaElement>(null)
@@ -68,6 +69,7 @@ export default function Chat () {
   function handleDeleteChat (chatId : number) {
     if (currentChatId !== chatId) return
     setCurrentChatId(null)
+    shouldRestoreHistoryOnEnter.current = false
     activeConversationId.current = undefined
     activeSessionId.current = undefined
     setIsAwaitingConfirmation(false)
@@ -81,6 +83,60 @@ export default function Chat () {
     if (!content || currentChatId === null) return
     const assistantMessage = createAssistantMessage(content, conversationId, sessionId)
     disChats(addMessage({ index: currentChatId, message: assistantMessage }))
+  }
+
+  function normalizeSessionMessages (messages : SessionStateMessage[]|undefined) : SessionStateMessage[] {
+    if (!Array.isArray(messages)) {
+      return []
+    }
+
+    const normalized : SessionStateMessage[] = []
+    for (const item of messages as Array<Partial<SessionStateMessage>>) {
+      const role = String(item.role || '').trim().toLowerCase()
+      const content = String(item.content || '').trim()
+      if (!content) continue
+      if (role !== 'user' && role !== 'assistant' && role !== 'system') continue
+      normalized.push({ role: role as SessionStateMessage['role'], content })
+    }
+    return normalized
+  }
+
+  async function restoreMessagesFromSessionState (
+    chatId : number,
+    sessionId : string,
+    conversationId ?: string
+  ) {
+    try {
+      const sessionState = await getSessionState(modelUrl, sessionId)
+      const restoredSessionMessages = normalizeSessionMessages(sessionState.messages)
+      if (restoredSessionMessages.length === 0) return
+
+      const baseTime = Date.now()
+      const restoredMessages : Message[] = restoredSessionMessages.map((message, index) => ({
+        role: message.role,
+        content: message.content,
+        time: baseTime + index,
+        conversationId: conversationId || sessionId,
+        sessionId
+      }))
+
+      const nextChats = [...chats]
+      nextChats[chatId] = restoredMessages
+      disChats(loadChats(nextChats))
+
+      activeConversationId.current = conversationId || sessionId
+      activeSessionId.current = sessionId
+
+      console.info('session-state-restored', {
+        session_id: sessionId,
+        restored_count: restoredMessages.length
+      })
+    } catch (error) {
+      console.warn('session-state-restore-failed', {
+        session_id: sessionId,
+        error
+      })
+    }
   }
 
   function requestHandler () {
@@ -99,6 +155,7 @@ export default function Chat () {
     }
 
     setLoading(true)
+    shouldRestoreHistoryOnEnter.current = false
     setIsAwaitingConfirmation(false)
     setPendingSubQuestions([])
     setPendingSessionId(undefined)
@@ -253,11 +310,21 @@ export default function Chat () {
     const refs = resolveConversationRefs(chats[currentChatId])
     activeConversationId.current = refs.conversationId
     activeSessionId.current = refs.sessionId
+
+    if (shouldRestoreHistoryOnEnter.current && refs.sessionId) {
+      shouldRestoreHistoryOnEnter.current = false
+      setLoading(true)
+      void restoreMessagesFromSessionState(currentChatId, refs.sessionId, refs.conversationId)
+        .finally(() => setLoading(false))
+      return
+    }
+
     setLoading(false)
-  }, [chats, currentChatId, navigate])
+  }, [chats, currentChatId, modelUrl, navigate])
 
   useEffect(() => {
     textAreaRef.current?.focus()
+    shouldRestoreHistoryOnEnter.current = true
     setCurrentChatId(getChatIndex())
     setIsAwaitingConfirmation(false)
     setPendingSubQuestions([])
@@ -288,6 +355,12 @@ export default function Chat () {
                       <ReactMarkdown>{message.content}</ReactMarkdown>
                     </div>
                     )
+                  : message.role === 'system'
+                    ? (
+                      <p className='systemMessage' key={`${message.time}-system-${messageIndex}`}>
+                        {message.content}
+                      </p>
+                      )
                   : (
                     <p className='userMessage' key={`${message.time}-user-${messageIndex}`}>
                       {message.content}

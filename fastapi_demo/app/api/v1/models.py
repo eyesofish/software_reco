@@ -79,6 +79,10 @@ class SessionStateUpdateRequest(BaseModel):
 class SessionStateResponse(BaseModel):
     session_id: str = Field(..., description="Session id")
     facts: Dict[str, str] = Field(default_factory=dict, description="Structured session facts")
+    messages: List[Dict[str, str]] = Field(
+        default_factory=list,
+        description="Session message history",
+    )
     updated_at: float = Field(..., description="Unix timestamp in seconds")
 
 
