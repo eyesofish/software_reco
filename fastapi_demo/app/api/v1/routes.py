@@ -300,6 +300,167 @@ def _append_session_messages(session_id: str, messages: List[Dict[str, str]]) ->
         return state
 
 
+def _append_session_message_once(session_id: str, role: str, content: str) -> Dict[str, Any]:
+    updates = _normalize_session_messages([{"role": role, "content": content}])
+    if not updates:
+        return _get_or_create_session_state(session_id)
+
+    candidate = updates[0]
+    with _SESSION_LOCK:
+        state = _get_or_create_session_state(session_id)
+        history = _normalize_session_messages(state.get("messages", []))
+        if (
+            history
+            and history[-1].get("role") == candidate["role"]
+            and history[-1].get("content") == candidate["content"]
+        ):
+            logger.info(
+                "SESSION_MESSAGE_DUPLICATE_SKIPPED session_id=%s role=%s",
+                session_id,
+                candidate["role"],
+            )
+            return state
+        history.append(candidate)
+        state["messages"] = history[-SESSION_MAX_MESSAGES:]
+        state["updated_at"] = time.time()
+        _persist_session_state_store_locked()
+        return state
+
+
+async def _execute_recommend_turn(
+    *,
+    session_id: str,
+    request_query: str,
+    graph_input: Any,
+    config: Dict[str, Any],
+    fallback_answer: Optional[str] = None,
+    fallback_mode: str = "chat",
+    interrupt_source: str = "recommend",
+) -> RecommendationResponse:
+    try:
+        result = await run_agent_async(AGENT, graph_input, config=config)
+        interrupt_payload = _extract_interrupt_payload(result)
+        if interrupt_payload and interrupt_payload.get("type") == "human_confirmation":
+            pending_sub_questions = _normalize_pending_sub_questions(
+                interrupt_payload.get("sub_questions", [])
+            )
+            if not pending_sub_questions:
+                logger.error(
+                    "HITL_ACK_ABORT session_id=%s reason=empty_sub_questions payload=%s source=%s",
+                    session_id,
+                    interrupt_payload,
+                    interrupt_source,
+                )
+                raise RuntimeError(
+                    "Interrupted for human confirmation but no sub-questions were produced."
+                )
+            ack_message = _build_human_confirmation_ack(pending_sub_questions)
+            logger.warning(
+                "HITL_ACK_RETURN session_id=%s pending_count=%d source=%s",
+                session_id,
+                len(pending_sub_questions),
+                interrupt_source,
+            )
+            _append_session_message_once(session_id, "assistant", ack_message)
+            return RecommendationResponse(
+                status="awaiting_human_confirmation",
+                final_answer=ack_message,
+                candidates=[],
+                mode="rag",
+                iteration_count=0,
+                coverage=0.0,
+                session_id=session_id,
+                awaiting_human_confirmation=True,
+                pending_sub_questions=pending_sub_questions,
+            )
+
+        final_answer = _get_value(result, "final_answer", "")
+        if final_answer:
+            _append_session_message_once(session_id, "assistant", final_answer)
+            return RecommendationResponse(
+                status="success",
+                final_answer=final_answer,
+                candidates=_get_value(result, "candidates", []),
+                mode=_get_value(result, "mode", ""),
+                iteration_count=_get_value(result, "iteration_count", 0),
+                coverage=_get_value(result, "coverage", 0.0),
+                session_id=session_id,
+                awaiting_human_confirmation=False,
+            )
+
+        if fallback_answer:
+            _append_session_message_once(session_id, "assistant", fallback_answer)
+            return RecommendationResponse(
+                status="success",
+                final_answer=fallback_answer,
+                candidates=[],
+                mode=fallback_mode,
+                iteration_count=0,
+                coverage=1.0,
+                session_id=session_id,
+                awaiting_human_confirmation=False,
+            )
+
+        return RecommendationResponse(
+            status="success",
+            final_answer=final_answer,
+            candidates=_get_value(result, "candidates", []),
+            mode=_get_value(result, "mode", ""),
+            iteration_count=_get_value(result, "iteration_count", 0),
+            coverage=_get_value(result, "coverage", 0.0),
+            session_id=session_id,
+            awaiting_human_confirmation=False,
+        )
+    except Exception:
+        logger.exception(
+            "RECOMMEND_TURN_FAILED session_id=%s source=%s query=%r",
+            session_id,
+            interrupt_source,
+            request_query,
+        )
+        _append_session_message_once(
+            session_id,
+            "system",
+            "Request failed while processing this turn.",
+        )
+        raise
+
+
+def _log_recommend_task_outcome(task: asyncio.Task, session_id: str, source: str) -> None:
+    if task.cancelled():
+        logger.warning("RECOMMEND_TASK_CANCELLED session_id=%s source=%s", session_id, source)
+        return
+    exc = task.exception()
+    if exc:
+        logger.error(
+            "RECOMMEND_TASK_FAILED session_id=%s source=%s error=%s",
+            session_id,
+            source,
+            exc,
+            exc_info=(type(exc), exc, exc.__traceback__),
+        )
+
+
+def _create_recommend_task(coro: Any, session_id: str, source: str) -> asyncio.Task:
+    task = asyncio.create_task(coro)
+    task.add_done_callback(
+        lambda done_task: _log_recommend_task_outcome(done_task, session_id, source)
+    )
+    return task
+
+
+async def _await_recommend_task(
+    task: asyncio.Task,
+    session_id: str,
+    source: str,
+) -> RecommendationResponse:
+    try:
+        return await asyncio.shield(task)
+    except asyncio.CancelledError:
+        logger.warning("CLIENT_DISCONNECTED_CONTINUE session_id=%s source=%s", session_id, source)
+        raise
+
+
 def _upsert_name_fact_from_query(session_id: str, query: str) -> Dict[str, Any]:
     name = _extract_name_fact(query)
     if not name:
@@ -323,15 +484,12 @@ async def get_software_recommendation(request_data: RecommendationRequest):
             request_data.query,
         )
 
+        # Persist user message before workflow execution so disconnected clients can recover.
+        _append_session_messages(session_id, [{"role": "user", "content": request_data.query}])
+
         if known_name and _is_asking_user_name(request_data.query):
-            memory_answer = f"\u4f60\u53eb{known_name}\u3002"
-            _append_session_messages(
-                session_id,
-                [
-                    {"role": "user", "content": request_data.query},
-                    {"role": "assistant", "content": memory_answer},
-                ],
-            )
+            memory_answer = f"你叫{known_name}。"
+            _append_session_message_once(session_id, "assistant", memory_answer)
             return RecommendationResponse(
                 status="success",
                 final_answer=memory_answer,
@@ -355,76 +513,20 @@ async def get_software_recommendation(request_data: RecommendationRequest):
                 "sub_questions": [],
                 "comment": request_data.query,
             }
-            result = await run_agent_async(AGENT, Command(resume=resume_payload), config=config)
-            interrupt_payload = _extract_interrupt_payload(result)
-            if interrupt_payload and interrupt_payload.get("type") == "human_confirmation":
-                pending_sub_questions = _normalize_pending_sub_questions(
-                    interrupt_payload.get("sub_questions", [])
-                )
-                if pending_sub_questions:
-                    ack_message = _build_human_confirmation_ack(pending_sub_questions)
-                    logger.warning(
-                        "HITL_ACK_RETURN session_id=%s pending_count=%d source=confirm_shortcut",
-                        session_id,
-                        len(pending_sub_questions),
-                    )
-                    _append_session_messages(
-                        session_id,
-                        [
-                            {"role": "user", "content": request_data.query},
-                            {"role": "assistant", "content": ack_message},
-                        ],
-                    )
-                    return RecommendationResponse(
-                        status="awaiting_human_confirmation",
-                        final_answer=ack_message,
-                        candidates=[],
-                        mode="rag",
-                        iteration_count=0,
-                        coverage=0.0,
-                        session_id=session_id,
-                        awaiting_human_confirmation=True,
-                        pending_sub_questions=pending_sub_questions,
-                    )
-
-            final_answer = _get_value(result, "final_answer", "")
-            if final_answer:
-                _append_session_messages(
-                    session_id,
-                    [
-                        {"role": "user", "content": request_data.query},
-                        {"role": "assistant", "content": final_answer},
-                    ],
-                )
-                return RecommendationResponse(
-                    status="success",
-                    final_answer=final_answer,
-                    candidates=_get_value(result, "candidates", []),
-                    mode=_get_value(result, "mode", ""),
-                    iteration_count=_get_value(result, "iteration_count", 0),
-                    coverage=_get_value(result, "coverage", 0.0),
+            task = _create_recommend_task(
+                _execute_recommend_turn(
                     session_id=session_id,
-                    awaiting_human_confirmation=False,
-                )
-
-            fallback_answer = "当前没有待确认任务，请直接提交新的需求问题。"
-            _append_session_messages(
-                session_id,
-                [
-                    {"role": "user", "content": request_data.query},
-                    {"role": "assistant", "content": fallback_answer},
-                ],
-            )
-            return RecommendationResponse(
-                status="success",
-                final_answer=fallback_answer,
-                candidates=[],
-                mode="chat",
-                iteration_count=0,
-                coverage=1.0,
+                    request_query=request_data.query,
+                    graph_input=Command(resume=resume_payload),
+                    config=config,
+                    fallback_answer="当前没有待确认任务，请直接提交新的需求问题。",
+                    fallback_mode="chat",
+                    interrupt_source="confirm_shortcut",
+                ),
                 session_id=session_id,
-                awaiting_human_confirmation=False,
+                source="confirm_shortcut",
             )
+            return await _await_recommend_task(task, session_id, "confirm_shortcut")
 
         effective_query = request_data.query
         if known_name:
@@ -445,65 +547,18 @@ async def get_software_recommendation(request_data: RecommendationRequest):
         )
 
         config = {"configurable": {"thread_id": session_id}}
-        result = await run_agent_async(AGENT, state, config=config)
-        interrupt_payload = _extract_interrupt_payload(result)
-        if interrupt_payload and interrupt_payload.get("type") == "human_confirmation":
-            pending_sub_questions = _normalize_pending_sub_questions(
-                interrupt_payload.get("sub_questions", [])
-            )
-            if not pending_sub_questions:
-                logger.error(
-                    "HITL_ACK_ABORT session_id=%s reason=empty_sub_questions payload=%s",
-                    session_id,
-                    interrupt_payload,
-                )
-                raise RuntimeError(
-                    "Interrupted for human confirmation but no sub-questions were produced."
-                )
-            ack_message = _build_human_confirmation_ack(pending_sub_questions)
-            logger.warning(
-                "HITL_ACK_RETURN session_id=%s pending_count=%d",
-                session_id,
-                len(pending_sub_questions),
-            )
-            _append_session_messages(
-                session_id,
-                [
-                    {"role": "user", "content": request_data.query},
-                    {"role": "assistant", "content": ack_message},
-                ],
-            )
-            return RecommendationResponse(
-                status="awaiting_human_confirmation",
-                final_answer=ack_message,
-                candidates=[],
-                mode="rag",
-                iteration_count=0,
-                coverage=0.0,
+        task = _create_recommend_task(
+            _execute_recommend_turn(
                 session_id=session_id,
-                awaiting_human_confirmation=True,
-                pending_sub_questions=pending_sub_questions,
-            )
-
-        final_answer = _get_value(result, "final_answer", "")
-        _append_session_messages(
-            session_id,
-            [
-                {"role": "user", "content": request_data.query},
-                {"role": "assistant", "content": final_answer},
-            ],
-        )
-
-        return RecommendationResponse(
-            status="success",
-            final_answer=final_answer,
-            candidates=_get_value(result, "candidates", []),
-            mode=_get_value(result, "mode", ""),
-            iteration_count=_get_value(result, "iteration_count", 0),
-            coverage=_get_value(result, "coverage", 0.0),
+                request_query=request_data.query,
+                graph_input=state,
+                config=config,
+                interrupt_source="recommend",
+            ),
             session_id=session_id,
-            awaiting_human_confirmation=False,
+            source="recommend",
         )
+        return await _await_recommend_task(task, session_id, "recommend")
     except Exception as exc:
         raise HTTPException(
             status_code=500,
