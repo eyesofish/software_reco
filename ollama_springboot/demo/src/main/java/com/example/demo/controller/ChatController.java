@@ -4,6 +4,7 @@ import com.example.demo.client.FastApiClient;
 import com.example.demo.conversation.entity.ConversationEntity;
 import com.example.demo.conversation.entity.ConversationMessageEntity;
 import com.example.demo.conversation.service.ConversationService;
+import com.example.demo.conversation.service.RecommendTaskStateService;
 import com.example.demo.dto.Message;
 import com.example.demo.dto.OllamaChatRequest;
 import com.example.demo.dto.OllamaChatResponse;
@@ -58,10 +59,16 @@ public class ChatController {
 
     private final FastApiClient fastApiClient;
     private final ConversationService conversationService;
+    private final RecommendTaskStateService recommendTaskStateService;
 
-    public ChatController(FastApiClient fastApiClient, ConversationService conversationService) {
+    public ChatController(
+            FastApiClient fastApiClient,
+            ConversationService conversationService,
+            RecommendTaskStateService recommendTaskStateService
+    ) {
         this.fastApiClient = fastApiClient;
         this.conversationService = conversationService;
+        this.recommendTaskStateService = recommendTaskStateService;
     }
 
     @PostMapping("/api/chat")
@@ -86,6 +93,7 @@ public class ChatController {
         );
 
         ConversationMessageEntity userMessage = conversationService.appendMessage(conversation, "user", query);
+        recommendTaskStateService.markGenerating(conversation.getId());
 
         Map<String, String> extractedFacts = extractFactsForSessionUpdate(query);
         for (Map.Entry<String, String> fact : extractedFacts.entrySet()) {
@@ -160,6 +168,13 @@ public class ChatController {
         if (content != null && !content.isBlank()) {
             conversationService.appendMessage(conversation, "assistant", content);
         }
+        recommendTaskStateService.markFromResponse(
+                conversation.getId(),
+                status,
+                awaiting,
+                pendingSubQuestions,
+                content
+        );
 
         String sessionId = firstNonBlank(
                 fastapi == null ? null : fastapi.getSessionId(),
@@ -205,6 +220,7 @@ public class ChatController {
             action = "confirm";
         }
         String comment = firstNonBlank(asText(request.get("comment")), "confirm");
+        recommendTaskStateService.markConfirmed(conversation.getId(), subQuestions);
 
         RecommendResponse fastapi;
         try {
@@ -225,6 +241,13 @@ public class ChatController {
         if (content != null && !content.isBlank()) {
             conversationService.appendMessage(conversation, "assistant", content);
         }
+        recommendTaskStateService.markFromResponse(
+                conversation.getId(),
+                status,
+                awaiting,
+                pendingSubQuestions,
+                content
+        );
 
         String sessionId = firstNonBlank(
                 fastapi == null ? null : fastapi.getSessionId(),

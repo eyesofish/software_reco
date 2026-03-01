@@ -1,4 +1,4 @@
-import { ConfirmPayload, Messages, ModelResponse, SessionStateResponse } from '~/entities/messages'
+import { ConfirmPayload, Messages, ModelResponse, RecommendTaskStateResponse, SessionStateResponse } from '~/entities/messages'
 
 function resolveConversationId (messages : Messages) : string|undefined {
   for (let i = messages.length - 1; i >= 0; i--) {
@@ -10,7 +10,6 @@ function resolveConversationId (messages : Messages) : string|undefined {
   }
   return undefined
 }
-
 
 export default async function requester (
   modelUrl : string,
@@ -65,9 +64,18 @@ export function resolveSessionStateUrl (chatUrl : string, sessionId : string) : 
   const trimmed = chatUrl.trim().replace(/\/+$/, '')
   const encodedSessionId = encodeURIComponent(sessionId)
 
-  if (trimmed.endsWith('/api/chat')) {
-    const origin = new URL(trimmed).origin
-    return `${origin}/api/v1/session-state/${encodedSessionId}`
+  if (/\/api\/chat(?:\/confirm)?$/.test(trimmed)) {
+    const base = trimmed.replace(/\/api\/chat(?:\/confirm)?$/, '')
+    return `${base}/api/session-state/${encodedSessionId}`
+  }
+
+  if (/\/api\/v1\/recommend(?:\/confirm)?$/.test(trimmed)) {
+    const base = trimmed.replace(/\/api\/v1\/recommend(?:\/confirm)?$/, '')
+    return `${base}/api/v1/session-state/${encodedSessionId}`
+  }
+
+  if (trimmed.endsWith('/api/session-state') || trimmed.endsWith('/api/v1/session-state')) {
+    return `${trimmed}/${encodedSessionId}`
   }
 
   return `${trimmed.replace(/\/api\/chat\/confirm$/, '').replace(/\/api\/chat$/, '')}/api/v1/session-state/${encodedSessionId}`
@@ -87,6 +95,102 @@ export async function getSessionState (
     throw new Error(`HTTP ${response.status}`)
   }
   return await response.json() as SessionStateResponse
+}
+
+export function resolveTaskStateUrl (chatUrl : string, taskId : string) : string {
+  const trimmed = chatUrl.trim().replace(/\/+$/, '')
+  const encodedTaskId = encodeURIComponent(taskId)
+
+  if (/\/api\/chat(?:\/confirm)?$/.test(trimmed)) {
+    const base = trimmed.replace(/\/api\/chat(?:\/confirm)?$/, '')
+    return `${base}/api/v1/recommend/task/${encodedTaskId}`
+  }
+
+  if (/\/api\/v1\/recommend(?:\/confirm)?$/.test(trimmed)) {
+    const base = trimmed.replace(/\/api\/v1\/recommend(?:\/confirm)?$/, '')
+    return `${base}/api/v1/recommend/task/${encodedTaskId}`
+  }
+
+  if (trimmed.endsWith('/api/v1/recommend/task')) {
+    return `${trimmed}/${encodedTaskId}`
+  }
+
+  return `${trimmed.replace(/\/api\/chat\/confirm$/, '').replace(/\/api\/chat$/, '')}/api/v1/recommend/task/${encodedTaskId}`
+}
+
+export async function getRecommendTaskState (
+  chatUrl : string,
+  taskId : string
+) : Promise<RecommendTaskStateResponse> {
+  const response = await fetch(resolveTaskStateUrl(chatUrl, taskId), {
+    method: 'GET',
+    headers: {
+      'Content-Type': 'application/json'
+    }
+  })
+  if (!response.ok) {
+    throw new Error(`HTTP ${response.status}`)
+  }
+  return await response.json() as RecommendTaskStateResponse
+}
+
+export interface SessionStatePollOptions {
+  intervalMs ?: number,
+  timeoutMs ?: number,
+  shouldStop ?: () => boolean
+}
+
+export interface SessionStatePollResult {
+  status : 'resolved' | 'timeout' | 'stopped',
+  state ?: SessionStateResponse
+}
+
+function sleep (ms : number) : Promise<void> {
+  return new Promise((resolve) => {
+    setTimeout(resolve, ms)
+  })
+}
+
+export async function pollSessionState (
+  chatUrl : string,
+  sessionId : string,
+  onState : (state : SessionStateResponse) => boolean|Promise<boolean>,
+  options : SessionStatePollOptions = {}
+) : Promise<SessionStatePollResult> {
+  const intervalMs = options.intervalMs ?? 2000
+  const timeoutMs = options.timeoutMs ?? 90_000
+  const startedAt = Date.now()
+
+  while (Date.now() - startedAt <= timeoutMs) {
+    if (options.shouldStop?.()) {
+      return { status: 'stopped' }
+    }
+
+    try {
+      const state = await getSessionState(chatUrl, sessionId)
+      const shouldStopPolling = await onState(state)
+      if (shouldStopPolling) {
+        return {
+          status: 'resolved',
+          state
+        }
+      }
+    }
+    catch (error) {
+      console.warn('session-state-poll-failed', {
+        session_id: sessionId,
+        error
+      })
+    }
+
+    if (Date.now() - startedAt >= timeoutMs) {
+      break
+    }
+
+    await sleep(intervalMs)
+  }
+
+  return { status: 'timeout' }
 }
 
 export async function confirmRequester (

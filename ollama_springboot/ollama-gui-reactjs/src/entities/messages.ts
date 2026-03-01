@@ -50,14 +50,35 @@ export interface ConfirmPayload {
   comment : string
 }
 
+export type SessionStateRole = 'assistant' | 'user' | 'system'
+
 export interface SessionStateMessage {
-  role : 'assistant' | 'user' | 'system',
+  role : SessionStateRole,
   content : string
 }
 
 export interface SessionStateResponse {
   session_id : string,
+  conversation_id ?: string,
   facts : Record<string, string>,
   messages : SessionStateMessage[],
-  updated_at : number
+  updated_at : number | string,
+  awaiting_human_confirmation ?: boolean,
+  pending_sub_questions ?: string[],
+  awaitingHumanConfirmation ?: boolean,
+  pendingSubQuestions ?: string[]
+}
+
+export interface RecommendTaskStateResponse {
+  task_id ?: string,
+  taskId ?: string,
+  status : 'PENDING_CONFIRM' | 'CONFIRMED' | 'GENERATING' | 'DONE' | 'FAILED' | string,
+  sub_questions ?: string[],
+  subQuestions ?: string[],
+  final_result ?: string,
+  finalResult ?: string,
+  created_at ?: string,
+  createdAt ?: string,
+  updated_at ?: string,
+  updatedAt ?: string
 }

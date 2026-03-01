@@ -20,6 +20,7 @@ import org.springframework.web.server.ResponseStatusException;
 
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
@@ -243,6 +244,15 @@ public class ConversationService {
     public List<ConversationMessageEntity> getRecentMessages(String conversationId, int limit) {
         int size = Math.max(1, Math.min(limit, 50));
         return messageRepository.findByConversation_IdOrderByCreatedAtDesc(conversationId, PageRequest.of(0, size)).getContent();
+    }
+
+    @Transactional(readOnly = true)
+    public List<ConversationMessageEntity> getSessionMessages(String conversationId, int limit) {
+        int size = Math.max(1, Math.min(limit, 200));
+        List<ConversationMessageEntity> messages =
+                messageRepository.findByConversation_IdOrderByCreatedAtDesc(conversationId, PageRequest.of(0, size)).getContent();
+        Collections.reverse(messages);
+        return messages;
     }
 
     @Transactional(readOnly = true)
