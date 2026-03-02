@@ -1,8 +1,11 @@
 from typing import List
+import logging
 
 import openai
 
 from ..config import settings
+
+logger = logging.getLogger(__name__)
 
 _DASHSCOPE_PROVIDER = "dashscope"
 _DASHSCOPE_DEFAULT_MODEL = "text-embedding-v4"
@@ -52,6 +55,7 @@ def embed_texts(texts: List[str]) -> List[List[float]]:
     """Embed texts with the configured embedding model."""
     clean_texts = [str(text).strip() for text in (texts or []) if str(text).strip()]
     if not clean_texts:
+        logger.info("embedding skipped: no non-empty texts")
         return []
 
     provider = _embedding_provider()
@@ -59,9 +63,32 @@ def embed_texts(texts: List[str]) -> List[List[float]]:
     if not model_name:
         raise ValueError("EMBEDDING_MODEL is not configured")
 
-    client = _get_openai_client()
-    response = client.embeddings.create(
-        model=model_name,
-        input=clean_texts,
+    logger.info(
+        "embedding request start: provider=%s model=%s texts=%d",
+        provider,
+        model_name,
+        len(clean_texts),
     )
-    return [item.embedding for item in response.data]
+    client = _get_openai_client()
+    try:
+        response = client.embeddings.create(
+            model=model_name,
+            input=clean_texts,
+        )
+    except Exception:
+        logger.exception(
+            "embedding request failed: provider=%s model=%s texts=%d",
+            provider,
+            model_name,
+            len(clean_texts),
+        )
+        raise
+
+    vectors = [item.embedding for item in response.data]
+    vector_dim = len(vectors[0]) if vectors and vectors[0] else 0
+    logger.info(
+        "embedding request success: vectors=%d dimension=%d",
+        len(vectors),
+        vector_dim,
+    )
+    return vectors

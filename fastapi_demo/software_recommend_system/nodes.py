@@ -37,66 +37,381 @@ def _get_openai_client() -> openai.OpenAI:
 # 分流词表
 TECH_TERMS = {
     "frameworks": [
-        "Spring Boot", "React", "Angular", "Vue", "Django", "Flask", 
-        "Express", "FastAPI", "Laravel", "Ruby on Rails", "ASP.NET"
+        # Java / JVM
+        "Spring", "Spring Boot", "Spring MVC", "Spring Cloud",
+        "Hibernate", "Struts", "Play Framework", "Micronaut", "Quarkus",
+        # JavaScript / TypeScript
+        "React", "React Native", "Next.js", "Remix", "Gatsby",
+        "Angular", "AngularJS",
+        "Vue", "Nuxt.js", "Svelte", "SvelteKit",
+        # Python
+        "Django", "Flask", "FastAPI", "Tornado", "Sanic",
+        "Pyramid", "Bottle",
+        # Node.js / Backend JS
+        "Express", "NestJS", "Koa", "Hapi",
+        # PHP
+        "Laravel", "Symfony", "CodeIgniter", "Yii", "Zend Framework",
+        # Ruby
+        "Ruby on Rails", "Sinatra",
+        # .NET
+        "ASP.NET", "ASP.NET Core", "Blazor",
+        # Go
+        "Gin", "Beego", "Echo", "Fiber",
+        # Mobile
+        "Flutter", "Cordova", "Ionic", "NativeScript",
+        # Desktop / Cross-platform
+        "Electron", "Qt", "GTK", "WPF", "Swing",
+        # Others
+        "Meteor", "Phoenix", "Elixir Phoenix", "Playwright Test Runner",
+        "Strapi", "KeystoneJS"
     ],
+
     "technologies": [
-        "ORM", "CI/CD", "microservices", "containerization", 
-        "kubernetes", "docker", "cache", "database", "API", "REST"
+        "MVC", "MVVM", "MVP",
+        "ORM", "Object Relational Mapping",
+        "CI/CD", "continuous integration", "continuous delivery", "continuous deployment",
+        "microservices", "microservice architecture",
+        "containerization", "container orchestration",
+        "service mesh", "sidecar",
+        "kubernetes operator",
+        "cache", "caching", "in-memory cache",
+        "database", "relational database", "NoSQL database",
+        "API", "REST", "RESTful API", "GraphQL", "gRPC",
+        "WebSocket", "SSE", "Server-Sent Events",
+        "RPC", "thrift",
+        "message passing", "event streaming",
+        "batch processing", "stream processing",
+        "serverless", "FaaS", "Function as a Service",
+        "PaaS", "SaaS", "IaaS",
+        "SOA", "service oriented architecture",
+        "monolith", "monolithic architecture",
+        "service discovery",
+        "load balancing",
+        "rate limiting",
+        "circuit breaker",
+        "event sourcing",
+        "CQRS",
+        "DDD", "domain driven design",
+        "logging", "tracing", "monitoring", "observability",
+        "A/B testing", "feature flag",
+        "blue-green deployment", "canary release",
+        "reverse proxy", "API gateway",
+        "edge computing", "CDN",
+        "web security", "OWASP",
+        "multi-tenant", "multi tenancy",
+        "event-driven architecture",
+        "polyglot persistence",
+        "eventual consistency",
+        "ACID", "BASE",
+        "idempotency",
+        "saga pattern",
+        "data sharding", "partitioning",
+        "leader election", "consensus"
     ],
+
     "languages": [
-        "Python", "JavaScript", "TypeScript", "Java", "C#", 
-        "Go", "Rust", "PHP", "Ruby", "Swift", "Kotlin"
+        # 主流语言
+        "Python", "JavaScript", "TypeScript", "Java", "C#", "C", "C++",
+        "Go", "Golang", "Rust", "PHP", "Ruby", "Swift", "Kotlin", "Scala",
+        # 函数式 / 脚本
+        "Haskell", "Elixir", "Erlang", "F#", "Clojure",
+        "Lua", "Perl", "R", "Julia", "MATLAB",
+        # 低层 / 系统
+        "Assembly", "x86 assembly", "ARM assembly",
+        # Web / 标记
+        "HTML", "CSS", "Sass", "Less",
+        # Query / Data
+        "SQL", "PL/SQL", "T-SQL",
+        # Shell
+        "Bash", "Shell", "PowerShell",
+        # Other
+        "Objective-C", "Dart", "Groovy", "VB.NET"
     ],
+
     "tools": [
-        "git", "jenkins", "terraform", "ansible", "puppet", 
-        "prometheus", "grafana", "elasticsearch", "kibana"
+        # VCS
+        "git", "GitHub", "GitLab", "Bitbucket", "SVN",
+        # CI/CD
+        "jenkins", "GitHub Actions", "GitLab CI", "CircleCI", "Travis CI",
+        "TeamCity", "Bamboo",
+        # IaC / 配置管理
+        "terraform", "ansible", "puppet", "chef", "cloudformation",
+        "pulumi",
+        # 监控 / 日志
+        "prometheus", "grafana",
+        "elasticsearch", "logstash", "kibana", "ELK stack", "EFK stack",
+        "datadog", "new relic", "splunk", "jaeger", "zipkin", "opentelemetry",
+        # 容器 / 集群
+        "docker", "docker compose", "kubernetes", "k8s", "minikube",
+        "helm", "ArgoCD", "FluxCD", "istio", "linkerd", "envoy",
+        # 测试
+        "JUnit", "TestNG", "Mockito", "Jest", "Mocha", "Chai",
+        "Cypress", "Playwright", "Selenium", "Puppeteer",
+        "pytest", "unittest", "nose",
+        "Postman", "Insomnia", "Newman",
+        # 构建
+        "Maven", "Gradle", "Ant", "npm", "yarn", "pnpm",
+        "webpack", "rollup", "parcel", "esbuild", "vite",
+        # 协作
+        "Jira", "Confluence", "Trello", "Asana",
+        # 其他开发工具
+        "VS Code", "IntelliJ IDEA", "PyCharm", "WebStorm", "Eclipse",
+        "Xcode", "Android Studio",
+        "Fiddler", "Charles Proxy",
+        "Swagger", "OpenAPI"
     ],
+
     "architecture": [
-    "distributed system", "high availability", "scalability",
-    "load balancing", "service discovery",
-    "event-driven", "CQRS", "DDD",
-    "monolith", "SOA"
-],"data": [
-    "MySQL", "PostgreSQL", "MongoDB", "Redis",
-    "NoSQL", "SQL",
-    "vector database", "embedding",
-    "FAISS", "Milvus", "Pinecone",
-    "data warehouse", "ETL"
-],
-"ai": [
-    "LLM", "RAG", "agent", "prompt",
-    "fine-tuning", "LoRA",
-    "embedding model",
-    "LangChain", "LangGraph",
-    "OpenAI", "Hugging Face",
-    "transformer"
-],
-"backend": [
-    "message queue", "Kafka", "RabbitMQ",
-    "Redis", "distributed lock",
-    "rate limiting", "idempotency",
-    "transaction", "eventual consistency"
-],
-"devops": [
-    "AWS", "GCP", "Azure",
-    "CI", "CD", "GitHub Actions",
-    "Helm", "ArgoCD",
-    "logging", "tracing", "monitoring"
-],
-"non_functional": [
-    "performance", "latency", "throughput",
-    "concurrency", "high QPS",
-    "fault tolerance", "reliability",
-    "security", "authentication", "authorization"
-]
+        "distributed system", "distributed systems",
+        "high availability", "HA",
+        "scalability", "horizontal scaling", "vertical scaling",
+        "load balancing", "global load balancing",
+        "service discovery", "service registry",
+        "event-driven", "event-driven architecture",
+        "CQRS", "command query responsibility segregation",
+        "DDD", "domain driven design",
+        "monolith", "monolithic",
+        "SOA", "service oriented architecture",
+        "microservices", "microservice architecture",
+        "hexagonal architecture", "clean architecture", "onion architecture",
+        "layered architecture",
+        "peer to peer", "P2P",
+        "master slave", "leader follower",
+        "multi-tier architecture", "three-tier architecture",
+        "event sourcing",
+        "message driven",
+        "lambda architecture", "kappa architecture",
+        "data lakehouse", "data mesh",
+        "multi region", "multi AZ",
+        "CQRS + event sourcing"
+    ],
 
+    "data": [
+        # 数据库
+        "MySQL", "PostgreSQL", "MariaDB", "Oracle", "SQL Server",
+        "SQLite", "CockroachDB",
+        "MongoDB", "Cassandra", "HBase", "DynamoDB",
+        "Redis", "Memcached",
+        "Neo4j", "JanusGraph", "ArangoDB", "TigerGraph",
+        "InfluxDB", "TimescaleDB", "ClickHouse",
+        "Elasticsearch", "OpenSearch",
+        "NoSQL", "SQL",
+        "columnar database", "time series database",
+        # 大数据
+        "Hadoop", "HDFS", "YARN",
+        "Spark", "Flink", "Storm", "Samza",
+        "Kafka Streams", "KSQL",
+        "Hive", "Pig",
+        # ETL / DW
+        "data warehouse", "data lake", "data lakehouse",
+        "ETL", "ELT", "data pipeline",
+        "Airflow", "Luigi", "Dagster",
+        # 向量数据库 / 检索
+        "vector database", "embedding",
+        "FAISS", "Milvus", "Pinecone", "Weaviate", "Qdrant",
+        "Annoy", "HNSW",
+        # BI / 分析
+        "Tableau", "Power BI", "Looker", "Superset",
+        "OLAP", "OLTP",
+        "data modeling", "star schema", "snowflake schema"
+    ],
 
+    "ai": [
+        "LLM", "large language model",
+        "RAG", "retrieval augmented generation",
+        "agent", "multi-agent", "AI agent",
+        "prompt", "prompt engineering",
+        "fine-tuning", "LoRA", "adapter tuning",
+        "embedding model", "text embedding",
+        "LangChain", "LangGraph",
+        "OpenAI", "ChatGPT", "GPT-4", "GPT-4.1",
+        "Hugging Face", "Transformers",
+        "transformer", "attention mechanism",
+        "BERT", "RoBERTa", "T5", "LLaMA",
+        # 传统 ML
+        "machine learning", "deep learning",
+        "supervised learning", "unsupervised learning", "reinforcement learning",
+        "classification", "regression", "clustering",
+        "neural network", "CNN", "RNN", "LSTM", "GAN",
+        # AI 框架
+        "PyTorch", "TensorFlow", "Keras", "JAX",
+        "scikit-learn", "XGBoost", "LightGBM", "CatBoost",
+        # MLOps
+        "MLOps", "model serving", "feature store",
+        "Kubeflow", "MLflow", "SageMaker",
+        "Ray", "Horovod",
+        # 其他
+        "computer vision", "NLP", "speech recognition"
+    ],
 
+    "backend": [
+        "message queue", "message broker",
+        "Kafka", "RabbitMQ", "ActiveMQ", "RocketMQ", "SQS", "Pub/Sub",
+        "Redis", "distributed lock",
+        "rate limiting", "throttling",
+        "idempotency",
+        "transaction", "distributed transaction",
+        "two phase commit", "2PC",
+        "eventual consistency", "strong consistency",
+        "CAP theorem", "Paxos", "Raft", "consensus algorithm",
+        "session management",
+        "authentication", "authorization",
+        "JWT", "OAuth", "OpenID Connect",
+        "RBAC", "ABAC",
+        "file storage", "object storage", "blob storage",
+        "email service", "notification service",
+        "payment integration", "webhook",
+        "cron job", "scheduled task",
+        "API gateway", "reverse proxy",
+        "Nginx", "HAProxy", "Traefik"
+    ],
 
+    "devops": [
+        "DevOps", "SRE", "site reliability engineering",
+        "AWS", "GCP", "Azure",
+        "EC2", "S3", "RDS", "Lambda", "ECS", "EKS",
+        "GKE", "Cloud Run", "Cloud Functions",
+        "AKS", "App Service",
+        "CI", "CD", "CI/CD",
+        "GitHub Actions", "GitLab CI", "jenkins",
+        "Helm", "ArgoCD", "FluxCD",
+        "docker", "kubernetes",
+        "infrastructure as code", "IaC",
+        "terraform", "ansible", "puppet", "chef", "cloudformation",
+        "logging", "tracing", "monitoring", "observability",
+        "prometheus", "grafana", "ELK stack", "EFK stack",
+        "blue-green deployment", "canary deployment",
+        "on-call", "incident management",
+        "auto scaling", "autoscaling group",
+        "service mesh",
+        "config management",
+        "secret management", "vault"
+    ],
 
+    "non_functional": [
+        "performance", "latency", "throughput",
+        "concurrency", "parallelism",
+        "high QPS", "QPS", "RPS",
+        "fault tolerance", "reliability", "resilience",
+        "availability", "SLA", "SLO", "SLI",
+        "scalability", "elasticity",
+        "security", "authentication", "authorization",
+        "confidentiality", "integrity", "availability",
+        "input validation", "encryption", "TLS", "SSL",
+        "audit log", "compliance",
+        "usability", "accessibility",
+        "maintainability", "testability",
+        "observability", "monitorability",
+        "cost optimization"
+    ],
 
+    # 新增：前端相关
+    "frontend": [
+        "HTML", "CSS", "JavaScript", "TypeScript",
+        "React", "Angular", "Vue", "Svelte",
+        "Next.js", "Nuxt.js", "Gatsby",
+        "Redux", "MobX", "Recoil", "Zustand",
+        "Webpack", "Vite", "Rollup", "Parcel",
+        "Sass", "Less", "Tailwind CSS",
+        "Bootstrap", "Material UI", "Ant Design",
+        "responsive design", "SPA", "PWA",
+        "Web Components", "Shadow DOM",
+        "DOM", "virtual DOM"
+    ],
+
+    # 新增：移动开发
+    "mobile": [
+        "Android", "iOS",
+        "Kotlin", "Swift", "Objective-C", "Java",
+        "Android Studio", "Xcode",
+        "Flutter", "React Native",
+        "Cordova", "Ionic", "NativeScript",
+        "mobile SDK", "push notification",
+        "App Store", "Google Play"
+    ],
+
+    # 新增：测试相关
+    "testing": [
+        "unit test", "integration test", "system test",
+        "end to end test", "E2E test",
+        "regression test", "performance test", "load test", "stress test",
+        "smoke test", "sanity test",
+        "TDD", "test driven development",
+        "BDD", "behavior driven development",
+        "JUnit", "TestNG", "pytest", "Jest", "Mocha", "Cypress",
+        "Selenium", "Playwright", "Puppeteer",
+        "coverage", "code coverage",
+        "mock", "stub", "spy"
+    ],
+
+    # 新增：安全
+    "security": [
+        "encryption", "decryption",
+        "symmetric encryption", "asymmetric encryption",
+        "hashing", "HMAC",
+        "TLS", "SSL", "HTTPS",
+        "OAuth", "OAuth2", "OpenID Connect",
+        "SAML", "JWT",
+        "CSRF", "XSS", "SQL injection", "clickjacking",
+        "WAF", "web application firewall",
+        "IAM", "identity and access management",
+        "SSO", "single sign on",
+        "key management", "KMS",
+        "zero trust", "least privilege",
+        "penetration testing", "vulnerability scanning",
+        "OWASP Top 10"
+    ],
+
+    # 新增：方法论 / 流程
+    "methodology": [
+        "Agile", "Scrum", "Kanban",
+        "Waterfall",
+        "XP", "extreme programming",
+        "pair programming", "code review",
+        "CI/CD", "DevOps",
+        "user story", "story point",
+        "backlog", "sprint", "retrospective",
+        "design review", "architecture review",
+        "RFC", "ADR", "technical specification"
+    ],
+
+    # 新增：设计模式
+    "design_patterns": [
+        "singleton", "factory", "abstract factory",
+        "builder", "prototype",
+        "adapter", "bridge", "composite", "decorator", "facade",
+        "flyweight", "proxy",
+        "chain of responsibility",
+        "command", "interpreter", "iterator",
+        "mediator", "memento", "observer",
+        "state", "strategy", "template method",
+        "visitor",
+        "repository pattern", "unit of work",
+        "dependency injection", "inversion of control"
+    ],
+
+    # 新增：基础 CS 概念
+    "cs_core": [
+        "data structure", "algorithm",
+        "array", "linked list", "stack", "queue",
+        "hash table", "heap", "priority queue",
+        "tree", "binary tree", "bst",
+        "segment tree", "fenwick tree",
+        "graph", "bfs", "dfs", "dijkstra", "shortest path",
+        "sorting", "searching", "dynamic programming",
+        "time complexity", "space complexity", "big o notation",
+        "process", "thread", "coroutine",
+        "deadlock", "race condition", "mutex", "semaphore",
+        "virtual memory", "paging", "cache",
+        "CPU", "GPU", "I/O",
+        "network", "TCP", "UDP", "HTTP", "HTTP/2", "HTTP/3",
+        "DNS", "CDN", "load balancer",
+        "RPC", "gRPC",
+        "operating system", "kernel", "syscall",
+        "distributed system"
+    ]
 }
+
 
 DRAWING_KEYWORDS = [
     "画图", "画一个", "生成图", "生成图表", "绘图", "绘制", "图表",
@@ -556,36 +871,56 @@ def human_confirmation_node(state: AgentState) -> Dict[str, Any]:
     }
 
 
-def evidence_collection_node(state: AgentState) -> Dict[str, Any]:
-    """证据收集节点"""
+def retrieve_node(state: AgentState) -> Dict[str, Any]:
+    """Retrieve node: search evidence for each sub-question."""
     sub_questions = _get_field(state, "sub_questions", [])
     evidence = _get_field(state, "evidence", [])
     iteration_count = _get_field(state, "iteration_count", 0)
 
     logger.warning(
-        "EVIDENCE_COLLECTION_ENTER iteration=%d subq_count=%d",
+        "RETRIEVE_ENTER iteration=%d subq_count=%d",
         iteration_count,
         len(sub_questions),
     )
-    logger.info(f"收集证据，迭代次数: {iteration_count}, 子问题数量: {len(sub_questions)}")
-    
-    # 为每个子问题收集证据
+    logger.info(
+        "retrieve evidence iteration=%d sub_questions=%d",
+        iteration_count,
+        len(sub_questions),
+    )
+
     for question in sub_questions:
-        # 使用统一搜索入口获取相关文档
         search_results = unified_search(question, k=settings.TOP_K)
-        
-        # 计算质量分数（简化实现，实际应用中会更复杂）
         quality_score = min(0.9, 0.5 + (len(search_results) * 0.1))
-        
+
         evidence_item = {
             "question": question,
             "documents": search_results,
-            "search_results": [{"content": doc.content, "score": doc.score} for doc in search_results],
-            "quality_score": quality_score
+            "search_results": [
+                {"content": doc.content, "score": doc.score}
+                for doc in search_results
+            ],
+            "quality_score": quality_score,
         }
-        
         evidence.append(evidence_item)
-    
+
+    logger.warning(
+        "RETRIEVE_DONE iteration=%d total_evidence=%d",
+        iteration_count,
+        len(evidence),
+    )
+    return {"evidence": evidence}
+
+
+def evidence_collection_node(state: AgentState) -> Dict[str, Any]:
+    """Evidence collection node: persist retrieved evidence and advance iteration."""
+    evidence = _get_field(state, "evidence", [])
+    iteration_count = _get_field(state, "iteration_count", 0)
+
+    logger.warning(
+        "EVIDENCE_COLLECTION_ENTER iteration=%d evidence_count=%d",
+        iteration_count,
+        len(evidence),
+    )
     return {
         "evidence": evidence,
         "iteration_count": iteration_count + 1
@@ -804,21 +1139,66 @@ def answer_generation_node(state: AgentState) -> Dict[str, Any]:
     }
 
 def chat_answer_generation_node(state: AgentState) -> Dict[str, Any]:
-    """答案生成节点（Chat模式）"""
+    """Answer generation node (chat mode with retrieval context)."""
     user_query = _get_field(state, "user_query", "")
-
-    logger.info(f"使用聊天模式回答: {user_query}")
+    retrieval_query = _extract_current_user_query(user_query) or user_query
+    logger.info("chat mode answer with retrieval: %s", retrieval_query)
 
     messages = list(_get_field(state, "messages", []) or [])
     if not messages:
         messages = [{"role": "user", "content": user_query}]
 
+    retrieved_docs: List[Document] = []
+    try:
+        retrieved_docs = unified_search(retrieval_query, k=settings.TOP_K)
+    except Exception as exc:
+        logger.warning("chat retrieval failed, continue without context: %s", exc)
+        retrieved_docs = []
+
+    logger.info("chat retrieval done: docs=%d", len(retrieved_docs))
+
+    def _format_retrieved_context(docs: List[Document]) -> str:
+        lines: List[str] = []
+        for idx, doc in enumerate(docs[:4], start=1):
+            content = str(_get_field(doc, "content", "")).strip().replace("\n", " ")
+            if len(content) > 400:
+                content = content[:400] + "..."
+            metadata = _get_field(doc, "metadata", {})
+            source = str(_get_field(metadata, "source", "")).strip() or "unknown"
+            url = str(_get_field(metadata, "url", "")).strip()
+            score = _get_field(doc, "score", 0.0)
+            try:
+                score_text = f"{float(score):.4f}"
+            except Exception:
+                score_text = str(score)
+            header = f"[{idx}] source={source} score={score_text}"
+            if url:
+                header += f" url={url}"
+            lines.append(header)
+            lines.append(content)
+        return "\n".join(lines).strip()
+
+    retrieved_context = _format_retrieved_context(retrieved_docs)
+    llm_messages = list(messages)
+    if retrieved_context:
+        system_prompt = "\n".join(
+            [
+                "You are a helpful software engineering assistant.",
+                "Use the retrieved context when it is relevant to the user question.",
+                "If retrieved context is insufficient, answer with best effort and be explicit about uncertainty.",
+                "",
+                "[Retrieved Context]",
+                retrieved_context,
+            ]
+        )
+        llm_messages = [{"role": "system", "content": system_prompt}] + llm_messages
+
     try:
         client = _get_openai_client()
         response = client.chat.completions.create(
             model=settings.LLM_MODEL,
-            messages=messages,
-            temperature=0.7
+            messages=llm_messages,
+            temperature=0.7,
         )
 
         final_answer = ""

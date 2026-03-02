@@ -7,6 +7,7 @@ from .nodes import (
     query_normalization_node, 
     sub_question_generation_node,
     human_confirmation_node,
+    retrieve_node,
     evidence_collection_node,
     evidence_evaluation_node,
     candidate_generation_node,
@@ -136,6 +137,7 @@ def create_rag_with_routing_agent():
     workflow.add_node("query_normalization", query_normalization_node)
     workflow.add_node("sub_question_generation", sub_question_generation_node)
     workflow.add_node("human_confirmation", human_confirmation_node)
+    workflow.add_node("retrieve", retrieve_node)
     workflow.add_node("evidence_collection", evidence_collection_node)
     workflow.add_node("evidence_evaluation", evidence_evaluation_node)
     workflow.add_node("candidate_generation", candidate_generation_node)
@@ -175,7 +177,8 @@ def create_rag_with_routing_agent():
     
     # RAG 分支流程
     workflow.add_edge("sub_question_generation", "human_confirmation")
-    workflow.add_edge("human_confirmation", "evidence_collection")
+    workflow.add_edge("human_confirmation", "retrieve")
+    workflow.add_edge("retrieve", "evidence_collection")
     workflow.add_edge("evidence_collection", "evidence_evaluation")
     workflow.add_edge("evidence_evaluation", "candidate_generation")
     workflow.add_edge("candidate_generation", "coverage_check")
@@ -212,7 +215,7 @@ def create_rag_with_routing_agent():
         "coverage_check",
         should_continue,
         {
-            "continue": "evidence_collection",
+            "continue": "retrieve",
             "terminate": "rag_answer_generation"
         }
     )
@@ -234,6 +237,7 @@ def create_rag_agent():
     workflow.add_node("entry", entry_node)
     workflow.add_node("query_normalization", query_normalization_node)
     workflow.add_node("sub_question_generation", sub_question_generation_node)
+    workflow.add_node("retrieve", retrieve_node)
     workflow.add_node("evidence_collection", evidence_collection_node)
     workflow.add_node("evidence_evaluation", evidence_evaluation_node)
     workflow.add_node("candidate_generation", candidate_generation_node)
@@ -245,7 +249,8 @@ def create_rag_agent():
     
     # 添加边
     workflow.add_edge("entry", "query_normalization")
-    workflow.add_edge("sub_question_generation", "evidence_collection")
+    workflow.add_edge("sub_question_generation", "retrieve")
+    workflow.add_edge("retrieve", "evidence_collection")
     workflow.add_edge("evidence_collection", "evidence_evaluation")
     workflow.add_edge("evidence_evaluation", "candidate_generation")
     workflow.add_edge("candidate_generation", "coverage_check")
@@ -280,7 +285,7 @@ def create_rag_agent():
         "coverage_check",
         should_continue,
         {
-            "continue": "evidence_collection",
+            "continue": "retrieve",
             "terminate": "answer_generation"
         }
     )
