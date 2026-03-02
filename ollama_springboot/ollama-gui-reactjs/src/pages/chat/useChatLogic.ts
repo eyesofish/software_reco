@@ -232,6 +232,18 @@ function taskStorageKey (conversationId : string) {
   return `${TASK_ID_STORAGE_PREFIX}${conversationId}`
 }
 
+function createEmptySnapshot (conversationId : string) : ConversationTaskSnapshot {
+  return {
+    conversationId,
+    activeTaskId: undefined,
+    taskStatus: 'IDLE',
+    subQuestions: [],
+    finalResult: '',
+    loading: false,
+    error: undefined
+  }
+}
+
 function readConversationIdsStorage () : string[] {
   try {
     const raw = localStorage.getItem(CHAT_CONVERSATION_IDS_STORAGE_KEY)
@@ -365,15 +377,7 @@ export default function useChatLogic () : UseChatLogicResult {
   }, [])
 
   const setSnapshotPatch = useCallback((conversationId : string, patch : Partial<ConversationTaskSnapshot>) => {
-    const current = conversationSnapshotsRef.current[conversationId] || {
-      conversationId,
-      activeTaskId: undefined,
-      taskStatus: 'IDLE' as TaskStatus,
-      subQuestions: [],
-      finalResult: '',
-      loading: false,
-      error: undefined
-    }
+    const current = conversationSnapshotsRef.current[conversationId] || createEmptySnapshot(conversationId)
 
     const nextTaskStatus = patch.taskStatus ?? current.taskStatus
     const nextLoading = patch.loading ?? current.loading
@@ -385,6 +389,33 @@ export default function useChatLogic () : UseChatLogicResult {
       conversationId
     })
   }, [applySnapshot])
+
+  const hasAuthoritativeSnapshot = useCallback((conversationId : string) => {
+    const snapshot = conversationSnapshotsRef.current[conversationId]
+    if (!snapshot) return false
+
+    const hasTaskId = !!normalizeText(snapshot.activeTaskId)
+    const isInFlight = snapshot.taskStatus === 'GENERATING' || snapshot.taskStatus === 'CONFIRMING'
+    const isPendingWithQuestions = snapshot.taskStatus === 'PENDING_CONFIRM' && snapshot.subQuestions.length > 0
+    const isDoneWithResult = snapshot.taskStatus === 'DONE' && normalizeText(snapshot.finalResult).length > 0
+
+    return hasTaskId || isInFlight || isPendingWithQuestions || isDoneWithResult
+  }, [])
+
+  const shouldIgnoreFetchedTask = useCallback((conversationId : string, fetchedTaskId : string|undefined) => {
+    const normalizedFetchedTaskId = normalizeText(fetchedTaskId)
+    if (!normalizedFetchedTaskId) return false
+
+    const snapshot = conversationSnapshotsRef.current[conversationId]
+    if (!snapshot) return false
+
+    const currentTaskId = normalizeText(snapshot.activeTaskId)
+    if (!currentTaskId || currentTaskId === normalizedFetchedTaskId) {
+      return false
+    }
+
+    return hasAuthoritativeSnapshot(conversationId)
+  }, [hasAuthoritativeSnapshot])
 
   const appendAssistantMessage = useCallback((chatId : number, content : string, conversationId ?: string, taskId ?: string) => {
     const text = normalizeText(content)
@@ -459,8 +490,22 @@ export default function useChatLogic () : UseChatLogicResult {
     taskId : string,
     loading : boolean
   ) => {
-    const taskState = await getTaskStateRequester(modelUrl, taskId)
+    const normalizedTaskId = normalizeText(taskId)
+    if (!normalizedTaskId) {
+      return conversationSnapshotsRef.current[conversationId] || createEmptySnapshot(conversationId)
+    }
+
+    const taskState = await getTaskStateRequester(modelUrl, normalizedTaskId)
+    const responseTaskId = normalizeText(taskState.task_id || taskState.taskId) || normalizedTaskId
+    if (shouldIgnoreFetchedTask(conversationId, responseTaskId)) {
+      return conversationSnapshotsRef.current[conversationId] || createEmptySnapshot(conversationId)
+    }
+
     const snapshot = buildSnapshotFromTask(conversationId, taskState, loading)
+    if (shouldIgnoreFetchedTask(conversationId, snapshot.activeTaskId || responseTaskId)) {
+      return conversationSnapshotsRef.current[conversationId] || snapshot
+    }
+
     applySnapshot(snapshot)
 
     if (snapshot.taskStatus === 'DONE' && snapshot.finalResult) {
@@ -475,7 +520,7 @@ export default function useChatLogic () : UseChatLogicResult {
     }
 
     return snapshot
-  }, [applySnapshot, appendAssistantMessage, modelUrl, startPollingForTask])
+  }, [applySnapshot, appendAssistantMessage, modelUrl, shouldIgnoreFetchedTask, startPollingForTask])
 
   const getConversationIdForChat = useCallback((chatId : number) => {
     const messages = chatsRef.current[chatId] || []
@@ -504,7 +549,9 @@ export default function useChatLogic () : UseChatLogicResult {
   }, [])
 
   const loadConversationState = useCallback(async (chatId : number, conversationId : string, token : number) => {
-    setSnapshotPatch(conversationId, { loading: true, error: undefined })
+    if (!hasAuthoritativeSnapshot(conversationId)) {
+      setSnapshotPatch(conversationId, { loading: true, error: undefined })
+    }
 
     const snapshot = conversationSnapshotsRef.current[conversationId]
     let candidateTaskId = normalizeText(snapshot?.activeTaskId)
@@ -526,6 +573,7 @@ export default function useChatLogic () : UseChatLogicResult {
       }
       catch (error) {
         if (token !== bootstrapTokenRef.current || destroyedRef.current) return
+        if (hasAuthoritativeSnapshot(conversationId)) return
         setSnapshotPatch(conversationId, {
           loading: false,
           taskStatus: 'ERROR',
@@ -537,6 +585,7 @@ export default function useChatLogic () : UseChatLogicResult {
 
     if (!candidateTaskId) {
       if (token !== bootstrapTokenRef.current || destroyedRef.current) return
+      if (hasAuthoritativeSnapshot(conversationId)) return
       setSnapshotPatch(conversationId, {
         activeTaskId: undefined,
         taskStatus: 'IDLE',
@@ -545,6 +594,10 @@ export default function useChatLogic () : UseChatLogicResult {
         loading: false,
         error: undefined
       })
+      return
+    }
+
+    if (shouldIgnoreFetchedTask(conversationId, candidateTaskId)) {
       return
     }
 
@@ -558,6 +611,7 @@ export default function useChatLogic () : UseChatLogicResult {
     }
     catch (error) {
       if (token !== bootstrapTokenRef.current || destroyedRef.current) return
+      if (hasAuthoritativeSnapshot(conversationId)) return
       setSnapshotPatch(conversationId, {
         loading: false,
         taskStatus: 'ERROR',
@@ -572,7 +626,7 @@ export default function useChatLogic () : UseChatLogicResult {
     if (currentMessages.length === 0) {
       return
     }
-  }, [modelUrl, setSnapshotPatch, startPollingForTask, syncTaskState])
+  }, [hasAuthoritativeSnapshot, modelUrl, setSnapshotPatch, shouldIgnoreFetchedTask, startPollingForTask, syncTaskState])
 
   const handleDeleteChat = useCallback((chatId : number) => {
     deleteConversationIdForChat(chatId)
@@ -779,6 +833,15 @@ export default function useChatLogic () : UseChatLogicResult {
         const snapshot = buildSnapshotFromTask(taskConversationId, taskState, false)
         applySnapshot(snapshot)
 
+        if (
+          snapshot.taskStatus === 'PENDING_CONFIRM'
+          && snapshot.subQuestions.length === 0
+          && snapshot.activeTaskId
+        ) {
+          void syncTaskState(taskConversationId, snapshot.activeTaskId, false)
+            .catch(() => undefined)
+        }
+
         if (snapshot.taskStatus === 'DONE' && snapshot.finalResult) {
           appendAssistantMessage(chatId, snapshot.finalResult, snapshot.conversationId, snapshot.activeTaskId)
         }
@@ -803,6 +866,7 @@ export default function useChatLogic () : UseChatLogicResult {
     modelUrl,
     setConversationIdForChat,
     setSnapshotPatch,
+    syncTaskState,
     startPollingForTask,
     tryConfirmCurrentTask
   ])
