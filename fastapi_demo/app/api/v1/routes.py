@@ -782,10 +782,38 @@ async def run_agent_async(agent, graph_input: Any, config: Optional[Dict[str, An
         and "langgraph.checkpoint.sqlite" in checkpointer_module
         and ".aio" not in checkpointer_module
     ):
-        return await asyncio.to_thread(agent.invoke, graph_input, config=config)
+        logger.info(
+            "AGENT_INVOKE_START mode=sync_sqlite graph_input_type=%s checkpointer=%s module=%s",
+            type(graph_input).__name__,
+            checkpointer_type,
+            checkpointer_module,
+        )
+        started_at = time.perf_counter()
+        result = await asyncio.to_thread(agent.invoke, graph_input, config=config)
+        elapsed_ms = int((time.perf_counter() - started_at) * 1000)
+        logger.info(
+            "AGENT_INVOKE_DONE mode=sync_sqlite elapsed_ms=%d checkpointer=%s",
+            elapsed_ms,
+            checkpointer_type,
+        )
+        return result
 
     try:
-        return await agent.ainvoke(graph_input, config=config)
+        logger.info(
+            "AGENT_INVOKE_START mode=async graph_input_type=%s checkpointer=%s module=%s",
+            type(graph_input).__name__,
+            checkpointer_type,
+            checkpointer_module,
+        )
+        started_at = time.perf_counter()
+        result = await agent.ainvoke(graph_input, config=config)
+        elapsed_ms = int((time.perf_counter() - started_at) * 1000)
+        logger.info(
+            "AGENT_INVOKE_DONE mode=async elapsed_ms=%d checkpointer=%s",
+            elapsed_ms,
+            checkpointer_type,
+        )
+        return result
     except (TypeError, NotImplementedError) as exc:
         # Fallback for mixed-version environments with partial async support.
         error_text = str(exc)
@@ -798,8 +826,28 @@ async def run_agent_async(agent, graph_input: Any, config: Optional[Dict[str, An
             "Agent async invocation is unavailable for current checkpointer; "
             "falling back to sync invoke in thread pool.",
         )
-        return await asyncio.to_thread(agent.invoke, graph_input, config=config)
+        logger.info(
+            "AGENT_INVOKE_START mode=sync_fallback graph_input_type=%s checkpointer=%s module=%s",
+            type(graph_input).__name__,
+            checkpointer_type,
+            checkpointer_module,
+        )
+        started_at = time.perf_counter()
+        result = await asyncio.to_thread(agent.invoke, graph_input, config=config)
+        elapsed_ms = int((time.perf_counter() - started_at) * 1000)
+        logger.info(
+            "AGENT_INVOKE_DONE mode=sync_fallback elapsed_ms=%d checkpointer=%s",
+            elapsed_ms,
+            checkpointer_type,
+        )
+        return result
     except Exception as exc:
+        logger.exception(
+            "AGENT_INVOKE_FAILED mode=unknown checkpointer=%s module=%s error=%s",
+            checkpointer_type,
+            checkpointer_module,
+            exc,
+        )
         logger.exception("Error running agent: %s", exc)
         raise
 

@@ -1,5 +1,6 @@
 from typing import List
 import logging
+import time
 
 import openai
 
@@ -70,12 +71,25 @@ def embed_texts(texts: List[str]) -> List[List[float]]:
         len(clean_texts),
     )
     client = _get_openai_client()
+    started_at = time.perf_counter()
+    logger.info(
+        "LLM_INVOKE_START scene=embedding model=%s request_hint=texts=%d provider=%s",
+        model_name,
+        len(clean_texts),
+        provider,
+    )
     try:
         response = client.embeddings.create(
             model=model_name,
             input=clean_texts,
         )
     except Exception:
+        logger.exception(
+            "LLM_INVOKE_FAILED scene=embedding model=%s provider=%s texts=%d",
+            model_name,
+            provider,
+            len(clean_texts),
+        )
         logger.exception(
             "embedding request failed: provider=%s model=%s texts=%d",
             provider,
@@ -86,6 +100,13 @@ def embed_texts(texts: List[str]) -> List[List[float]]:
 
     vectors = [item.embedding for item in response.data]
     vector_dim = len(vectors[0]) if vectors and vectors[0] else 0
+    elapsed_ms = int((time.perf_counter() - started_at) * 1000)
+    logger.info(
+        "LLM_INVOKE_DONE scene=embedding model=%s elapsed_ms=%d vectors=%d",
+        model_name,
+        elapsed_ms,
+        len(vectors),
+    )
     logger.info(
         "embedding request success: vectors=%d dimension=%d",
         len(vectors),

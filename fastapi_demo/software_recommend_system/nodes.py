@@ -17,6 +17,28 @@ from .tools import unified_search, pre_drawing_tool, draw_image_tool
 
 logger = logging.getLogger(__name__)
 
+
+def _llm_invoke_start(scene: str, model: str, request_hint: str = "") -> float:
+    logger.info(
+        "LLM_INVOKE_START scene=%s model=%s request_hint=%s",
+        scene,
+        model,
+        request_hint,
+    )
+    return time.perf_counter()
+
+
+def _llm_invoke_done(scene: str, model: str, started_at: float, response_obj: Any) -> None:
+    elapsed_ms = int((time.perf_counter() - started_at) * 1000)
+    choices = _get_field(response_obj, "choices", []) or []
+    logger.info(
+        "LLM_INVOKE_DONE scene=%s model=%s elapsed_ms=%d choices=%d",
+        scene,
+        model,
+        elapsed_ms,
+        len(choices),
+    )
+
 def _get_field(obj: Any, field: str, default: Any = None) -> Any:
     if isinstance(obj, dict):
         return obj.get(field, default)
@@ -542,14 +564,24 @@ def routing_node(state: AgentState) -> Dict[str, Any]:
 @task
 def normalize_query_with_llm(model: str, prompt: str, query: str):
     client = _get_openai_client()
-    response = client.chat.completions.create(
+    started_at = _llm_invoke_start(
+        scene="normalize_query",
         model=model,
-        messages=[
-            {"role": "system", "content": prompt},
-            {"role": "user", "content": query},
-        ],
-        temperature=0.2,
+        request_hint=f"query_len={len(query or '')}",
     )
+    try:
+        response = client.chat.completions.create(
+            model=model,
+            messages=[
+                {"role": "system", "content": prompt},
+                {"role": "user", "content": query},
+            ],
+            temperature=0.2,
+        )
+    except Exception:
+        logger.exception("LLM_INVOKE_FAILED scene=normalize_query model=%s", model)
+        raise
+    _llm_invoke_done("normalize_query", model, started_at, response)
     return response
     
 def query_normalization_node(state: AgentState) -> Dict[str, Any]:
@@ -661,14 +693,24 @@ def query_normalization_node(state: AgentState) -> Dict[str, Any]:
 @task
 def sub_question_generation_with_llm(model: str, prompt: str, query: str):
     client = _get_openai_client()
-    response = client.chat.completions.create(
+    started_at = _llm_invoke_start(
+        scene="sub_question_generation",
         model=model,
-        messages=[
-            {"role": "system", "content": prompt},
-            {"role": "user", "content": query},
-        ],
-        temperature=0.3,
+        request_hint=f"query_len={len(query or '')}",
     )
+    try:
+        response = client.chat.completions.create(
+            model=model,
+            messages=[
+                {"role": "system", "content": prompt},
+                {"role": "user", "content": query},
+            ],
+            temperature=0.3,
+        )
+    except Exception:
+        logger.exception("LLM_INVOKE_FAILED scene=sub_question_generation model=%s", model)
+        raise
+    _llm_invoke_done("sub_question_generation", model, started_at, response)
     return response
 def sub_question_generation_node(state: AgentState) -> Dict[str, Any]:
     """Sub-question generation node."""
@@ -984,6 +1026,11 @@ def candidate_generation_node(state: AgentState) -> Dict[str, Any]:
     llm_candidates = []
     try:
         client = _get_openai_client()
+        started_at = _llm_invoke_start(
+            scene="candidate_generation",
+            model=settings.LLM_MODEL,
+            request_hint=f"evidence_items={len(evidence_payload)}",
+        )
         response = client.chat.completions.create(
             model=settings.LLM_MODEL,
             messages=[
@@ -999,6 +1046,7 @@ def candidate_generation_node(state: AgentState) -> Dict[str, Any]:
             ],
             temperature=0.4
         )
+        _llm_invoke_done("candidate_generation", settings.LLM_MODEL, started_at, response)
 
         content = ""
         if hasattr(response, "choices") and response.choices:
@@ -1041,6 +1089,10 @@ def candidate_generation_node(state: AgentState) -> Dict[str, Any]:
                 "relevance_score": score
             })
     except Exception as e:
+        logger.exception(
+            "LLM_INVOKE_FAILED scene=candidate_generation model=%s",
+            settings.LLM_MODEL,
+        )
         logger.error(f"调用 LLM 生成候选方案失败: {str(e)}")
 
     if llm_candidates:
@@ -1183,9 +1235,9 @@ def chat_answer_generation_node(state: AgentState) -> Dict[str, Any]:
     if retrieved_context:
         system_prompt = "\n".join(
             [
-                "You are a helpful software engineering assistant.",
-                "Use the retrieved context when it is relevant to the user question.",
-                "If retrieved context is insufficient, answer with best effort and be explicit about uncertainty.",
+                "Use the retrieved context as the primary source of truth.",
+"If the answer can be reasonably inferred from the retrieved context, answer based on it.",
+"Only say 'I don't know' if the retrieved context is clearly irrelevant.",
                 "",
                 "[Retrieved Context]",
                 retrieved_context,
@@ -1195,11 +1247,17 @@ def chat_answer_generation_node(state: AgentState) -> Dict[str, Any]:
 
     try:
         client = _get_openai_client()
+        started_at = _llm_invoke_start(
+            scene="chat_answer_generation",
+            model=settings.LLM_MODEL,
+            request_hint=f"messages={len(llm_messages)}",
+        )
         response = client.chat.completions.create(
             model=settings.LLM_MODEL,
             messages=llm_messages,
             temperature=0.7,
         )
+        _llm_invoke_done("chat_answer_generation", settings.LLM_MODEL, started_at, response)
 
         final_answer = ""
         if hasattr(response, "choices") and response.choices:
@@ -1214,6 +1272,10 @@ def chat_answer_generation_node(state: AgentState) -> Dict[str, Any]:
         if not final_answer:
             final_answer = "抱歉，暂时无法获取LLM回复，请稍后再试。"
     except Exception as e:
+        logger.exception(
+            "LLM_INVOKE_FAILED scene=chat_answer_generation model=%s",
+            settings.LLM_MODEL,
+        )
         logger.error(f"调用 LLM 失败: {str(e)}")
         final_answer = "抱歉，暂时无法获取LLM回复，请稍后再试。"
 

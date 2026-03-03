@@ -7,9 +7,23 @@ import openai
 import logging
 import json
 import os
+import time
 
 logger = logging.getLogger(__name__)
 TAVILY_MAX_RESULTS = 3
+
+
+def _search_tool_impl_name() -> str:
+    if not search_tool:
+        return "none"
+    return f"{search_tool.__class__.__module__}.{search_tool.__class__.__name__}"
+
+
+def _query_preview(query: str, max_len: int = 120) -> str:
+    cleaned = " ".join((query or "").split())
+    if len(cleaned) <= max_len:
+        return cleaned
+    return f"{cleaned[:max_len]}..."
 
 def _get_openai_client() -> openai.OpenAI:
     api_key = settings.DASHSCOPE_API_KEY or settings.OPENAI_API_KEY
@@ -74,7 +88,7 @@ def similarity_search(query: str, k: int = 5) -> List[Document]:
         logger.warning("向量库搜索失败，降级为空结果: %s", e)
         return []
 
-# Tavily搜索工具（优先新实现，兼容旧实现）
+# Tavily搜索工具（仅使用 langchain_tavily 封装）
 try:
     from langchain_tavily import TavilySearch  # type: ignore
     _TAVILY_NEW_IMPORT_ERROR = None
@@ -82,59 +96,84 @@ except Exception as exc:  # pragma: no cover - optional dependency
     TavilySearch = None  # type: ignore
     _TAVILY_NEW_IMPORT_ERROR = exc
 
-try:
-    from langchain_community.tools.tavily_search import TavilySearchResults  # type: ignore
-    _TAVILY_LEGACY_IMPORT_ERROR = None
-except Exception as exc:  # pragma: no cover - optional dependency
-    TavilySearchResults = None  # type: ignore
-    _TAVILY_LEGACY_IMPORT_ERROR = exc
-
 tavily_api_key = os.getenv("TAVILY_API_KEY")
 search_tool = None
-if tavily_api_key:
-    if TavilySearch is not None:
-        search_tool = TavilySearch(max_results=TAVILY_MAX_RESULTS)
-        logger.info("Using Tavily search implementation: langchain_tavily.TavilySearch")
-    elif TavilySearchResults is not None:
-        search_tool = TavilySearchResults(max_results=TAVILY_MAX_RESULTS)
-        search_tool.name = "search_tool"
-        search_tool.description = "一个用于搜索最新信息的工具，当需要获取实时信息或补充知识时使用"
+if not tavily_api_key:
+    logger.warning("[tools.init_tavily_search] status=api_key_missing message=TAVILY_API_KEY 未设置，跳过 Tavily 搜索工具。")
+else:
+    if TavilySearch is None:
         logger.warning(
-            "Using deprecated TavilySearchResults. Install langchain-tavily and prefer "
-            "langchain_tavily.TavilySearch."
+            "[tools.init_tavily_search] status=dependency_unavailable "
+            "message=Tavily search dependencies unavailable; install with: pip install -U langchain-tavily. "
+            "new_import_error=%s",
+            _TAVILY_NEW_IMPORT_ERROR,
         )
     else:
-        logger.warning(
-            "Tavily search dependencies unavailable; install with: pip install -U langchain-tavily "
-            "(fallback legacy package: langchain-community). new_import_error=%s legacy_import_error=%s",
-            _TAVILY_NEW_IMPORT_ERROR,
-            _TAVILY_LEGACY_IMPORT_ERROR,
+        search_tool = TavilySearch(max_results=TAVILY_MAX_RESULTS,include_answer=False,include_raw_content=False)
+        logger.info(
+            "[tools.init_tavily_search] selected_impl=%s max_results=%s",
+            _search_tool_impl_name(),
+            TAVILY_MAX_RESULTS,
         )
-else:
-    logger.warning("TAVILY_API_KEY 未设置，跳过 Tavily 搜索工具。")
 
 def _tavily_search(query: str) -> List[Document]:
     if not search_tool:
+        logger.info(
+            "[tools._tavily_search] skipped reason=search_tool_not_initialized query=%r",
+            _query_preview(query),
+        )
         return []
+    dispatch_method = "unknown"
+    logger.info(
+        "[tools._tavily_search] start query=%r impl=%s has_invoke=%s has_run=%s ",
+        _query_preview(query),
+        _search_tool_impl_name(),
+        hasattr(search_tool, "invoke"),
+        hasattr(search_tool, "run"),
+        
+    )
     try:
         if hasattr(search_tool, "invoke"):
+            dispatch_method = "invoke"
             raw_results = search_tool.invoke({"query": query})
         elif hasattr(search_tool, "run"):
+            dispatch_method = "run"
             raw_results = search_tool.run(query)
         else:
+            dispatch_method = "__call__"
             raw_results = search_tool(query)
     except Exception as exc:
-        logger.warning("Tavily 搜索失败，降级为空结果: %s", exc)
+        logger.warning(
+            "[tools._tavily_search] failed dispatch=%s impl=%s query=%r error=%s",
+            dispatch_method,
+            _search_tool_impl_name(),
+            _query_preview(query),
+            exc,
+        )
         return []
 
     if not raw_results:
+        logger.info(
+            "[tools._tavily_search] empty_result dispatch=%s impl=%s query=%r",
+            dispatch_method,
+            _search_tool_impl_name(),
+            _query_preview(query),
+        )
         return []
     if isinstance(raw_results, dict):
         raw_results = raw_results.get("results") or raw_results.get("data") or [raw_results]
     if not isinstance(raw_results, list):
         raw_results = [raw_results]
+    logger.info(
+        "[tools._tavily_search] raw_normalized dispatch=%s impl=%s raw_count=%s query=%r",
+        dispatch_method,
+        _search_tool_impl_name(),
+        len(raw_results),
+        _query_preview(query),
+    )
 
     documents = []
+    top_urls = []
     for item in raw_results[:TAVILY_MAX_RESULTS]:
         if isinstance(item, dict):
             title = item.get("title") or ""
@@ -162,6 +201,16 @@ def _tavily_search(query: str) -> List[Document]:
             score=float(doc_score) if doc_score is not None else 0.0
         )
         documents.append(doc)
+        if doc_url:
+            top_urls.append(str(doc_url))
+
+    logger.info(
+        "[tools._tavily_search] done dispatch=%s impl=%s returned_docs=%s top_urls=%s",
+        dispatch_method,
+        _search_tool_impl_name(),
+        len(documents),
+        top_urls[:3],
+    )
 
     return documents
 
@@ -227,10 +276,22 @@ def draw_image(structured_params: str) -> str:
         logger.info(f"生成 {params['chart_type']} 类型的图表")
 
         client = _get_openai_client()
+        started_at = time.perf_counter()
+        logger.info(
+            "LLM_INVOKE_START scene=image_generation model=%s request_hint=chart_type=%s",
+            settings.IMAGE_MODEL,
+            params["chart_type"],
+        )
         response = client.images.generate(
             model=settings.IMAGE_MODEL,
             prompt=prompt,
             size=settings.IMAGE_SIZE
+        )
+        elapsed_ms = int((time.perf_counter() - started_at) * 1000)
+        logger.info(
+            "LLM_INVOKE_DONE scene=image_generation model=%s elapsed_ms=%d",
+            settings.IMAGE_MODEL,
+            elapsed_ms,
         )
 
         if hasattr(response, "data") and response.data:
@@ -252,6 +313,10 @@ def draw_image(structured_params: str) -> str:
         logger.error(f"解析结构化参数失败: {str(e)}")
         raise ValueError(f"输入不是有效的JSON格式: {structured_params}")
     except Exception as e:
+        logger.exception(
+            "LLM_INVOKE_FAILED scene=image_generation model=%s",
+            settings.IMAGE_MODEL,
+        )
         logger.error(f"绘制图像失败: {str(e)}")
         raise e
 
@@ -269,9 +334,34 @@ def unified_search(query: str, k: int | None = None) -> List[Document]:
     统一搜索入口：向量库检索 + 可用时的 Tavily 实时检索
     """
     vector_k = k if k is not None else settings.TOP_K
+    logger.info(
+        "[tools.unified_search] start query=%r vector_k=%s tavily_enabled=%s tavily_impl=%s",
+        _query_preview(query),
+        vector_k,
+        bool(search_tool),
+        _search_tool_impl_name(),
+    )
     documents = similarity_search(query, k=vector_k)
+    logger.info(
+        "[tools.unified_search] after_similarity vector_docs=%s query=%r",
+        len(documents),
+        _query_preview(query),
+    )
     if search_tool:
-        documents.extend(_tavily_search(query))
+        tavily_docs = _tavily_search(query)
+        documents.extend(tavily_docs)
+        logger.info(
+            "[tools.unified_search] after_tavily tavily_docs=%s total_docs=%s query=%r tavily_docs=%s",
+            len(tavily_docs),
+            len(documents),
+            _query_preview(query),
+            tavily_docs,
+        )
+    else:
+        logger.info(
+            "[tools.unified_search] skipped_tavily reason=search_tool_not_initialized query=%r",
+            _query_preview(query),
+        )
     return documents
 
 # 定义工具列表
@@ -289,4 +379,3 @@ def get_all_tools():
         tools.append(search_tool)
     
     return tools
-
