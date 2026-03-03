@@ -6,9 +6,13 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from starlette.status import HTTP_422_UNPROCESSABLE_ENTITY
 
-from app.api.v1.routes import router as v1_router
 from app.core.config import settings
-from app.core.startup import startup_event_handler
+from app.core.startup import configure_runtime_file_logging, startup_event_handler
+
+# Configure file handlers before importing routes so module-import-time Tavily logs are persisted.
+configure_runtime_file_logging()
+
+from app.api.v1.routes import router as v1_router
 
 app = FastAPI(
     title="Software Recommendation System API",

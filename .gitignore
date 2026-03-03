@@ -47,6 +47,9 @@ htmlcov/
 
 # Local vector DB / runtime data
 **/chroma_db/
+**/.runtime/
+steps/step1.md
+steps/step2.md
 
 # ========================
 # Java / Spring Boot
