@@ -50,6 +50,7 @@ htmlcov/
 **/.runtime/
 steps/step1.md
 steps/step2.md
+fastapi_demo/software_recommend_system/Rules.txt
 
 # ========================
 # Java / Spring Boot
