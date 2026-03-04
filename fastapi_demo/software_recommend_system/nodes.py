@@ -14,30 +14,62 @@ from langgraph.types import interrupt
 
 # 导入新的工具系统
 from .tools import unified_search, pre_drawing_tool, draw_image_tool
+from .logging_utils import elapsed_ms, error_fields, log_event, log_exception, new_trace_id, text_preview
 
 logger = logging.getLogger(__name__)
 
 
-def _llm_invoke_start(scene: str, model: str, request_hint: str = "") -> float:
-    logger.info(
-        "LLM_INVOKE_START scene=%s model=%s request_hint=%s",
-        scene,
-        model,
-        request_hint,
+def _llm_invoke_start(scene: str, model: str, request_hint: str = "") -> tuple[str, float]:
+    trace_id = new_trace_id("llm")
+    log_event(
+        logger,
+        logging.INFO,
+        "llm.invoke.start",
+        component="llm",
+        trace_id=trace_id,
+        scene=scene,
+        model=model,
+        request_hint=request_hint,
     )
-    return time.perf_counter()
+    return trace_id, time.perf_counter()
 
 
-def _llm_invoke_done(scene: str, model: str, started_at: float, response_obj: Any) -> None:
-    elapsed_ms = int((time.perf_counter() - started_at) * 1000)
+def _llm_invoke_done(scene: str, model: str, trace_id: str, started_at: float, response_obj: Any) -> None:
     choices = _get_field(response_obj, "choices", []) or []
-    logger.info(
-        "LLM_INVOKE_DONE scene=%s model=%s elapsed_ms=%d choices=%d",
-        scene,
-        model,
-        elapsed_ms,
-        len(choices),
+    log_event(
+        logger,
+        logging.INFO,
+        "llm.invoke.done",
+        component="llm",
+        trace_id=trace_id,
+        scene=scene,
+        model=model,
+        elapsed_ms=elapsed_ms(started_at),
+        choices=len(choices),
     )
+
+
+def _llm_invoke_failed(
+    scene: str,
+    model: str,
+    trace_id: str,
+    exc: Exception,
+    started_at: float | None = None,
+    with_stack: bool = True,
+) -> None:
+    fields: Dict[str, Any] = {
+        "component": "llm",
+        "trace_id": trace_id,
+        "scene": scene,
+        "model": model,
+    }
+    if started_at is not None:
+        fields["elapsed_ms"] = elapsed_ms(started_at)
+    fields.update(error_fields(exc))
+    if with_stack:
+        log_exception(logger, "llm.invoke.fail", **fields)
+    else:
+        log_event(logger, logging.ERROR, "llm.invoke.fail", **fields)
 
 def _get_field(obj: Any, field: str, default: Any = None) -> Any:
     if isinstance(obj, dict):
@@ -564,7 +596,7 @@ def routing_node(state: AgentState) -> Dict[str, Any]:
 @task
 def normalize_query_with_llm(model: str, prompt: str, query: str):
     client = _get_openai_client()
-    started_at = _llm_invoke_start(
+    trace_id, started_at = _llm_invoke_start(
         scene="normalize_query",
         model=model,
         request_hint=f"query_len={len(query or '')}",
@@ -578,10 +610,17 @@ def normalize_query_with_llm(model: str, prompt: str, query: str):
             ],
             temperature=0.2,
         )
-    except Exception:
-        logger.exception("LLM_INVOKE_FAILED scene=normalize_query model=%s", model)
+    except Exception as exc:
+        _llm_invoke_failed(
+            scene="normalize_query",
+            model=model,
+            trace_id=trace_id,
+            exc=exc,
+            started_at=started_at,
+            with_stack=True,
+        )
         raise
-    _llm_invoke_done("normalize_query", model, started_at, response)
+    _llm_invoke_done("normalize_query", model, trace_id, started_at, response)
     return response
     
 def query_normalization_node(state: AgentState) -> Dict[str, Any]:
@@ -652,8 +691,17 @@ def query_normalization_node(state: AgentState) -> Dict[str, Any]:
             raise ValueError("LLM返回格式不是列表")
 
         normalized_queries = [str(item).strip() for item in normalized_queries if str(item).strip()]
-    except Exception as e:
-        logger.error(f"调用 LLM 规范化查询失败: {str(e)}")
+    except Exception as exc:
+        log_event(
+            logger,
+            logging.ERROR,
+            "llm.output.parse.fail",
+            component="llm",
+            scene="normalize_query",
+            model=settings.LLM_MODEL,
+            query=text_preview(user_query),
+            **error_fields(exc),
+        )
 
     normalized_query = "\n".join(normalized_queries) if normalized_queries else user_query.strip()
 
@@ -693,7 +741,7 @@ def query_normalization_node(state: AgentState) -> Dict[str, Any]:
 @task
 def sub_question_generation_with_llm(model: str, prompt: str, query: str):
     client = _get_openai_client()
-    started_at = _llm_invoke_start(
+    trace_id, started_at = _llm_invoke_start(
         scene="sub_question_generation",
         model=model,
         request_hint=f"query_len={len(query or '')}",
@@ -707,10 +755,17 @@ def sub_question_generation_with_llm(model: str, prompt: str, query: str):
             ],
             temperature=0.3,
         )
-    except Exception:
-        logger.exception("LLM_INVOKE_FAILED scene=sub_question_generation model=%s", model)
+    except Exception as exc:
+        _llm_invoke_failed(
+            scene="sub_question_generation",
+            model=model,
+            trace_id=trace_id,
+            exc=exc,
+            started_at=started_at,
+            with_stack=True,
+        )
         raise
-    _llm_invoke_done("sub_question_generation", model, started_at, response)
+    _llm_invoke_done("sub_question_generation", model, trace_id, started_at, response)
     return response
 def sub_question_generation_node(state: AgentState) -> Dict[str, Any]:
     """Sub-question generation node."""
@@ -753,8 +808,17 @@ def sub_question_generation_node(state: AgentState) -> Dict[str, Any]:
         sub_questions = _normalize_sub_questions(parsed)
         if not sub_questions:
             raise ValueError("LLM response format is not a sub-question list")
-    except Exception as e:
-        logger.error(f"Failed to generate sub-questions with LLM: {str(e)}")
+    except Exception as exc:
+        log_event(
+            logger,
+            logging.ERROR,
+            "llm.output.parse.fail",
+            component="llm",
+            scene="sub_question_generation",
+            model=settings.LLM_MODEL,
+            query=text_preview(normalized_query),
+            **error_fields(exc),
+        )
 
     if not sub_questions:
         sub_questions = [normalized_query]
@@ -918,21 +982,52 @@ def retrieve_node(state: AgentState) -> Dict[str, Any]:
     sub_questions = _get_field(state, "sub_questions", [])
     evidence = _get_field(state, "evidence", [])
     iteration_count = _get_field(state, "iteration_count", 0)
+    trace_id = new_trace_id("search")
 
-    logger.warning(
-        "RETRIEVE_ENTER iteration=%d subq_count=%d",
-        iteration_count,
-        len(sub_questions),
-    )
-    logger.info(
-        "retrieve evidence iteration=%d sub_questions=%d",
-        iteration_count,
-        len(sub_questions),
+    log_event(
+        logger,
+        logging.INFO,
+        "search.retrieve.start",
+        component="search",
+        trace_id=trace_id,
+        scene="retrieve_node",
+        iteration=iteration_count,
+        sub_question_count=len(sub_questions),
     )
 
-    for question in sub_questions:
+    for index, question in enumerate(sub_questions, start=1):
+        question_started_at = time.perf_counter()
+        question_hint = text_preview(question)
+        log_event(
+            logger,
+            logging.INFO,
+            "search.retrieve.question.start",
+            component="search",
+            trace_id=trace_id,
+            scene="retrieve_node",
+            iteration=iteration_count,
+            question_index=index,
+            question_count=len(sub_questions),
+            query=question_hint,
+            top_k=settings.TOP_K,
+        )
         search_results = unified_search(question, k=settings.TOP_K)
         quality_score = min(0.9, 0.5 + (len(search_results) * 0.1))
+        log_event(
+            logger,
+            logging.INFO,
+            "search.retrieve.question.done",
+            component="search",
+            trace_id=trace_id,
+            scene="retrieve_node",
+            iteration=iteration_count,
+            question_index=index,
+            question_count=len(sub_questions),
+            query=question_hint,
+            docs=len(search_results),
+            quality_score=round(quality_score, 4),
+            elapsed_ms=elapsed_ms(question_started_at),
+        )
 
         evidence_item = {
             "question": question,
@@ -945,10 +1040,15 @@ def retrieve_node(state: AgentState) -> Dict[str, Any]:
         }
         evidence.append(evidence_item)
 
-    logger.warning(
-        "RETRIEVE_DONE iteration=%d total_evidence=%d",
-        iteration_count,
-        len(evidence),
+    log_event(
+        logger,
+        logging.INFO,
+        "search.retrieve.done",
+        component="search",
+        trace_id=trace_id,
+        scene="retrieve_node",
+        iteration=iteration_count,
+        total_evidence=len(evidence),
     )
     return {"evidence": evidence}
 
@@ -1026,7 +1126,7 @@ def candidate_generation_node(state: AgentState) -> Dict[str, Any]:
     llm_candidates = []
     try:
         client = _get_openai_client()
-        started_at = _llm_invoke_start(
+        trace_id, started_at = _llm_invoke_start(
             scene="candidate_generation",
             model=settings.LLM_MODEL,
             request_hint=f"evidence_items={len(evidence_payload)}",
@@ -1046,7 +1146,7 @@ def candidate_generation_node(state: AgentState) -> Dict[str, Any]:
             ],
             temperature=0.4
         )
-        _llm_invoke_done("candidate_generation", settings.LLM_MODEL, started_at, response)
+        _llm_invoke_done("candidate_generation", settings.LLM_MODEL, trace_id, started_at, response)
 
         content = ""
         if hasattr(response, "choices") and response.choices:
@@ -1088,12 +1188,15 @@ def candidate_generation_node(state: AgentState) -> Dict[str, Any]:
                 "cons": cons,
                 "relevance_score": score
             })
-    except Exception as e:
-        logger.exception(
-            "LLM_INVOKE_FAILED scene=candidate_generation model=%s",
-            settings.LLM_MODEL,
+    except Exception as exc:
+        _llm_invoke_failed(
+            scene="candidate_generation",
+            model=settings.LLM_MODEL,
+            trace_id=trace_id if "trace_id" in locals() else new_trace_id("llm"),
+            exc=exc,
+            started_at=started_at if "started_at" in locals() else None,
+            with_stack=True,
         )
-        logger.error(f"调用 LLM 生成候选方案失败: {str(e)}")
 
     if llm_candidates:
         candidates.extend(llm_candidates)
@@ -1194,20 +1297,51 @@ def chat_answer_generation_node(state: AgentState) -> Dict[str, Any]:
     """Answer generation node (chat mode with retrieval context)."""
     user_query = _get_field(state, "user_query", "")
     retrieval_query = _extract_current_user_query(user_query) or user_query
-    logger.info("chat mode answer with retrieval: %s", retrieval_query)
+    retrieval_trace_id = new_trace_id("search")
+    log_event(
+        logger,
+        logging.INFO,
+        "search.chat_retrieval.start",
+        component="search",
+        trace_id=retrieval_trace_id,
+        scene="chat_answer_generation",
+        query=text_preview(retrieval_query),
+        top_k=settings.TOP_K,
+    )
 
     messages = list(_get_field(state, "messages", []) or [])
     if not messages:
         messages = [{"role": "user", "content": user_query}]
 
     retrieved_docs: List[Document] = []
+    retrieval_started_at = time.perf_counter()
     try:
         retrieved_docs = unified_search(retrieval_query, k=settings.TOP_K)
     except Exception as exc:
-        logger.warning("chat retrieval failed, continue without context: %s", exc)
+        log_event(
+            logger,
+            logging.WARNING,
+            "search.chat_retrieval.fail",
+            component="search",
+            trace_id=retrieval_trace_id,
+            scene="chat_answer_generation",
+            query=text_preview(retrieval_query),
+            elapsed_ms=elapsed_ms(retrieval_started_at),
+            **error_fields(exc),
+        )
         retrieved_docs = []
 
-    logger.info("chat retrieval done: docs=%d", len(retrieved_docs))
+    log_event(
+        logger,
+        logging.INFO,
+        "search.chat_retrieval.done",
+        component="search",
+        trace_id=retrieval_trace_id,
+        scene="chat_answer_generation",
+        query=text_preview(retrieval_query),
+        docs=len(retrieved_docs),
+        elapsed_ms=elapsed_ms(retrieval_started_at),
+    )
 
     def _format_retrieved_context(docs: List[Document]) -> str:
         lines: List[str] = []
@@ -1247,7 +1381,7 @@ def chat_answer_generation_node(state: AgentState) -> Dict[str, Any]:
 
     try:
         client = _get_openai_client()
-        started_at = _llm_invoke_start(
+        trace_id, started_at = _llm_invoke_start(
             scene="chat_answer_generation",
             model=settings.LLM_MODEL,
             request_hint=f"messages={len(llm_messages)}",
@@ -1257,7 +1391,7 @@ def chat_answer_generation_node(state: AgentState) -> Dict[str, Any]:
             messages=llm_messages,
             temperature=0.7,
         )
-        _llm_invoke_done("chat_answer_generation", settings.LLM_MODEL, started_at, response)
+        _llm_invoke_done("chat_answer_generation", settings.LLM_MODEL, trace_id, started_at, response)
 
         final_answer = ""
         if hasattr(response, "choices") and response.choices:
@@ -1271,12 +1405,15 @@ def chat_answer_generation_node(state: AgentState) -> Dict[str, Any]:
 
         if not final_answer:
             final_answer = "抱歉，暂时无法获取LLM回复，请稍后再试。"
-    except Exception as e:
-        logger.exception(
-            "LLM_INVOKE_FAILED scene=chat_answer_generation model=%s",
-            settings.LLM_MODEL,
+    except Exception as exc:
+        _llm_invoke_failed(
+            scene="chat_answer_generation",
+            model=settings.LLM_MODEL,
+            trace_id=trace_id if "trace_id" in locals() else new_trace_id("llm"),
+            exc=exc,
+            started_at=started_at if "started_at" in locals() else None,
+            with_stack=True,
         )
-        logger.error(f"调用 LLM 失败: {str(e)}")
         final_answer = "抱歉，暂时无法获取LLM回复，请稍后再试。"
 
     messages.append({"role": "assistant", "content": final_answer})
@@ -1298,5 +1435,3 @@ def draw_image_node(state: AgentState) -> Dict[str, Any]:
     image_url = draw_image_tool(structured_params)
     final_answer = f"图像已生成: {image_url}"
     return {"image_result": image_url, "final_answer": final_answer}
-
-

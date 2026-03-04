@@ -27,7 +27,12 @@ class _TavilyLogFilter(logging.Filter):
 class _LlmInvokeLogFilter(logging.Filter):
     def filter(self, record: logging.LogRecord) -> bool:
         message = record.getMessage()
-        return "LLM_INVOKE_" in message or "AGENT_INVOKE_" in message
+        return (
+            "LLM_INVOKE_" in message
+            or "AGENT_INVOKE_" in message
+            or '"component":"llm"' in message
+            or '"event":"llm.' in message
+        )
 
 
 def _has_rotating_file_handler(root_logger: logging.Logger, resolved_log_path: Path) -> bool:
