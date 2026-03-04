@@ -13,10 +13,17 @@ class Settings:
     BASE_URL = os.getenv("BASE_URL", "")
     OPENAI_BASE_URL = os.getenv("OPENAI_BASE_URL", BASE_URL)
     EMBEDDING_PROVIDER = os.getenv("EMBEDDING_PROVIDER", "dashscope")
+    EMBEDDING_ENABLE_FALLBACK = os.getenv("EMBEDDING_ENABLE_FALLBACK", "true").lower() == "true"
+    EMBEDDING_FALLBACK_PROVIDER = os.getenv("EMBEDDING_FALLBACK_PROVIDER", "dashscope")
+    EMBEDDING_TIMEOUT_SECONDS = float(os.getenv("EMBEDDING_TIMEOUT_SECONDS", "15"))
     EMBEDDING_BASE_URL = os.getenv(
         "EMBEDDING_BASE_URL",
         "https://dashscope.aliyuncs.com/compatible-mode/v1",
     )
+    EMBEDDING_LOCAL_BASE_URL = os.getenv("EMBEDDING_LOCAL_BASE_URL", "")
+    EMBEDDING_LOCAL_API_KEY = os.getenv("EMBEDDING_LOCAL_API_KEY", "")
+    EMBEDDING_LOCAL_MODEL = os.getenv("EMBEDDING_LOCAL_MODEL", "BAAI/bge-small-zh")
+    EMBEDDING_LOCAL_FILES_ONLY = os.getenv("EMBEDDING_LOCAL_FILES_ONLY", "true").lower() == "true"
     TAVILY_API_KEY = os.getenv("TAVILY_API_KEY", "")
 
     # Vector store + embedding config

@@ -1,43 +1,101 @@
+from dataclasses import dataclass
 from typing import List
 import logging
+import threading
 import time
 
 import openai
 
 from ..config import settings
 
+try:
+    from sentence_transformers import SentenceTransformer
+except Exception:  # pragma: no cover - optional dependency
+    SentenceTransformer = None
+
 logger = logging.getLogger(__name__)
 
 _DASHSCOPE_PROVIDER = "dashscope"
+_LOCAL_PROVIDER = "local"
+_DEFAULT_LOCAL_BASE_URL = "http://127.0.0.1:18001/v1"
+_DEFAULT_DASHSCOPE_BASE_URL = "https://dashscope.aliyuncs.com/compatible-mode/v1"
 _DASHSCOPE_DEFAULT_MODEL = "text-embedding-v4"
 _DASHSCOPE_MODEL_ALIASES = {
     "qwen/qwen3-embedding-0.6b",
     "qwen3-embedding-0.6b",
 }
+_LOCAL_BGE_CACHE_DIR_NAME = "models--baai--bge-small-zh"
+_LOCAL_BGE_MODEL_NAME = "BAAI/bge-small-zh"
+
+_LOCAL_ST_MODELS: dict[str, "SentenceTransformer"] = {}
+_LOCAL_ST_LOCK = threading.Lock()
 
 
-def _embedding_provider() -> str:
-    return str(getattr(settings, "EMBEDDING_PROVIDER", "") or "").strip().lower()
+@dataclass(frozen=True)
+class _EmbeddingAttempt:
+    provider: str
+    model: str
+    api_key: str
+    base_url: str | None
+
+
+def _as_bool(value: object, default: bool = True) -> bool:
+    if isinstance(value, bool):
+        return value
+    text = str(value or "").strip().lower()
+    if not text:
+        return default
+    if text in {"1", "true", "yes", "on"}:
+        return True
+    if text in {"0", "false", "no", "off"}:
+        return False
+    return default
+
+
+def _normalize_provider(value: object, default: str = _DASHSCOPE_PROVIDER) -> str:
+    provider = str(value or "").strip().lower()
+    if provider in {_DASHSCOPE_PROVIDER, _LOCAL_PROVIDER}:
+        return provider
+    return default
+
+
+def _provider_order() -> List[str]:
+    primary = _normalize_provider(getattr(settings, "EMBEDDING_PROVIDER", _DASHSCOPE_PROVIDER))
+    providers = [primary]
+    fallback_enabled = _as_bool(getattr(settings, "EMBEDDING_ENABLE_FALLBACK", True), default=True)
+    if fallback_enabled:
+        fallback = _normalize_provider(
+            getattr(settings, "EMBEDDING_FALLBACK_PROVIDER", _DASHSCOPE_PROVIDER),
+            default=_DASHSCOPE_PROVIDER,
+        )
+        if fallback not in providers:
+            providers.append(fallback)
+    return providers
 
 
 def _resolve_embedding_api_key(provider: str) -> str:
     if provider == _DASHSCOPE_PROVIDER:
         return settings.DASHSCOPE_API_KEY or settings.OPENAI_API_KEY
-    return settings.OPENAI_API_KEY or settings.DASHSCOPE_API_KEY
+    local_key = str(getattr(settings, "EMBEDDING_LOCAL_API_KEY", "") or "").strip()
+    return local_key or settings.OPENAI_API_KEY or settings.DASHSCOPE_API_KEY or "LOCAL_DUMMY_KEY"
 
 
 def _resolve_embedding_base_url(provider: str) -> str | None:
     embedding_base_url = str(getattr(settings, "EMBEDDING_BASE_URL", "") or "").strip()
     openai_base_url = str(getattr(settings, "OPENAI_BASE_URL", "") or "").strip()
     shared_base_url = str(getattr(settings, "BASE_URL", "") or "").strip()
+    local_base_url = str(getattr(settings, "EMBEDDING_LOCAL_BASE_URL", "") or "").strip()
 
     if provider == _DASHSCOPE_PROVIDER:
-        return embedding_base_url or openai_base_url or shared_base_url or None
-    return openai_base_url or embedding_base_url or shared_base_url or None
+        return embedding_base_url or shared_base_url or openai_base_url or _DEFAULT_DASHSCOPE_BASE_URL
+    return local_base_url or openai_base_url or _DEFAULT_LOCAL_BASE_URL
 
 
 def _resolve_embedding_model(provider: str) -> str:
-    model_name = str(settings.EMBEDDING_MODEL or "").strip()
+    model_name = str(getattr(settings, "EMBEDDING_MODEL", "") or "").strip()
+    local_model_name = str(getattr(settings, "EMBEDDING_LOCAL_MODEL", "") or "").strip()
+    if provider == _LOCAL_PROVIDER:
+        return local_model_name or model_name
     if provider == _DASHSCOPE_PROVIDER:
         lowered_name = model_name.lower()
         if not model_name or lowered_name in _DASHSCOPE_MODEL_ALIASES:
@@ -45,11 +103,85 @@ def _resolve_embedding_model(provider: str) -> str:
     return model_name
 
 
-def _get_openai_client() -> openai.OpenAI:
-    provider = _embedding_provider()
-    api_key = _resolve_embedding_api_key(provider)
-    base_url = _resolve_embedding_base_url(provider)
-    return openai.OpenAI(api_key=api_key, base_url=base_url)
+def _resolve_embedding_timeout_seconds() -> float:
+    raw = getattr(settings, "EMBEDDING_TIMEOUT_SECONDS", 15)
+    try:
+        timeout = float(raw)
+    except (TypeError, ValueError):
+        timeout = 15.0
+    return max(2.0, timeout)
+
+
+def _local_files_only_enabled() -> bool:
+    return _as_bool(getattr(settings, "EMBEDDING_LOCAL_FILES_ONLY", True), default=True)
+
+
+def _normalize_local_model_name(model_name: str) -> str:
+    normalized = str(model_name or "").strip()
+    lowered = normalized.lower().replace("\\", "/")
+    if lowered == _LOCAL_BGE_CACHE_DIR_NAME:
+        return _LOCAL_BGE_MODEL_NAME
+    return normalized
+
+
+def _get_local_sentence_model(model_name: str) -> "SentenceTransformer":
+    if SentenceTransformer is None:
+        raise RuntimeError(
+            "sentence-transformers is not installed; cannot use local embedding provider"
+        )
+
+    normalized_name = _normalize_local_model_name(model_name)
+    with _LOCAL_ST_LOCK:
+        cached = _LOCAL_ST_MODELS.get(normalized_name)
+    if cached is not None:
+        return cached
+
+    model = SentenceTransformer(
+        normalized_name,
+        local_files_only=_local_files_only_enabled(),
+    )
+    with _LOCAL_ST_LOCK:
+        _LOCAL_ST_MODELS[normalized_name] = model
+    return model
+
+
+def _embed_texts_local(texts: List[str], model_name: str) -> List[List[float]]:
+    model = _get_local_sentence_model(model_name)
+    vectors = model.encode(
+        texts,
+        normalize_embeddings=True,
+        show_progress_bar=False,
+    )
+    if hasattr(vectors, "tolist"):
+        vectors = vectors.tolist()
+    return [[float(value) for value in vector] for vector in vectors]
+
+
+def _build_embedding_attempts() -> List[_EmbeddingAttempt]:
+    attempts: List[_EmbeddingAttempt] = []
+    for provider in _provider_order():
+        model_name = _resolve_embedding_model(provider)
+        if not model_name:
+            logger.warning("embedding model missing for provider=%s; skip", provider)
+            continue
+        attempts.append(
+            _EmbeddingAttempt(
+                provider=provider,
+                model=model_name,
+                api_key=_resolve_embedding_api_key(provider),
+                base_url=_resolve_embedding_base_url(provider),
+            )
+        )
+    return attempts
+
+
+def _get_openai_client(attempt: _EmbeddingAttempt) -> openai.OpenAI:
+    return openai.OpenAI(
+        api_key=attempt.api_key,
+        base_url=attempt.base_url,
+        timeout=_resolve_embedding_timeout_seconds(),
+        max_retries=0,
+    )
 
 
 def embed_texts(texts: List[str]) -> List[List[float]]:
@@ -59,57 +191,73 @@ def embed_texts(texts: List[str]) -> List[List[float]]:
         logger.info("embedding skipped: no non-empty texts")
         return []
 
-    provider = _embedding_provider()
-    model_name = _resolve_embedding_model(provider)
-    if not model_name:
-        raise ValueError("EMBEDDING_MODEL is not configured")
+    attempts = _build_embedding_attempts()
+    if not attempts:
+        raise ValueError("No embedding provider/model is configured")
 
     logger.info(
-        "embedding request start: provider=%s model=%s texts=%d",
-        provider,
-        model_name,
+        "embedding request start: providers=%s texts=%d",
+        ",".join(attempt.provider for attempt in attempts),
         len(clean_texts),
     )
-    client = _get_openai_client()
-    started_at = time.perf_counter()
-    logger.info(
-        "LLM_INVOKE_START scene=embedding model=%s request_hint=texts=%d provider=%s",
-        model_name,
-        len(clean_texts),
-        provider,
-    )
-    try:
-        response = client.embeddings.create(
-            model=model_name,
-            input=clean_texts,
-        )
-    except Exception:
-        logger.exception(
-            "LLM_INVOKE_FAILED scene=embedding model=%s provider=%s texts=%d",
-            model_name,
-            provider,
-            len(clean_texts),
-        )
-        logger.exception(
-            "embedding request failed: provider=%s model=%s texts=%d",
-            provider,
-            model_name,
-            len(clean_texts),
-        )
-        raise
 
-    vectors = [item.embedding for item in response.data]
-    vector_dim = len(vectors[0]) if vectors and vectors[0] else 0
-    elapsed_ms = int((time.perf_counter() - started_at) * 1000)
-    logger.info(
-        "LLM_INVOKE_DONE scene=embedding model=%s elapsed_ms=%d vectors=%d",
-        model_name,
-        elapsed_ms,
-        len(vectors),
+    last_error: Exception | None = None
+    for idx, attempt in enumerate(attempts, start=1):
+        started_at = time.perf_counter()
+        logger.info(
+            "LLM_INVOKE_START scene=embedding model=%s request_hint=texts=%d provider=%s attempt=%d/%d",
+            attempt.model,
+            len(clean_texts),
+            attempt.provider,
+            idx,
+            len(attempts),
+        )
+        try:
+            if attempt.provider == _LOCAL_PROVIDER:
+                vectors = _embed_texts_local(clean_texts, attempt.model)
+            else:
+                client = _get_openai_client(attempt)
+                response = client.embeddings.create(
+                    model=attempt.model,
+                    input=clean_texts,
+                )
+                vectors = [item.embedding for item in response.data]
+            vector_dim = len(vectors[0]) if vectors and vectors[0] else 0
+            elapsed_ms = int((time.perf_counter() - started_at) * 1000)
+            logger.info(
+                "LLM_INVOKE_DONE scene=embedding model=%s elapsed_ms=%d vectors=%d",
+                attempt.model,
+                elapsed_ms,
+                len(vectors),
+            )
+            logger.info(
+                "embedding request success: provider=%s vectors=%d dimension=%d",
+                attempt.provider,
+                len(vectors),
+                vector_dim,
+            )
+            return vectors
+        except Exception as exc:
+            last_error = exc
+            logger.exception(
+                "LLM_INVOKE_FAILED scene=embedding model=%s provider=%s texts=%d attempt=%d/%d",
+                attempt.model,
+                attempt.provider,
+                len(clean_texts),
+                idx,
+                len(attempts),
+            )
+            if idx < len(attempts):
+                logger.warning(
+                    "embedding fallback: failed provider=%s, try next provider",
+                    attempt.provider,
+                )
+
+    logger.error(
+        "embedding request failed: all providers exhausted providers=%s texts=%d",
+        ",".join(attempt.provider for attempt in attempts),
+        len(clean_texts),
     )
-    logger.info(
-        "embedding request success: vectors=%d dimension=%d",
-        len(vectors),
-        vector_dim,
-    )
-    return vectors
+    if last_error is not None:
+        raise last_error
+    raise RuntimeError("embedding request failed without captured exception")
