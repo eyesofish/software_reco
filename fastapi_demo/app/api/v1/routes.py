@@ -21,6 +21,7 @@ from app.api.v1.models import (
     SessionStateUpdateRequest,
 )
 from software_recommend_system.rag_agent import create_rag_with_routing_agent
+from software_recommend_system.observability import traceable
 from software_recommend_system.state import AgentState
 from software_recommend_system.utils import initialize_vector_store
 
@@ -144,6 +145,81 @@ def _get_value(result: Any, key: str, default: Any = None) -> Any:
     if isinstance(result, dict):
         return result.get(key, default)
     return getattr(result, key, default)
+
+
+def _normalize_retrieved_doc_ids(raw: Any) -> List[str]:
+    normalized: List[str] = []
+    seen = set()
+    if not isinstance(raw, (list, tuple, set)):
+        return normalized
+    for value in raw:
+        doc_id = str(value or "").strip()
+        if not doc_id or doc_id in seen:
+            continue
+        seen.add(doc_id)
+        normalized.append(doc_id)
+    return normalized
+
+
+def _normalize_retrieval_records(raw: Any) -> List[Dict[str, Any]]:
+    if not isinstance(raw, list):
+        return []
+    normalized: List[Dict[str, Any]] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        subquery_id = str(item.get("subquery_id", "")).strip()
+        subquery = str(item.get("subquery", "")).strip()
+        retrieved_doc_ids = _normalize_retrieved_doc_ids(item.get("retrieved_doc_ids", []))
+        retrieved_contexts_raw = item.get("retrieved_contexts", [])
+        retrieved_contexts = []
+        if isinstance(retrieved_contexts_raw, list):
+            for context in retrieved_contexts_raw[:8]:
+                text = str(context or "").strip()
+                if text:
+                    retrieved_contexts.append(text)
+        normalized.append(
+            {
+                "subquery_id": subquery_id,
+                "subquery": subquery,
+                "retrieved_doc_ids": retrieved_doc_ids,
+                "retrieved_contexts": retrieved_contexts,
+            }
+        )
+    return normalized
+
+
+def _normalize_hitl_payload(raw: Any) -> Optional[Dict[str, Any]]:
+    if not isinstance(raw, dict) or not raw:
+        return None
+    payload = raw
+    policy = str(payload.get("policy", "human") or "human").strip() or "human"
+    decision = str(payload.get("decision", "confirm") or "confirm").strip() or "confirm"
+    edited_subqueries = _normalize_pending_sub_questions(payload.get("edited_subqueries", []))
+    return {
+        "policy": policy,
+        "decision": decision,
+        "edited_subqueries": edited_subqueries,
+    }
+
+
+def _extract_eval_payload(
+    result: Any,
+    *,
+    hitl_fallback: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    retrieval_records = _normalize_retrieval_records(_get_value(result, "retrieval_records", []))
+    retrieved_doc_ids = _normalize_retrieved_doc_ids(_get_value(result, "retrieved_doc_ids", []))
+
+    hitl = _normalize_hitl_payload(_get_value(result, "hitl", None))
+    if hitl is None:
+        hitl = _normalize_hitl_payload(hitl_fallback)
+
+    return {
+        "retrieval_records": retrieval_records,
+        "retrieved_doc_ids": retrieved_doc_ids,
+        "hitl": hitl,
+    }
 
 
 def _extract_interrupt_payload(result: Any) -> Optional[Dict[str, Any]]:
@@ -380,6 +456,7 @@ def _append_session_message_once(session_id: str, role: str, content: str) -> Di
         return state
 
 
+@traceable(name="api_recommend_turn")
 async def _execute_recommend_turn(
     *,
     session_id: str,
@@ -392,6 +469,17 @@ async def _execute_recommend_turn(
 ) -> RecommendationResponse:
     try:
         result = await run_agent_async(AGENT, graph_input, config=config)
+        hitl_policy = str(_get_value(graph_input, "hitl_policy", "human") or "human").strip()
+        if hitl_policy not in {"human", "auto_confirm", "oracle_edit"}:
+            hitl_policy = "human"
+        eval_payload = _extract_eval_payload(
+            result,
+            hitl_fallback={
+                "policy": hitl_policy,
+                "decision": "not_applicable",
+                "edited_subqueries": [],
+            },
+        )
         interrupt_payload = _extract_interrupt_payload(result)
         if interrupt_payload and interrupt_payload.get("type") == "human_confirmation":
             pending_sub_questions = _normalize_pending_sub_questions(
@@ -425,6 +513,16 @@ async def _execute_recommend_turn(
                 session_id=session_id,
                 awaiting_human_confirmation=True,
                 pending_sub_questions=pending_sub_questions,
+                retrieval_records=eval_payload["retrieval_records"],
+                retrieved_doc_ids=eval_payload["retrieved_doc_ids"],
+                hitl=eval_payload["hitl"]
+                or _normalize_hitl_payload(
+                    {
+                        "policy": hitl_policy,
+                        "decision": "awaiting_confirmation",
+                        "edited_subqueries": [],
+                    }
+                ),
             )
 
         final_answer = _get_value(result, "final_answer", "")
@@ -439,10 +537,21 @@ async def _execute_recommend_turn(
                 coverage=_get_value(result, "coverage", 0.0),
                 session_id=session_id,
                 awaiting_human_confirmation=False,
+                retrieval_records=eval_payload["retrieval_records"],
+                retrieved_doc_ids=eval_payload["retrieved_doc_ids"],
+                hitl=eval_payload["hitl"],
             )
 
         if fallback_answer:
             _append_session_message_once(session_id, "assistant", fallback_answer)
+            fallback_eval_payload = _extract_eval_payload(
+                result,
+                hitl_fallback={
+                    "policy": hitl_policy,
+                    "decision": "confirm",
+                    "edited_subqueries": [],
+                },
+            )
             return RecommendationResponse(
                 status="success",
                 final_answer=fallback_answer,
@@ -452,6 +561,9 @@ async def _execute_recommend_turn(
                 coverage=1.0,
                 session_id=session_id,
                 awaiting_human_confirmation=False,
+                retrieval_records=fallback_eval_payload["retrieval_records"],
+                retrieved_doc_ids=fallback_eval_payload["retrieved_doc_ids"],
+                hitl=fallback_eval_payload["hitl"],
             )
 
         return RecommendationResponse(
@@ -463,6 +575,9 @@ async def _execute_recommend_turn(
             coverage=_get_value(result, "coverage", 0.0),
             session_id=session_id,
             awaiting_human_confirmation=False,
+            retrieval_records=eval_payload["retrieval_records"],
+            retrieved_doc_ids=eval_payload["retrieved_doc_ids"],
+            hitl=eval_payload["hitl"],
         )
     except Exception:
         logger.exception(
@@ -552,6 +667,15 @@ async def get_software_recommendation(request_data: RecommendationRequest):
                 coverage=1.0,
                 session_id=session_id,
                 awaiting_human_confirmation=False,
+                retrieval_records=[],
+                retrieved_doc_ids=[],
+                hitl=_normalize_hitl_payload(
+                    {
+                        "policy": request_data.hitl_policy or "human",
+                        "decision": "memory_answer",
+                        "edited_subqueries": [],
+                    }
+                ),
             )
 
         if _is_confirmation_short_query(request_data.query):
@@ -596,6 +720,8 @@ async def get_software_recommendation(request_data: RecommendationRequest):
             timeout_budget=request_data.timeout,
             max_iterations=request_data.max_iterations,
             start_time=time.time(),
+            hitl_policy=request_data.hitl_policy or "human",
+            oracle_edits=request_data.oracle_edits or [],
             session_id=session_id,
         )
 
@@ -661,6 +787,15 @@ async def confirm_software_recommendation(request_data: RecommendationConfirmReq
                 result = await run_agent_async(AGENT, Command(resume=resume_payload), config=config)
                 interrupt_payload = _extract_interrupt_payload(result)
 
+        eval_payload = _extract_eval_payload(
+            result,
+            hitl_fallback={
+                "policy": "human",
+                "decision": effective_action,
+                "edited_subqueries": edited_sub_questions if effective_action == "edit" else [],
+            },
+        )
+
         if interrupt_payload and interrupt_payload.get("type") == "human_confirmation":
             if effective_action == "confirm":
                 logger.error(
@@ -709,6 +844,16 @@ async def confirm_software_recommendation(request_data: RecommendationConfirmReq
                 session_id=request_data.session_id,
                 awaiting_human_confirmation=True,
                 pending_sub_questions=pending_sub_questions,
+                retrieval_records=eval_payload["retrieval_records"],
+                retrieved_doc_ids=eval_payload["retrieved_doc_ids"],
+                hitl=eval_payload["hitl"]
+                or _normalize_hitl_payload(
+                    {
+                        "policy": "human",
+                        "decision": "awaiting_confirmation",
+                        "edited_subqueries": [],
+                    }
+                ),
             )
 
         final_answer = _get_value(result, "final_answer", "")
@@ -732,6 +877,9 @@ async def confirm_software_recommendation(request_data: RecommendationConfirmReq
             coverage=_get_value(result, "coverage", 0.0),
             session_id=request_data.session_id,
             awaiting_human_confirmation=False,
+            retrieval_records=eval_payload["retrieval_records"],
+            retrieved_doc_ids=eval_payload["retrieved_doc_ids"],
+            hitl=eval_payload["hitl"],
         )
     except Exception as exc:
         logger.exception(
@@ -770,6 +918,7 @@ async def upsert_session_state(session_id: str, request_data: SessionStateUpdate
     )
 
 
+@traceable(name="api_agent_invoke")
 async def run_agent_async(agent, graph_input: Any, config: Optional[Dict[str, Any]] = None):
     """Run the agent asynchronously."""
     checkpointer = getattr(agent, "checkpointer", None)

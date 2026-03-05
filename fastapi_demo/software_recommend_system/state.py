@@ -28,6 +28,8 @@ class AgentState(BaseModel):
     )
     sub_questions: List[str] = Field(default_factory=list)
     evidence: List[EvidenceItem] = Field(default_factory=list)
+    retrieval_records: List[Dict[str, Any]] = Field(default_factory=list)
+    retrieved_doc_ids: List[str] = Field(default_factory=list)
     candidates: List[CandidateSolution] = Field(default_factory=list)
     final_answer: str = ""
     drawing_params: str = ""
@@ -43,4 +45,7 @@ class AgentState(BaseModel):
     human_feedback: str = ""
     pending_sub_questions: List[str] = Field(default_factory=list)
     human_confirmation_done: bool = False
+    hitl_policy: str = "human"
+    oracle_edits: List[str] = Field(default_factory=list)
+    hitl: Dict[str, Any] = Field(default_factory=dict)
     session_id: str = ""

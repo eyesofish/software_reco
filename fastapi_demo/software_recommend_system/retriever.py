@@ -2,6 +2,7 @@ import hashlib
 from typing import Any, Iterable, List
 
 from .document_schema import Document
+from .observability import traceable
 from .tools import _tavily_search, similarity_search
 
 
@@ -46,6 +47,7 @@ def _normalize_documents(documents: Iterable[Document], source_hint: str) -> Lis
                 metadata={
                     "doc_id": doc_id,
                     "source": source,
+                    "retrieval_source": source_hint,
                     "score": score,
                     "author": _get_field(metadata, "author"),
                     "published_date": _get_field(metadata, "published_date"),
@@ -60,6 +62,7 @@ def _normalize_documents(documents: Iterable[Document], source_hint: str) -> Lis
     return normalized
 
 
+@traceable(name="retrieve_shared")
 def retrieve(query: str, top_k: int = 5) -> List[Document]:
     """Run shared hybrid retrieval (vector + web) and return normalized documents."""
 
@@ -70,4 +73,3 @@ def retrieve(query: str, top_k: int = 5) -> List[Document]:
     merged_docs.extend(_normalize_documents(vector_docs, source_hint="vector"))
     merged_docs.extend(_normalize_documents(web_docs, source_hint="web"))
     return merged_docs
-

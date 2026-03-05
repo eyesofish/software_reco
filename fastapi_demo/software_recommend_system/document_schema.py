@@ -9,6 +9,7 @@ class Metadata(BaseModel):
 
     source: str
     doc_id: Optional[str] = None
+    retrieval_source: Optional[str] = None
     score: float = 0.0
     author: Optional[str] = None
     published_date: Optional[datetime] = None

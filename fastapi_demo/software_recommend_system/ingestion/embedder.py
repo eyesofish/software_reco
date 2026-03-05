@@ -8,6 +8,7 @@ import openai
 
 from ..config import settings
 from ..logging_utils import elapsed_ms, error_fields, log_event, log_exception, new_trace_id
+from ..observability import wrap_openai
 
 try:
     from sentence_transformers import SentenceTransformer
@@ -255,12 +256,12 @@ def _build_embedding_attempts(trace_id: str) -> List[_EmbeddingAttempt]:
 
 
 def _get_openai_client(attempt: _EmbeddingAttempt) -> openai.OpenAI:
-    return openai.OpenAI(
+    return wrap_openai(openai.OpenAI(
         api_key=attempt.api_key,
         base_url=attempt.base_url,
         timeout=_resolve_embedding_timeout_seconds(),
         max_retries=0,
-    )
+    ))
 
 
 def embed_texts(texts: List[str]) -> List[List[float]]:

@@ -20,6 +20,15 @@ class RecommendationRequest(BaseModel):
         default=None,
         description="Conversation id alias for session_id",
     )
+    hitl_policy: Optional[str] = Field(
+        default=None,
+        pattern="^(human|auto_confirm|oracle_edit)$",
+        description="HITL policy for evaluation mode",
+    )
+    oracle_edits: Optional[List[str]] = Field(
+        default=None,
+        description="Optional oracle-edited sub-questions for oracle_edit policy",
+    )
 
     @model_validator(mode="after")
     def normalize_ids(self):
@@ -69,6 +78,18 @@ class RecommendationResponse(BaseModel):
     pending_sub_questions: Optional[List[str]] = Field(
         None,
         description="Sub-questions waiting for confirmation",
+    )
+    hitl: Optional[Dict[str, Any]] = Field(
+        None,
+        description="HITL decision payload used for tracing/evaluation",
+    )
+    retrieval_records: Optional[List[Dict[str, Any]]] = Field(
+        None,
+        description="Per-subquery retrieval records",
+    )
+    retrieved_doc_ids: Optional[List[str]] = Field(
+        None,
+        description="Deduplicated union of retrieved doc ids across all subqueries",
     )
 
 

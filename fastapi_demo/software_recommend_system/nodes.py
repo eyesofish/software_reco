@@ -17,6 +17,7 @@ from langgraph.types import interrupt
 from .retriever import retrieve
 from .tools import pre_drawing_tool, draw_image_tool
 from .logging_utils import elapsed_ms, error_fields, log_event, log_exception, new_trace_id, text_preview
+from .observability import traceable, wrap_openai
 
 logger = logging.getLogger(__name__)
 
@@ -138,11 +139,59 @@ def _prepare_messages_for_small_context(messages: List[Dict[str, str]]) -> List[
 
     return normalized
 
+
+def _merge_doc_ids(existing: List[str], extra: List[str]) -> List[str]:
+    merged: List[str] = []
+    seen = set()
+    for value in list(existing or []) + list(extra or []):
+        doc_id = str(value or "").strip()
+        if not doc_id or doc_id in seen:
+            continue
+        seen.add(doc_id)
+        merged.append(doc_id)
+    return merged
+
+
+def _extract_doc_id(doc: Document, fallback_prefix: str, index: int) -> str:
+    metadata = _get_field(doc, "metadata", {}) or {}
+    doc_id = str(_get_field(metadata, "doc_id", "") or "").strip()
+    if doc_id:
+        return doc_id
+    doc_url = str(_get_field(metadata, "url", "") or "").strip()
+    if doc_url:
+        return doc_url
+    return f"{fallback_prefix}_{index}"
+
+
+def _build_retrieval_record(
+    *,
+    subquery_id: str,
+    subquery: str,
+    docs: List[Document],
+) -> Dict[str, Any]:
+    retrieved_doc_ids: List[str] = []
+    retrieved_contexts: List[str] = []
+    for index, doc in enumerate(docs, start=1):
+        doc_id = _extract_doc_id(doc, fallback_prefix=subquery_id, index=index)
+        if doc_id not in retrieved_doc_ids:
+            retrieved_doc_ids.append(doc_id)
+
+        content = str(_get_field(doc, "content", "") or "").strip().replace("\n", " ")
+        if content:
+            retrieved_contexts.append(content[:280] + "..." if len(content) > 280 else content)
+
+    return {
+        "subquery_id": subquery_id,
+        "subquery": str(subquery or ""),
+        "retrieved_doc_ids": retrieved_doc_ids,
+        "retrieved_contexts": retrieved_contexts[:8],
+    }
+
 # OpenAI client factory with explicit auth/base_url wiring.
 def _get_openai_client() -> openai.OpenAI:
     api_key = settings.DASHSCOPE_API_KEY or settings.OPENAI_API_KEY
     base_url = settings.OPENAI_BASE_URL or None
-    return openai.OpenAI(api_key=api_key, base_url=base_url)
+    return wrap_openai(openai.OpenAI(api_key=api_key, base_url=base_url))
 
 # 分流词表
 TECH_TERMS = {
@@ -618,6 +667,7 @@ def entry_node(state: AgentState) -> Dict[str, Any]:
         "messages": messages
     }
 
+@traceable(name="routing_decision")
 def routing_node(state: AgentState) -> Dict[str, Any]:
     """Routing node: decide between rag/chat/draw."""
     user_query = _get_field(state, "user_query", "")
@@ -679,6 +729,7 @@ def normalize_query_with_llm(model: str, prompt: str, query: str):
     _llm_invoke_done("normalize_query", model, trace_id, started_at, response)
     return response
     
+@traceable(name="query_normalization")
 def query_normalization_node(state: AgentState) -> Dict[str, Any]:
     """查询规范化节点"""
     user_query = _get_field(state, "user_query", "")
@@ -823,6 +874,7 @@ def sub_question_generation_with_llm(model: str, prompt: str, query: str):
         raise
     _llm_invoke_done("sub_question_generation", model, trace_id, started_at, response)
     return response
+@traceable(name="task_decomposition")
 def sub_question_generation_node(state: AgentState) -> Dict[str, Any]:
     """Sub-question generation node."""
     normalized_query = _get_field(state, "normalized_query", "")
@@ -962,6 +1014,7 @@ def _normalize_sub_questions(raw: Any) -> List[str]:
     return cleaned
 
 
+@traceable(name="hitl_confirmation")
 def human_confirmation_node(state: AgentState) -> Dict[str, Any]:
     """
     Human-in-the-loop 阻塞节点：
@@ -974,6 +1027,11 @@ def human_confirmation_node(state: AgentState) -> Dict[str, Any]:
         fallback_query = str(_get_field(state, "normalized_query", "")).strip()
         original_sub_questions = [fallback_query] if fallback_query else []
 
+    hitl_policy = str(_get_field(state, "hitl_policy", "human") or "human").strip().lower()
+    if hitl_policy not in {"human", "auto_confirm", "oracle_edit"}:
+        hitl_policy = "human"
+    oracle_edits = _normalize_sub_questions(_get_field(state, "oracle_edits", []))
+
     # Guard against unexpected re-entry after a successful confirm within the same graph run.
     if bool(_get_field(state, "human_confirmation_done", False)):
         logger.warning(
@@ -983,6 +1041,46 @@ def human_confirmation_node(state: AgentState) -> Dict[str, Any]:
         return {
             "awaiting_human_confirmation": False,
             "pending_sub_questions": [],
+        }
+
+    if hitl_policy == "auto_confirm":
+        logger.warning(
+            "HITL_AUTO_CONFIRM subq_count=%d",
+            len(original_sub_questions),
+        )
+        return {
+            "sub_questions": original_sub_questions,
+            "awaiting_human_confirmation": False,
+            "pending_sub_questions": [],
+            "human_feedback": "",
+            "human_confirmation_done": True,
+            "hitl": {
+                "policy": "auto_confirm",
+                "decision": "confirm",
+                "edited_subqueries": [],
+            },
+        }
+
+    if hitl_policy == "oracle_edit":
+        final_sub_questions = oracle_edits if oracle_edits else original_sub_questions
+        decision = "edit" if oracle_edits else "confirm"
+        logger.warning(
+            "HITL_ORACLE_EDIT decision=%s edited_count=%d final_count=%d",
+            decision,
+            len(oracle_edits),
+            len(final_sub_questions),
+        )
+        return {
+            "sub_questions": final_sub_questions,
+            "awaiting_human_confirmation": False,
+            "pending_sub_questions": [],
+            "human_feedback": "",
+            "human_confirmation_done": True,
+            "hitl": {
+                "policy": "oracle_edit",
+                "decision": decision,
+                "edited_subqueries": oracle_edits,
+            },
         }
 
     request_payload = {
@@ -1030,13 +1128,21 @@ def human_confirmation_node(state: AgentState) -> Dict[str, Any]:
         "pending_sub_questions": [],
         "human_feedback": comment,
         "human_confirmation_done": True,
+        "hitl": {
+            "policy": "human",
+            "decision": action,
+            "edited_subqueries": edited_sub_questions if action == "edit" else [],
+        },
     }
 
 
+@traceable(name="retrieve_multi_subquery")
 def retrieve_node(state: AgentState) -> Dict[str, Any]:
     """Retrieve node: search evidence for each sub-question."""
     sub_questions = _get_field(state, "sub_questions", [])
     evidence = _get_field(state, "evidence", [])
+    retrieval_records = list(_get_field(state, "retrieval_records", []) or [])
+    retrieved_doc_ids = list(_get_field(state, "retrieved_doc_ids", []) or [])
     iteration_count = _get_field(state, "iteration_count", 0)
     trace_id = new_trace_id("search")
 
@@ -1069,6 +1175,17 @@ def retrieve_node(state: AgentState) -> Dict[str, Any]:
         )
         search_results = retrieve(question, top_k=settings.TOP_K)
         quality_score = min(0.9, 0.5 + (len(search_results) * 0.1))
+        subquery_id = f"sq_{index}"
+        retrieval_record = _build_retrieval_record(
+            subquery_id=subquery_id,
+            subquery=question,
+            docs=search_results,
+        )
+        retrieval_records.append(retrieval_record)
+        retrieved_doc_ids = _merge_doc_ids(
+            retrieved_doc_ids,
+            retrieval_record.get("retrieved_doc_ids", []),
+        )
         log_event(
             logger,
             logging.INFO,
@@ -1089,8 +1206,16 @@ def retrieve_node(state: AgentState) -> Dict[str, Any]:
             "question": question,
             "documents": search_results,
             "search_results": [
-                {"content": doc.content, "score": doc.score}
-                for doc in search_results
+                {
+                    "content": doc.content,
+                    "score": doc.score,
+                    "doc_id": _extract_doc_id(doc, fallback_prefix=subquery_id, index=doc_index),
+                    "source": str(_get_field(_get_field(doc, "metadata", {}), "source", "") or ""),
+                    "retrieval_source": str(
+                        _get_field(_get_field(doc, "metadata", {}), "retrieval_source", "") or ""
+                    ),
+                }
+                for doc_index, doc in enumerate(search_results, start=1)
             ],
             "quality_score": quality_score,
         }
@@ -1105,8 +1230,13 @@ def retrieve_node(state: AgentState) -> Dict[str, Any]:
         scene="retrieve_node",
         iteration=iteration_count,
         total_evidence=len(evidence),
+        total_retrieved_doc_ids=len(retrieved_doc_ids),
     )
-    return {"evidence": evidence}
+    return {
+        "evidence": evidence,
+        "retrieval_records": retrieval_records,
+        "retrieved_doc_ids": retrieved_doc_ids,
+    }
 
 
 def evidence_collection_node(state: AgentState) -> Dict[str, Any]:
@@ -1312,6 +1442,7 @@ def coverage_check_node(state: AgentState) -> Dict[str, Any]:
         "needs_refinement": needs_refinement
     }
 
+@traceable(name="final_generation_rag")
 def answer_generation_node(state: AgentState) -> Dict[str, Any]:
     """答案生成节点（RAG模式）"""
     user_query = _get_field(state, "user_query", "")
@@ -1346,9 +1477,13 @@ def answer_generation_node(state: AgentState) -> Dict[str, Any]:
 
     return {
         "final_answer": final_answer,
-        "messages": messages
+        "messages": messages,
+        "retrieval_records": list(_get_field(state, "retrieval_records", []) or []),
+        "retrieved_doc_ids": list(_get_field(state, "retrieved_doc_ids", []) or []),
+        "hitl": dict(_get_field(state, "hitl", {}) or {}),
     }
 
+@traceable(name="final_generation_chat")
 def chat_answer_generation_node(state: AgentState) -> Dict[str, Any]:
     """Answer generation node (chat mode with retrieval context)."""
     user_query = _get_field(state, "user_query", "")
@@ -1397,6 +1532,17 @@ def chat_answer_generation_node(state: AgentState) -> Dict[str, Any]:
         query=text_preview(retrieval_query),
         docs=len(retrieved_docs),
         elapsed_ms=elapsed_ms(retrieval_started_at),
+    )
+    chat_record = _build_retrieval_record(
+        subquery_id="chat_0",
+        subquery=retrieval_query,
+        docs=retrieved_docs,
+    )
+    retrieval_records = list(_get_field(state, "retrieval_records", []) or [])
+    retrieval_records.append(chat_record)
+    retrieved_doc_ids = _merge_doc_ids(
+        list(_get_field(state, "retrieved_doc_ids", []) or []),
+        chat_record.get("retrieved_doc_ids", []),
     )
 
     def _format_retrieved_context(docs: List[Document]) -> str:
@@ -1492,7 +1638,10 @@ def chat_answer_generation_node(state: AgentState) -> Dict[str, Any]:
 
     return {
         "final_answer": final_answer,
-        "messages": messages
+        "messages": messages,
+        "retrieval_records": retrieval_records,
+        "retrieved_doc_ids": retrieved_doc_ids,
+        "hitl": dict(_get_field(state, "hitl", {}) or {}),
     }
 
 def pre_drawing_node(state: AgentState) -> Dict[str, Any]:

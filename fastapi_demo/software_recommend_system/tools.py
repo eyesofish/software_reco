@@ -11,6 +11,7 @@ from .config import settings
 from .document_schema import Document
 from .ingestion.embedder import embed_texts
 from .logging_utils import elapsed_ms, error_fields, log_event, log_exception, new_trace_id, text_preview
+from .observability import wrap_openai
 
 logger = logging.getLogger(__name__)
 TAVILY_MAX_RESULTS = 3
@@ -25,7 +26,7 @@ def _search_tool_impl_name() -> str:
 def _get_openai_client() -> openai.OpenAI:
     api_key = settings.DASHSCOPE_API_KEY or settings.OPENAI_API_KEY
     base_url = settings.OPENAI_BASE_URL or None
-    return openai.OpenAI(api_key=api_key, base_url=base_url)
+    return wrap_openai(openai.OpenAI(api_key=api_key, base_url=base_url))
 
 
 def similarity_search(query: str, k: int = 5, trace_id: str | None = None) -> List[Document]:
