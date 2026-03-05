@@ -3,6 +3,7 @@ from .state import AgentState
 from .document_schema import Document, Metadata
 from .config import settings
 import openai
+import os
 import time
 import re
 import json
@@ -13,7 +14,8 @@ from langgraph.func import task
 from langgraph.types import interrupt
 
 # 导入新的工具系统
-from .tools import unified_search, pre_drawing_tool, draw_image_tool
+from .retriever import retrieve
+from .tools import pre_drawing_tool, draw_image_tool
 from .logging_utils import elapsed_ms, error_fields, log_event, log_exception, new_trace_id, text_preview
 
 logger = logging.getLogger(__name__)
@@ -81,6 +83,60 @@ def _set_field(obj: Any, field: str, value: Any) -> None:
         obj[field] = value
     else:
         setattr(obj, field, value)
+
+
+def _truncate_text(text: str, max_chars: int) -> str:
+    value = str(text or "")
+    if max_chars <= 0 or len(value) <= max_chars:
+        return value
+    return value[-max_chars:]
+
+
+def _rough_messages_tokens(messages: List[Dict[str, str]]) -> int:
+    # Conservative rough estimator for small-context local models.
+    # We intentionally over-estimate to avoid context overflow.
+    total = 0
+    for item in messages:
+        total += 6  # per-message structural overhead
+        total += len(str(item.get("content", "") or ""))
+    return total + 2
+
+
+def _prepare_messages_for_small_context(messages: List[Dict[str, str]]) -> List[Dict[str, str]]:
+    """Shrink message window to reduce context overflow risk on 2k-token local models."""
+    max_messages = max(2, int(os.getenv("CHAT_MAX_MESSAGES", "12")))
+    max_input_tokens = max(256, int(os.getenv("CHAT_MAX_INPUT_TOKENS", "1700")))
+    max_system_chars = max(256, int(os.getenv("CHAT_MAX_SYSTEM_CHARS", "1200")))
+    max_message_chars = max(128, int(os.getenv("CHAT_MAX_MESSAGE_CHARS", "800")))
+
+    normalized: List[Dict[str, str]] = []
+    for raw in messages:
+        role = str(_get_field(raw, "role", "user") or "user").strip() or "user"
+        content = str(_get_field(raw, "content", "") or "")
+        limit = max_system_chars if role == "system" else max_message_chars
+        normalized.append({"role": role, "content": _truncate_text(content, limit)})
+
+    if len(normalized) > max_messages:
+        if normalized and normalized[0].get("role") == "system":
+            normalized = [normalized[0]] + normalized[-(max_messages - 1):]
+        else:
+            normalized = normalized[-max_messages:]
+
+    while len(normalized) > 1 and _rough_messages_tokens(normalized) > max_input_tokens:
+        if normalized[0].get("role") == "system" and len(normalized) > 2:
+            # Keep system prompt and newest turns; drop oldest non-system turn.
+            normalized.pop(1)
+        else:
+            normalized.pop(0)
+
+    if normalized and _rough_messages_tokens(normalized) > max_input_tokens:
+        target_idx = 1 if normalized[0].get("role") == "system" and len(normalized) > 1 else 0
+        current = normalized[target_idx]["content"]
+        overflow = _rough_messages_tokens(normalized) - max_input_tokens
+        keep_chars = max(32, len(current) - overflow - 16)
+        normalized[target_idx]["content"] = _truncate_text(current, keep_chars)
+
+    return normalized
 
 # OpenAI client factory with explicit auth/base_url wiring.
 def _get_openai_client() -> openai.OpenAI:
@@ -1011,7 +1067,7 @@ def retrieve_node(state: AgentState) -> Dict[str, Any]:
             query=question_hint,
             top_k=settings.TOP_K,
         )
-        search_results = unified_search(question, k=settings.TOP_K)
+        search_results = retrieve(question, top_k=settings.TOP_K)
         quality_score = min(0.9, 0.5 + (len(search_results) * 0.1))
         log_event(
             logger,
@@ -1316,7 +1372,7 @@ def chat_answer_generation_node(state: AgentState) -> Dict[str, Any]:
     retrieved_docs: List[Document] = []
     retrieval_started_at = time.perf_counter()
     try:
-        retrieved_docs = unified_search(retrieval_query, k=settings.TOP_K)
+        retrieved_docs = retrieve(retrieval_query, top_k=settings.TOP_K)
     except Exception as exc:
         log_event(
             logger,
@@ -1379,17 +1435,33 @@ def chat_answer_generation_node(state: AgentState) -> Dict[str, Any]:
         )
         llm_messages = [{"role": "system", "content": system_prompt}] + llm_messages
 
+    prepared_messages = _prepare_messages_for_small_context(llm_messages)
+    max_output_tokens = max(16, int(os.getenv("CHAT_MAX_OUTPUT_TOKENS", "256")))
+    log_event(
+        logger,
+        logging.INFO,
+        "llm.context.trim",
+        component="llm",
+        scene="chat_answer_generation",
+        before_messages=len(llm_messages),
+        after_messages=len(prepared_messages),
+        before_tokens_rough=_rough_messages_tokens(llm_messages),
+        after_tokens_rough=_rough_messages_tokens(prepared_messages),
+        max_output_tokens=max_output_tokens,
+    )
+
     try:
         client = _get_openai_client()
         trace_id, started_at = _llm_invoke_start(
             scene="chat_answer_generation",
             model=settings.LLM_MODEL,
-            request_hint=f"messages={len(llm_messages)}",
+            request_hint=f"messages={len(prepared_messages)}",
         )
         response = client.chat.completions.create(
             model=settings.LLM_MODEL,
-            messages=llm_messages,
+            messages=prepared_messages,
             temperature=0.7,
+            max_tokens=max_output_tokens,
         )
         _llm_invoke_done("chat_answer_generation", settings.LLM_MODEL, trace_id, started_at, response)
 

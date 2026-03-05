@@ -523,77 +523,13 @@ def draw_image_tool(structured_params: str) -> str:
 
 
 def unified_search(query: str, k: int | None = None) -> List[Document]:
-    """
-    统一搜索入口：向量库检索 + 可用时的 Tavily 实时检索
-    """
-    trace_id = new_trace_id("search")
-    query_hint = text_preview(query)
+    """Backward-compatible retrieval entrypoint."""
+    from .retriever import retrieve
+
     vector_k = k if k is not None else settings.TOP_K
-    started_at = time.perf_counter()
-    log_event(
-        logger,
-        logging.INFO,
-        "search.pipeline.start",
-        component="search",
-        trace_id=trace_id,
-        query=query_hint,
-        vector_k=vector_k,
-        tavily_enabled=bool(search_tool),
-        tavily_impl=_search_tool_impl_name(),
-    )
-
-    documents = similarity_search(query, k=vector_k, trace_id=trace_id)
-    log_event(
-        logger,
-        logging.INFO,
-        "search.pipeline.after_vector",
-        component="search",
-        trace_id=trace_id,
-        query=query_hint,
-        vector_docs=len(documents),
-    )
-
-    tavily_docs: List[Document] = []
-    if search_tool:
-        tavily_docs = _tavily_search(query, trace_id=trace_id)
-        documents.extend(tavily_docs)
-        log_event(
-            logger,
-            logging.INFO,
-            "search.pipeline.after_web",
-            component="search",
-            trace_id=trace_id,
-            query=query_hint,
-            web_docs=len(tavily_docs),
-            total_docs=len(documents),
-        )
-    else:
-        log_event(
-            logger,
-            logging.INFO,
-            "search.pipeline.skip_web",
-            component="search",
-            trace_id=trace_id,
-            query=query_hint,
-            reason="search_tool_not_initialized",
-        )
-
-    log_event(
-        logger,
-        logging.INFO,
-        "search.pipeline.done",
-        component="search",
-        trace_id=trace_id,
-        query=query_hint,
-        vector_docs=len(documents) - len(tavily_docs),
-        web_docs=len(tavily_docs),
-        total_docs=len(documents),
-        elapsed_ms=elapsed_ms(started_at),
-    )
-    return documents
+    return retrieve(query=query, top_k=vector_k)
 
 
-# 定义工具列表
 def get_all_tools():
     """获取所有可用工具的列表"""
     tools = [
