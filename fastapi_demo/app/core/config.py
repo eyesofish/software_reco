@@ -43,9 +43,15 @@ class Settings(BaseSettings):
     IMAGE_MODEL: str = os.getenv("IMAGE_MODEL", "qwen-image-edit")
     IMAGE_SIZE: str = os.getenv("IMAGE_SIZE", "1024x1024")
 
-    TOP_K: int = int(os.getenv("TOP_K", "5"))
+    TOP_K: int = int(os.getenv("TOP_K", "4"))
     QUALITY_THRESHOLD: float = float(os.getenv("QUALITY_THRESHOLD", "0.6"))
     RETRIEVAL_ENABLE_RERANK: bool = os.getenv("RETRIEVAL_ENABLE_RERANK", "false").lower() == "true"
+    RERANK_MODEL_ENABLED: bool = os.getenv("RERANK_MODEL_ENABLED", "true").lower() == "true"
+    RERANK_MODEL_NAME: str = os.getenv("RERANK_MODEL_NAME", "BAAI/bge-reranker-base")
+    RERANK_MODEL_DEVICE: str = os.getenv("RERANK_MODEL_DEVICE", "cpu")
+    RERANK_MODEL_LOCAL_FILES_ONLY: bool = os.getenv("RERANK_MODEL_LOCAL_FILES_ONLY", "false").lower() == "true"
+    RERANK_MODEL_BATCH_SIZE: int = max(1, int(os.getenv("RERANK_MODEL_BATCH_SIZE", "8")))
+    RERANK_MODEL_MAX_LENGTH: int = max(32, int(os.getenv("RERANK_MODEL_MAX_LENGTH", "512")))
     SUB_QUESTION_MIN_COUNT: int = max(1, int(os.getenv("SUB_QUESTION_MIN_COUNT", "2")))
     SUB_QUESTION_MAX_COUNT: int = max(SUB_QUESTION_MIN_COUNT, int(os.getenv("SUB_QUESTION_MAX_COUNT", "3")))
 

@@ -37,9 +37,15 @@ class Settings:
     IMAGE_SIZE = os.getenv("IMAGE_SIZE", "1024x1024")
 
     # Search config
-    TOP_K = int(os.getenv("TOP_K", "5"))
+    TOP_K = int(os.getenv("TOP_K", "4"))
     QUALITY_THRESHOLD = float(os.getenv("QUALITY_THRESHOLD", "0.6"))
     RETRIEVAL_ENABLE_RERANK = os.getenv("RETRIEVAL_ENABLE_RERANK", "false").lower() == "true"
+    RERANK_MODEL_ENABLED = os.getenv("RERANK_MODEL_ENABLED", "true").lower() == "true"
+    RERANK_MODEL_NAME = os.getenv("RERANK_MODEL_NAME", "BAAI/bge-reranker-base")
+    RERANK_MODEL_DEVICE = os.getenv("RERANK_MODEL_DEVICE", "cpu")
+    RERANK_MODEL_LOCAL_FILES_ONLY = os.getenv("RERANK_MODEL_LOCAL_FILES_ONLY", "false").lower() == "true"
+    RERANK_MODEL_BATCH_SIZE = max(1, int(os.getenv("RERANK_MODEL_BATCH_SIZE", "8")))
+    RERANK_MODEL_MAX_LENGTH = max(32, int(os.getenv("RERANK_MODEL_MAX_LENGTH", "512")))
     SUB_QUESTION_MIN_COUNT = max(1, int(os.getenv("SUB_QUESTION_MIN_COUNT", "2")))
     SUB_QUESTION_MAX_COUNT = max(SUB_QUESTION_MIN_COUNT, int(os.getenv("SUB_QUESTION_MAX_COUNT", "3")))
 

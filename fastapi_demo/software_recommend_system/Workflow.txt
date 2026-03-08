@@ -16,15 +16,93 @@
   - `nodes.py:596`
   - `nodes.py:741`
 
-### 2.2 检索 rerank 教程（应该怎么做）
-- 目标：在“向量检索 + Tavily 合并”之后、下游使用之前，增加二阶段 rerank。
-- 步骤 1（开关控制）：新增/启用 `RETRIEVAL_ENABLE_RERANK`，默认 `false`，灰度时再打开。
-- 步骤 2（实现函数）：在 `retriever.py` 新增 `rerank_documents(query, docs, top_n)`，输入合并后的 `docs`，输出重排后的 `top_n`。
-- 步骤 3（接入点）：在 `retrieve()` 里完成 `merged_docs` 后调用 rerank，而不是在 node 层重复做。
-- 步骤 4（最小可用打分）：先用可解释的线性分数（向量分 + 关键词重合分 + 来源权重），后续再替换 Cross-Encoder/LLM reranker。
-- 步骤 5（返回约定）：返回前统一写回 `metadata.score`（rerank 后分数），并按降序排序，保证下游一致消费。
-- 步骤 6（日志与观测）：记录 `query`、`before_count`、`after_count`、前 5 条 `doc_id+score`，便于对齐 `retrieval_recall`。
-- 步骤 7（验收）：至少对比 `Recall@K / MRR / answer_correctness` 三项，确认开启 rerank 后无回归再默认打开。
+### 2.2 检索 rerank（当前实现）
+
+- 开关：`RETRIEVAL_ENABLE_RERANK`（默认 `false`，开启后生效）。
+- 子问题数量：默认 `2~3`（`SUB_QUESTION_MIN_COUNT=2`、`SUB_QUESTION_MAX_COUNT=3`）。
+- 子问题检索：`retrieve(query=subq, top_k=settings.TOP_K)`，当前 `TOP_K=4`。
+- Web 召回上限：`TAVILY_MAX_RESULTS=2`。
+
+当前是“两段式 rerank”：
+
+1. 子问题级（`retriever.py::retrieve`）
+   - 召回：向量检索 + Tavily 合并。
+   - 去格式化：统一为 `Document`，补齐 `metadata.doc_id/retrieval_source/score`。
+   - 若开关开启：调用 `rerank_documents(query=subq, docs=merged_docs, top_n=4)`，按分数降序返回。
+   - `rerank_documents` 线性打分：`0.6*retrieval_score + 0.3*keyword_overlap + 0.1*source_prior`，并回写 `doc.score` 与 `metadata.score`。
+
+2. 全局级（`nodes.py::retrieve_node`）
+   - 收集：遍历每个 `sub_question` 调 `retrieve(...)`，累积到 `all_docs`；`retrieval_records` 仍按子问题记录。
+   - 去重：按 `doc_id` 去重（优先 `metadata.doc_id`，为空回退 `_extract_doc_id(..., "merged", idx)`）。
+   - 全局查询：优先 `state.user_query`，为空才回退为拼接子问题文本。
+   - 全局重排：`rerank_documents(query=global_query, docs=unique_docs, top_n=3)`。
+   - 截断：`MAX_EVIDENCE=3`，取 `final_docs = ranked_docs[:3]`。
+   - 写回：`evidence` 只写 1 个聚合项，`documents/search_results/retrieved_doc_ids` 都只保留这 3 条，保证最终 LLM 最多看到 3 个 chunk。
+
+补充：
+- `coverage_check_node` 已适配单聚合 evidence：当 `evidence` 只有 1 条且对应 `user_query` 时，若 `documents` 非空则按“已覆盖全部子问题”处理，避免误触发继续迭代。
+
+当前 pipeline：
+- question
+- subq generation (2~3)
+- retrieve per subq (top4, tavily<=2)
+- merge all docs
+- dedup by doc_id
+- global rerank
+- top3 evidence (single aggregated item)
+- LLM answer
+
+#### 2.2.1 第二阶段（最推荐）：`vector top20 -> cross-encoder rerank -> top3`
+
+适用目标：
+- 本阶段固定采用 `BAAI/bge-reranker-base` 作为 Cross-Encoder reranker。
+- 你要进一步提升相关性时，优先走这条方案，不再使用线性 rerank 作为默认路径。
+
+建议改法（落地顺序）：
+1. `config.py` 新增参数：
+   - `RETRIEVAL_VECTOR_TOP_K=20`
+   - `RETRIEVAL_FINAL_TOP_N=3`
+   - `RETRIEVAL_RERANK_BACKEND=cross_encoder`（默认且固定）
+   - `RETRIEVAL_CE_MODEL=BAAI/bge-reranker-base`
+   - `RETRIEVAL_CE_BATCH_SIZE=16`
+2. `retriever.py` 新增 Cross-Encoder 载入与打分函数（建议懒加载单例），接口建议：
+   - `cross_encoder_rerank(query: str, docs: List[Document], top_n: int) -> List[Document]`
+3. `retrieve()` 调整为“宽召回 + 强重排”：
+   - 向量召回：`similarity_search(query, k=RETRIEVAL_VECTOR_TOP_K)`（top20）
+   - Web 召回：保留低权重（`TAVILY_MAX_RESULTS=2`）
+   - 合并后先按 `doc_id` 去重，再走 Cross-Encoder 重排
+   - 只返回 `top3`
+4. `nodes.py::retrieve_node` 继续做全局合并与单聚合 evidence，保证最终 LLM 看到的证据上限仍是 3 条。
+5. 加 fallback：
+   - 仅在模型加载失败/超时时，自动回退到现有 `rerank_documents(...)`，用于兜底，不作为默认路径。
+
+推荐伪代码：
+
+```python
+# retriever.py
+vector_docs = similarity_search(query=query, k=settings.RETRIEVAL_VECTOR_TOP_K)  # 20
+web_docs = _tavily_search(query=query)  # <=2
+merged_docs = dedup_by_doc_id(_normalize_documents(vector_docs, "vector") + _normalize_documents(web_docs, "web"))
+
+if settings.RETRIEVAL_RERANK_BACKEND == "cross_encoder":
+    ranked_docs = cross_encoder_rerank(query=query, docs=merged_docs, top_n=settings.RETRIEVAL_FINAL_TOP_N)  # 3
+else:
+    ranked_docs = rerank_documents(query=query, docs=merged_docs, top_n=settings.RETRIEVAL_FINAL_TOP_N)  # 3
+
+return ranked_docs
+```
+
+升级后 pipeline（推荐形态）：
+- vector search top20
+- cross-encoder rerank (`bge-reranker-base`)
+- top3
+- LLM answer
+
+验收指标（与现状对比）：
+- `retrieval_recall`（是否提升）
+- `answer_correctness`（是否提升）
+- p50/p95 latency（是否在可接受范围）
+- 失败回退率（cross-encoder -> linear）
 
 ### 2.3 分流策略升级
 - 当前分流基于规则/分词词表。
@@ -94,3 +172,5 @@ correctness_auto_confirm
 correctness_oracle_edit
 hitl_gain = oracle_edit - auto_confirm
 所以：先 auto-confirm 测是对的，但请务必再加 oracle_edit 对照，不然你评估不到 HITL 本身对 correctness 的贡献。
+
+

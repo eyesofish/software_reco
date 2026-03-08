@@ -14,7 +14,7 @@ from .logging_utils import elapsed_ms, error_fields, log_event, log_exception, n
 from .observability import wrap_openai
 
 logger = logging.getLogger(__name__)
-TAVILY_MAX_RESULTS = 3
+TAVILY_MAX_RESULTS = 2
 
 
 def _search_tool_impl_name() -> str:

@@ -1,6 +1,8 @@
 import hashlib
 import logging
+import math
 import re
+from threading import Lock
 from typing import Any, Iterable, List
 
 from .config import settings
@@ -21,6 +23,10 @@ _SOURCE_PRIOR = {
     "tavily": 0.8,
 }
 
+_CROSS_ENCODER_MODEL: Any = None
+_CROSS_ENCODER_INIT_FAILED = False
+_CROSS_ENCODER_INIT_LOCK = Lock()
+
 
 def _get_field(obj: Any, field: str, default: Any = None) -> Any:
     if isinstance(obj, dict):
@@ -33,6 +39,103 @@ def _safe_float(value: Any, default: float = 0.0) -> float:
         return float(value)
     except (TypeError, ValueError):
         return default
+
+
+def _sigmoid(value: float) -> float:
+    if value >= 0:
+        z = math.exp(-value)
+        return 1.0 / (1.0 + z)
+    z = math.exp(value)
+    return z / (1.0 + z)
+
+
+def _normalize_model_score(raw_score: Any) -> float:
+    score = _safe_float(raw_score, default=0.0)
+    if 0.0 <= score <= 1.0:
+        return score
+    return _sigmoid(score)
+
+
+def _load_cross_encoder() -> Any:
+    global _CROSS_ENCODER_MODEL, _CROSS_ENCODER_INIT_FAILED
+
+    if not settings.RERANK_MODEL_ENABLED:
+        return None
+    if _CROSS_ENCODER_MODEL is not None:
+        return _CROSS_ENCODER_MODEL
+    if _CROSS_ENCODER_INIT_FAILED:
+        return None
+
+    with _CROSS_ENCODER_INIT_LOCK:
+        if _CROSS_ENCODER_MODEL is not None:
+            return _CROSS_ENCODER_MODEL
+        if _CROSS_ENCODER_INIT_FAILED:
+            return None
+
+        try:
+            from sentence_transformers import CrossEncoder
+
+            _CROSS_ENCODER_MODEL = CrossEncoder(
+                model_name_or_path=settings.RERANK_MODEL_NAME,
+                device=settings.RERANK_MODEL_DEVICE,
+                max_length=settings.RERANK_MODEL_MAX_LENGTH,
+                local_files_only=settings.RERANK_MODEL_LOCAL_FILES_ONLY,
+            )
+            log_event(
+                logger,
+                logging.INFO,
+                "search.rerank.model.ready",
+                component="search",
+                model=settings.RERANK_MODEL_NAME,
+                device=settings.RERANK_MODEL_DEVICE,
+                local_files_only=settings.RERANK_MODEL_LOCAL_FILES_ONLY,
+            )
+        except Exception as exc:
+            _CROSS_ENCODER_INIT_FAILED = True
+            log_event(
+                logger,
+                logging.WARNING,
+                "search.rerank.model.fail",
+                component="search",
+                model=settings.RERANK_MODEL_NAME,
+                device=settings.RERANK_MODEL_DEVICE,
+                local_files_only=settings.RERANK_MODEL_LOCAL_FILES_ONLY,
+                error_type=type(exc).__name__,
+                error=str(exc),
+            )
+            return None
+    return _CROSS_ENCODER_MODEL
+
+
+def _score_with_cross_encoder(query: str, docs: List[Document]) -> List[float] | None:
+    model = _load_cross_encoder()
+    if model is None or not docs:
+        return None
+
+    query_text = str(query or "").strip()
+    if not query_text:
+        return None
+
+    pairs = [(query_text, str(_get_field(doc, "content", "") or "")) for doc in docs]
+    try:
+        raw_scores = model.predict(
+            pairs,
+            batch_size=settings.RERANK_MODEL_BATCH_SIZE,
+            show_progress_bar=False,
+        )
+    except Exception as exc:
+        log_event(
+            logger,
+            logging.WARNING,
+            "search.rerank.model.predict.fail",
+            component="search",
+            model=settings.RERANK_MODEL_NAME,
+            error_type=type(exc).__name__,
+            error=str(exc),
+        )
+        return None
+
+    return [_normalize_model_score(item) for item in raw_scores]
 
 
 def _resolve_doc_id(metadata: Any, content: str, source: str, index: int) -> str:
@@ -159,21 +262,39 @@ def rerank_documents(query: str, docs: List[Document], top_n: int) -> List[Docum
         return []
 
     limit = max(1, int(top_n))
-    query_tokens = _tokenize(query)
-    scored_docs: List[Document] = []
+    scored_docs: List[Document] = list(docs)
+    mode = "linear"
 
-    for doc in docs:
-        retrieval_score = _score_from_retrieval(doc)
-        overlap_score = _score_from_keyword_overlap(query_tokens, doc)
-        source_score = _score_from_source_prior(doc)
+    cross_encoder_scores = _score_with_cross_encoder(query, scored_docs)
+    if cross_encoder_scores is not None and len(cross_encoder_scores) == len(scored_docs):
+        for doc, rerank_score in zip(scored_docs, cross_encoder_scores):
+            _apply_rerank_score(doc, rerank_score)
+        mode = "cross_encoder"
+    else:
+        query_tokens = _tokenize(query)
+        for doc in scored_docs:
+            retrieval_score = _score_from_retrieval(doc)
+            overlap_score = _score_from_keyword_overlap(query_tokens, doc)
+            source_score = _score_from_source_prior(doc)
 
-        rerank_score = (
-            (_RETRIEVAL_SCORE_WEIGHT * retrieval_score)
-            + (_KEYWORD_OVERLAP_WEIGHT * overlap_score)
-            + (_SOURCE_WEIGHT * source_score)
-        )
-        _apply_rerank_score(doc, rerank_score)
-        scored_docs.append(doc)
+            rerank_score = (
+                (_RETRIEVAL_SCORE_WEIGHT * retrieval_score)
+                + (_KEYWORD_OVERLAP_WEIGHT * overlap_score)
+                + (_SOURCE_WEIGHT * source_score)
+            )
+            _apply_rerank_score(doc, rerank_score)
+
+    log_event(
+        logger,
+        logging.INFO,
+        "search.rerank.rank.done",
+        component="search",
+        mode=mode,
+        model=settings.RERANK_MODEL_NAME if mode == "cross_encoder" else None,
+        query=text_preview(query),
+        docs=len(scored_docs),
+        top_n=limit,
+    )
 
     ranked_docs = sorted(
         scored_docs,

@@ -14,7 +14,7 @@ from langgraph.func import task
 from langgraph.types import interrupt
 
 # 导入新的工具系统
-from .retriever import retrieve
+from .retriever import retrieve, rerank_documents
 from .tools import pre_drawing_tool, draw_image_tool
 from .logging_utils import elapsed_ms, error_fields, log_event, log_exception, new_trace_id, text_preview
 from .observability import traceable, wrap_openai
@@ -1191,13 +1191,21 @@ def human_confirmation_node(state: AgentState) -> Dict[str, Any]:
 
 @traceable(name="retrieve_multi_subquery")
 def retrieve_node(state: AgentState) -> Dict[str, Any]:
-    """Retrieve node: search evidence for each sub-question."""
+    """Retrieve node: global merge -> dedup -> rerank -> top3 evidence."""
+    MAX_EVIDENCE = 3
+    RERANK_TOP_N = 5
     sub_questions = _get_field(state, "sub_questions", [])
-    evidence = _get_field(state, "evidence", [])
     retrieval_records = list(_get_field(state, "retrieval_records", []) or [])
-    retrieved_doc_ids = list(_get_field(state, "retrieved_doc_ids", []) or [])
     iteration_count = _get_field(state, "iteration_count", 0)
     trace_id = new_trace_id("search")
+    global_query = str(_get_field(state, "user_query", "") or "").strip()
+    if not global_query:
+        global_query = " ".join(
+            str(item or "").strip()
+            for item in sub_questions
+            if str(item or "").strip()
+        )
+    all_docs: List[Document] = []
 
     log_event(
         logger,
@@ -1208,6 +1216,7 @@ def retrieve_node(state: AgentState) -> Dict[str, Any]:
         scene="retrieve_node",
         iteration=iteration_count,
         sub_question_count=len(sub_questions),
+        global_top_n=MAX_EVIDENCE,
     )
 
     for index, question in enumerate(sub_questions, start=1):
@@ -1227,7 +1236,7 @@ def retrieve_node(state: AgentState) -> Dict[str, Any]:
             top_k=settings.TOP_K,
         )
         search_results = retrieve(question, top_k=settings.TOP_K)
-        quality_score = min(0.9, 0.5 + (len(search_results) * 0.1))
+        all_docs.extend(search_results)
         subquery_id = f"sq_{index}"
         retrieval_record = _build_retrieval_record(
             subquery_id=subquery_id,
@@ -1235,10 +1244,6 @@ def retrieve_node(state: AgentState) -> Dict[str, Any]:
             docs=search_results,
         )
         retrieval_records.append(retrieval_record)
-        retrieved_doc_ids = _merge_doc_ids(
-            retrieved_doc_ids,
-            retrieval_record.get("retrieved_doc_ids", []),
-        )
         log_event(
             logger,
             logging.INFO,
@@ -1251,28 +1256,52 @@ def retrieve_node(state: AgentState) -> Dict[str, Any]:
             question_count=len(sub_questions),
             query=question_hint,
             docs=len(search_results),
-            quality_score=round(quality_score, 4),
+            cumulative_docs=len(all_docs),
             elapsed_ms=elapsed_ms(question_started_at),
         )
 
-        evidence_item = {
-            "question": question,
-            "documents": search_results,
-            "search_results": [
-                {
-                    "content": doc.content,
-                    "score": doc.score,
-                    "doc_id": _extract_doc_id(doc, fallback_prefix=subquery_id, index=doc_index),
-                    "source": str(_get_field(_get_field(doc, "metadata", {}), "source", "") or ""),
-                    "retrieval_source": str(
-                        _get_field(_get_field(doc, "metadata", {}), "retrieval_source", "") or ""
-                    ),
-                }
-                for doc_index, doc in enumerate(search_results, start=1)
-            ],
-            "quality_score": quality_score,
+    seen_doc_ids: set[str] = set()
+    unique_docs: List[Document] = []
+    for doc_index, doc in enumerate(all_docs, start=1):
+        metadata = _get_field(doc, "metadata", {}) or {}
+        doc_id = str(_get_field(metadata, "doc_id", "") or "").strip()
+        if not doc_id:
+            doc_id = _extract_doc_id(doc, fallback_prefix="merged", index=doc_index)
+            if isinstance(metadata, dict):
+                metadata["doc_id"] = doc_id
+            else:
+                _set_field(metadata, "doc_id", doc_id)
+        if doc_id in seen_doc_ids:
+            continue
+        seen_doc_ids.add(doc_id)
+        unique_docs.append(doc)
+
+    ranked_docs = rerank_documents(query=global_query, docs=unique_docs, top_n=RERANK_TOP_N)
+    final_docs = ranked_docs[:MAX_EVIDENCE]
+    quality_score = min(0.9, 0.5 + (len(final_docs) * 0.1))
+
+    retrieved_doc_ids: List[str] = []
+    evidence: List[Dict[str, Any]] = []
+    for doc_index, doc in enumerate(final_docs, start=1):
+        doc_id = _extract_doc_id(doc, fallback_prefix="global", index=doc_index)
+        if doc_id not in retrieved_doc_ids:
+            retrieved_doc_ids.append(doc_id)
+        metadata = _get_field(doc, "metadata", {}) or {}
+        search_result = {
+            "content": doc.content,
+            "score": doc.score,
+            "doc_id": doc_id,
+            "source": str(_get_field(metadata, "source", "") or ""),
+            "retrieval_source": str(_get_field(metadata, "retrieval_source", "") or ""),
         }
-        evidence.append(evidence_item)
+        evidence.append(
+            {
+                "question": global_query,
+                "documents": [doc],
+                "search_results": [search_result],
+                "quality_score": quality_score,
+            }
+        )
 
     log_event(
         logger,
@@ -1282,7 +1311,11 @@ def retrieve_node(state: AgentState) -> Dict[str, Any]:
         trace_id=trace_id,
         scene="retrieve_node",
         iteration=iteration_count,
-        total_evidence=len(evidence),
+        total_collected_docs=len(all_docs),
+        deduped_docs=len(unique_docs),
+        ranked_docs=len(ranked_docs),
+        evidence_items=len(evidence),
+        total_evidence_docs=len(final_docs),
         total_retrieved_doc_ids=len(retrieved_doc_ids),
     )
     return {
@@ -1476,9 +1509,10 @@ def coverage_check_node(state: AgentState) -> Dict[str, Any]:
     logger.info(f"检查覆盖率: {len(evidence)}/{len(sub_questions)}")
     
     # 计算覆盖率：已解答的子问题数量 / 总子问题数量
-    covered_questions = len([item for item in evidence if _get_field(item, "documents", [])])
     total_questions = len(sub_questions)
-    
+    covered_questions = len([item for item in evidence if _get_field(item, "documents", [])])
+    covered_questions = min(covered_questions, total_questions)
+
     coverage = covered_questions / total_questions if total_questions > 0 else 0
     
     # 检查是否需要继续细化
