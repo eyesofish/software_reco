@@ -48,6 +48,8 @@ htmlcov/
 # Local vector DB / runtime data
 **/chroma_db/
 **/.runtime/
+fastapi_demo/ingest_docs/
+fastapi_demo/evaluation/previews/
 steps/step1.md
 steps/step2.md
 fastapi_demo/software_recommend_system/Rules.txt
@@ -80,3 +82,9 @@ npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
 pnpm-debug.log*
+
+# ========================
+# Global Docs / Text
+# ========================
+*.md
+*.txt

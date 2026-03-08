@@ -15,6 +15,7 @@ from typing import Any, Dict, Optional, Set
 from uuid import uuid4
 
 import openai
+from dotenv import load_dotenv
 from langsmith import Client, evaluate
 from langsmith.evaluation import EvaluationResult
 from langsmith.schemas import Example, Run
@@ -23,7 +24,9 @@ from software_recommend_system.observability import traceable, wrap_openai
 from software_recommend_system.state import AgentState
 
 
-JUDGE_MODEL = os.getenv("EVAL_JUDGE_MODEL", "gpt-4o-mini")
+load_dotenv()
+
+JUDGE_MODEL = os.getenv("EVAL_JUDGE_MODEL") or os.getenv("LLM_MODEL", "qwen2.5-7b-instruct")
 AGENT = None
 JUDGE_CLIENT: Optional[openai.OpenAI] = None
 

@@ -1,7 +1,7 @@
 import logging
 import re
 from pathlib import Path
-from typing import Dict, List
+from typing import Dict, List, Set
 
 from app.core.config import settings
 from software_recommend_system.config import settings as rag_settings
@@ -70,10 +70,30 @@ def _list_candidate_files(root_path: Path) -> List[Path]:
     )
 
 
-def _build_raw_document(file_path: Path, ingest_root: Path, content: str) -> Dict[str, object]:
+def _build_raw_document(
+    file_path: Path,
+    ingest_root: Path,
+    content: str,
+    used_doc_ids: Set[str],
+) -> Dict[str, object]:
     relative = file_path.relative_to(ingest_root).as_posix()
+    preferred_doc_id = _safe_doc_id(file_path.name)
+    doc_id = preferred_doc_id or _safe_doc_id(relative) or f"doc_{len(used_doc_ids) + 1}"
+    if doc_id in used_doc_ids:
+        base_doc_id = doc_id
+        suffix = 2
+        while f"{base_doc_id}__{suffix}" in used_doc_ids:
+            suffix += 1
+        doc_id = f"{base_doc_id}__{suffix}"
+        logger.warning(
+            "startup ingest doc_id collision: file=%s base_doc_id=%s resolved_doc_id=%s",
+            file_path,
+            base_doc_id,
+            doc_id,
+        )
+    used_doc_ids.add(doc_id)
     return {
-        "id": _safe_doc_id(relative),
+        "id": doc_id,
         "content": content,
         "metadata": {
             "source": "startup_ingest",
@@ -141,6 +161,7 @@ def run_startup_ingestion_if_needed() -> None:
 
     total_files = 0
     total_vectors = 0
+    used_doc_ids: Set[str] = set()
 
     for file_path in files:
         content = _read_file_content(file_path)
@@ -148,7 +169,12 @@ def run_startup_ingestion_if_needed() -> None:
             logger.info("startup ingest skip empty file: %s", file_path)
             continue
 
-        raw_doc = _build_raw_document(file_path=file_path, ingest_root=ingest_root, content=content)
+        raw_doc = _build_raw_document(
+            file_path=file_path,
+            ingest_root=ingest_root,
+            content=content,
+            used_doc_ids=used_doc_ids,
+        )
         logger.info("startup ingest processing file=%s", file_path)
 
         try:

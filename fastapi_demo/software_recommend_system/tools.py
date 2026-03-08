@@ -127,6 +127,13 @@ def similarity_search(query: str, k: int = 5, trace_id: str | None = None) -> Li
             doc_score = distance_row[index] if index < len(distance_row) and distance_row[index] is not None else 0.0
             metadata_obj = {
                 "source": doc_metadata.get("source", ""),
+                # Preserve the upstream source document id so recall eval can
+                # match retrieved ids with dataset gold_doc_ids.
+                "doc_id": (
+                    doc_metadata.get("source_doc_id")
+                    or doc_metadata.get("doc_id")
+                    or doc_metadata.get("filename")
+                ),
                 "author": doc_metadata.get("author"),
                 "published_date": doc_metadata.get("published_date"),
                 "updated_date": doc_metadata.get("updated_date"),

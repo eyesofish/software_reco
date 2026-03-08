@@ -1,89 +1,96 @@
-﻿# Workflow: FastAPI 推荐请求处理
+﻿# 工作流（当前计划）
 
-## Trigger
-- API: `POST /api/v1/recommend`
+## 1. 目标
+- 保持当前 `/recommend` 行为稳定。
+- 以最小风险新增流式输出能力。
+- 引入 0.6B 小模型提升分流质量，同时保留规则稳定性。
+- 通过 rerank 提升检索结果质量。
 
-## Steps
-1. 接收请求并执行参数校验。
-2. 创建带路由的推荐 Agent。
-3. 使用请求参数初始化一次执行的 `AgentState`。
-4. 异步执行 Agent 工作流并获得结果。
-5. 提取结果中的核心字段并组装统一响应。
-6. 返回推荐结果。
+## 2. 已确认的设计决策
 
-## Key State / Artifact
-- `RecommendationRequest`（`query`、`timeout`、`max_iterations`）
-- `AgentState`（`user_query`、`timeout_budget`、`max_iterations`、`start_time`）
-- `RecommendationResponse`（`status`、`final_answer`、`candidates`、`mode`、`iteration_count`、`coverage`）
+### 2.1 `@task` 使用范围
+- `@task` **不是**给所有 node 函数统一加的。
+- 当前是 StateGraph 结构，node 函数返回 `dict`。
+- 推荐做法：把外部高耗时调用（LLM/搜索/网络/IO）抽成 `@task` 单元。
+- 现有 `@task` 位置：
+  - `nodes.py:596`
+  - `nodes.py:741`
 
-## Termination
-- 正常结束条件：返回推荐响应（`status=success`）。
-- 异常/失败分支：请求校验失败返回 422；执行异常返回 500。
+### 2.2 检索 rerank 教程（应该怎么做）
+- 目标：在“向量检索 + Tavily 合并”之后、下游使用之前，增加二阶段 rerank。
+- 步骤 1（开关控制）：新增/启用 `RETRIEVAL_ENABLE_RERANK`，默认 `false`，灰度时再打开。
+- 步骤 2（实现函数）：在 `retriever.py` 新增 `rerank_documents(query, docs, top_n)`，输入合并后的 `docs`，输出重排后的 `top_n`。
+- 步骤 3（接入点）：在 `retrieve()` 里完成 `merged_docs` 后调用 rerank，而不是在 node 层重复做。
+- 步骤 4（最小可用打分）：先用可解释的线性分数（向量分 + 关键词重合分 + 来源权重），后续再替换 Cross-Encoder/LLM reranker。
+- 步骤 5（返回约定）：返回前统一写回 `metadata.score`（rerank 后分数），并按降序排序，保证下游一致消费。
+- 步骤 6（日志与观测）：记录 `query`、`before_count`、`after_count`、前 5 条 `doc_id+score`，便于对齐 `retrieval_recall`。
+- 步骤 7（验收）：至少对比 `Recall@K / MRR / answer_correctness` 三项，确认开启 rerank 后无回归再默认打开。
 
-# Workflow: Agent 路由执行流程（RAG / Chat / Draw）
+### 2.3 分流策略升级
+- 当前分流基于规则/分词词表。
+- 引入 0.6B 小模型做分流，但采用**混合分流**：
+  - 先走硬规则
+  - 再走模型判别
+  - 低置信度回退到现有规则/默认策略
+- 不建议一步到位“全量替换规则”。
 
-## Trigger
-- 事件：`create_rag_with_routing_agent()` 创建的工作流被 `ainvoke` 调用（来源包括 API、CLI、服务层调用）。
+## 3. 推荐改动顺序
 
-## Steps
-1. 进入入口节点，记录会话消息并初始化执行时间。
-2. 对用户查询进行规范化。
-3. 进行模式路由，选择 `rag`、`chat` 或 `draw` 分支。
-4. 若进入 `rag` 分支：生成子问题，收集证据，评估证据，生成候选方案，执行覆盖率检查。
-5. 在 `rag` 分支中按条件循环：满足继续条件时回到证据收集，不满足时进入答案生成。
-6. 若进入 `chat` 分支：直接生成聊天回答后结束。
-7. 若进入 `draw` 分支：先生成绘图参数，再执行绘图后结束。
+### 阶段一：先稳质量（先于流式传输）
+1. 保留现有规则分流作为基线。
+2. 接入 0.6B 混合分流：
+   - 输出严格 JSON：`mode`、`confidence`、`reason`
+   - 低于阈值回退（建议阈值 `0.7`）。
+3. 在检索链路接入 rerank（合并后、下游使用前）。
+4. 仅对外部高耗时调用增加/调整 `@task`。
 
-## Key State / Artifact
-- `AgentState.mode`
-- `AgentState.normalized_query`、`constraints`、`sub_questions`
-- `AgentState.evidence`、`candidates`
-- `AgentState.coverage`、`needs_refinement`、`iteration_count`
-- `AgentState.final_answer`、`drawing_params`、`image_result`、`messages`
+### 阶段二：安全接入流式输出
+1. 先定义流式协议（先不改业务逻辑）：
+   - 事件类型：`started`、`progress`、`awaiting_human_confirmation`、`final`、`error`、`done`
+   - 通用字段：`session_id`、`event`、`timestamp`、`trace_id`
+2. 新增 `/recommend/stream`（SSE 或 `StreamingResponse`），保留旧 `/recommend`。
+3. 将执行路径改为可发出“阶段级”流事件。
+4. 前端按会话消费流（每个会话独立连接与 loading 状态）。
 
-## Termination
-- 正常结束条件：`rag` 分支在满足终止条件后生成最终答案并结束；`chat` 分支完成回答即结束；`draw` 分支完成图像生成即结束。
-- 异常/失败分支：节点执行异常向上抛出，由调用方流程处理失败结果。
+### 阶段三：增强项
+1. 可选：接入 LLM token 级流式输出。
+2. 在确认瓶颈后，扩展 `@task` 覆盖面。
+3. 在流式链路稳定后，再评估是否弱化/下线旧非流式接口。
 
-# Workflow: 向量库初始化流程
+## 4. 验收标准
+- 混合分流上线后，分流误判率下降，或至少不高于当前规则版。
+- rerank 上线后，候选结果相关性稳定提升（有离线/在线对比指标）。
+- 新增 `/recommend/stream` 不影响现有 `/recommend`。
+- `awaiting_human_confirmation` 能正确通过流式事件传递并被前端消费。
+- 会话切换时不出现 loading/流状态串话。
 
-## Trigger
-- API: `POST /api/v1/initialize-db`
-- CLI: 启动 `run_agent.py` 时传入 `--init-db`
+## 5. 实施备注
+- 建议以开关方式渐进发布：
+  - `ROUTING_USE_SMALL_MODEL`
+  - `RETRIEVAL_ENABLE_RERANK`
+  - `RECOMMEND_ENABLE_STREAM`
+- 新链路统一使用结构化日志（分流决策、rerank 分数、stream 事件）。
 
-## Steps
-1. 构建初始化文档集合（示例软件资料与元数据）。
-2. 调用向量库初始化入口。
-3. 写入目标向量集合并完成初始化。
-4. 返回初始化结果。
 
-## Key State / Artifact
-- 初始化文档列表（`content` + `metadata`）
-- 向量集合：`software_recommendations`
-- 返回状态：成功/失败标记与消息
+结论：可以先把 HITL 做成“自动 confirm”来测，但这只能作为基线，不是最终 correctness 评估。
 
-## Termination
-- 正常结束条件：初始化成功并返回成功状态。
-- 异常/失败分支：初始化失败时返回失败结果；API 分支返回 500。
+建议你这样做：
 
-# Workflow: CLI 推荐会话流程
-
-## Trigger
-- 事件：执行 `software_recommend_system/run_agent.py`
-
-## Steps
-1. 解析命令行参数并设置运行模式。
-2. 按参数决定是否先执行向量库初始化。
-3. 创建带路由的推荐 Agent。
-4. 单次模式：读取 `--query`，创建 `AgentState`，执行一次 Agent。
-5. 交互模式：循环读取用户输入，更新状态并反复执行 Agent。
-6. 输出每次执行结果。
-
-## Key State / Artifact
-- CLI 参数（`query`、`timeout`、`max_iterations`、`init_db`、`debug`）
-- 会话中的 `AgentState`（交互模式下跨轮更新）
-- 每轮输出的推荐结果字段
-
-## Termination
-- 正常结束条件：单次模式完成一次执行；交互模式收到 `quit/exit` 后退出。
-- 异常/失败分支：`KeyboardInterrupt` 或运行异常导致当前流程中断/退出。
+先跑 Baseline A（auto_confirm）
+中断后自动 action=confirm 继续。
+这是“无人工干预”的端到端正确性基线。
+再加 Baseline B（oracle_edit）
+用标注集里预先写好的“理想子问题编辑结果”去 resume（action=edit）。
+这是 HITL 的“上界”，可衡量 HITL 潜力。
+正式 correctness 指标
+用 reference_answer + rubric(关键点) 做 LLM-as-judge（0-1分或 pass/fail）。
+推荐同时记 groundedness（答案是否被检索证据支持）。
+retrieval recall 不只看合并后
+你说的“子问题检索结果合并后算 recall”可以做。
+但要再加一个“子问题级 recall”避免被大并集掩盖问题。
+公式可用：recall = |retrieved_doc_ids ∩ gold_doc_ids| / |gold_doc_ids|。
+关键对比指标
+correctness_auto_confirm
+correctness_oracle_edit
+hitl_gain = oracle_edit - auto_confirm
+所以：先 auto-confirm 测是对的，但请务必再加 oracle_edit 对照，不然你评估不到 HITL 本身对 correctness 的贡献。
