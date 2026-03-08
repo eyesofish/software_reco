@@ -35,6 +35,14 @@ class Settings(BaseSettings):
     EMBEDDING_LOCAL_FILES_ONLY: bool = os.getenv("EMBEDDING_LOCAL_FILES_ONLY", "true").lower() == "true"
     TAVILY_API_KEY: str = os.getenv("TAVILY_API_KEY", "")
 
+    ROUTER_ENABLE: bool = os.getenv("ROUTER_ENABLE", "true").lower() == "true"
+    ROUTER_BASE_URL: str = os.getenv("ROUTER_BASE_URL", "http://127.0.0.1:18001/v1")
+    ROUTER_API_KEY: str = os.getenv("ROUTER_API_KEY", "LOCAL_DUMMY_KEY")
+    ROUTER_MODEL: str = os.getenv("ROUTER_MODEL", "qwen3-0.6b-instruct-router")
+    ROUTER_TIMEOUT_SECONDS: float = float(os.getenv("ROUTER_TIMEOUT_SECONDS", "8"))
+    ROUTER_CONFIDENCE_THRESHOLD: float = float(os.getenv("ROUTER_CONFIDENCE_THRESHOLD", "0.65"))
+    ROUTER_FALLBACK_MODE: str = os.getenv("ROUTER_FALLBACK_MODE", "rag")
+
     CHROMA_DB_PATH: str = os.getenv("CHROMA_DB_PATH", "./chroma_db")
     EMBEDDING_MODEL: str = os.getenv("EMBEDDING_MODEL", "Qwen/Qwen3-Embedding-0.6B")
     CHUNK_SIZE: int = int(os.getenv("CHUNK_SIZE", "800"))

@@ -18,6 +18,7 @@ from .retriever import retrieve, rerank_documents
 from .tools import pre_drawing_tool, draw_image_tool
 from .logging_utils import elapsed_ms, error_fields, log_event, log_exception, new_trace_id, text_preview
 from .observability import traceable, wrap_openai
+from .router import route_query
 
 logger = logging.getLogger(__name__)
 
@@ -654,6 +655,23 @@ def _has_rag_intent(query: str) -> bool:
         return False
     return any(pattern.search(normalized) for pattern in RAG_INTENT_PATTERNS)
 
+
+def _heuristic_route_mode(query: str) -> tuple[str, List[str]]:
+    if _is_drawing_request(query):
+        return "direct", []
+    if _is_chat_first_query(query) and not _has_rag_intent(query):
+        return "direct", []
+
+    tech_hits = _collect_tech_hits(query)
+    has_rag_intent = _has_rag_intent(query)
+    if has_rag_intent:
+        return "rag", tech_hits
+    if len(tech_hits) >= 2:
+        return "rag", tech_hits
+    if len(tech_hits) == 1 and tech_hits[0].lower() not in SHORT_AMBIGUOUS_TECH_TERMS:
+        return "rag", tech_hits
+    return "direct", tech_hits
+
 def entry_node(state: AgentState) -> Dict[str, Any]:
     """用户输入节点"""
     logger.info(f"接收用户查询: {state.user_query[:50]}...")
@@ -669,35 +687,41 @@ def entry_node(state: AgentState) -> Dict[str, Any]:
 
 @traceable(name="routing_decision")
 def routing_node(state: AgentState) -> Dict[str, Any]:
-    """Routing node: decide between rag/chat/draw."""
+    """Routing node: decide between rag/direct/hitl."""
     user_query = _get_field(state, "user_query", "")
     routing_query = _extract_current_user_query(user_query)
+    started_at = time.perf_counter()
+    confidence = 0.0
+    reason = "router_disabled_heuristic"
+    fallback_used = False
+    tech_hits: List[str] = []
 
-    if _is_drawing_request(routing_query):
-        mode = "draw"
-        tech_hits: List[str] = []
-    elif _is_chat_first_query(routing_query) and not _has_rag_intent(routing_query):
-        mode = "chat"
-        tech_hits = []
+    if settings.ROUTER_ENABLE:
+        decision = route_query(
+            routing_query,
+            context_hint=_get_field(state, "normalized_query", "") or None,
+        )
+        mode = decision.mode
+        confidence = decision.confidence
+        reason = decision.reason
+        fallback_used = decision.fallback_used
     else:
-        tech_hits = _collect_tech_hits(routing_query)
-        has_rag_intent = _has_rag_intent(routing_query)
-        if has_rag_intent:
-            mode = "rag"
-        elif len(tech_hits) >= 2:
-            mode = "rag"
-        elif len(tech_hits) == 1 and tech_hits[0].lower() not in SHORT_AMBIGUOUS_TECH_TERMS:
-            mode = "rag"
-        else:
-            mode = "chat"
+        mode, tech_hits = _heuristic_route_mode(routing_query)
 
-    logger.info(
-        "route mode=%s raw_query=%r routing_query=%r tech_hits=%s",
-        mode,
-        user_query[:120],
-        routing_query[:120],
-        tech_hits[:8],
+    log_event(
+        logger,
+        logging.INFO,
+        "routing_decision",
+        query=text_preview(routing_query, 200),
+        mode=mode,
+        confidence=round(confidence, 4),
+        fallback_used=fallback_used,
+        latency_ms=elapsed_ms(started_at),
+        reason=text_preview(reason, 160),
+        router_enabled=settings.ROUTER_ENABLE,
     )
+    if tech_hits:
+        logger.debug("routing heuristic tech_hits=%s", tech_hits[:8])
     return {"mode": mode}
 @task
 def normalize_query_with_llm(model: str, prompt: str, query: str):
@@ -1572,65 +1596,79 @@ def answer_generation_node(state: AgentState) -> Dict[str, Any]:
 
 @traceable(name="final_generation_chat")
 def chat_answer_generation_node(state: AgentState) -> Dict[str, Any]:
-    """Answer generation node (chat mode with retrieval context)."""
+    """Answer generation node for direct/chat branch (retrieval optional)."""
     user_query = _get_field(state, "user_query", "")
     retrieval_query = _extract_current_user_query(user_query) or user_query
-    retrieval_trace_id = new_trace_id("search")
-    log_event(
-        logger,
-        logging.INFO,
-        "search.chat_retrieval.start",
-        component="search",
-        trace_id=retrieval_trace_id,
-        scene="chat_answer_generation",
-        query=text_preview(retrieval_query),
-        top_k=settings.TOP_K,
-    )
+    mode = str(_get_field(state, "mode", "") or "").strip().lower()
 
     messages = list(_get_field(state, "messages", []) or [])
     if not messages:
         messages = [{"role": "user", "content": user_query}]
 
+    retrieval_records = list(_get_field(state, "retrieval_records", []) or [])
+    retrieved_doc_ids = list(_get_field(state, "retrieved_doc_ids", []) or [])
     retrieved_docs: List[Document] = []
-    retrieval_started_at = time.perf_counter()
-    try:
-        retrieved_docs = retrieve(retrieval_query, top_k=settings.TOP_K)
-    except Exception as exc:
+    if mode != "direct":
+        retrieval_trace_id = new_trace_id("search")
         log_event(
             logger,
-            logging.WARNING,
-            "search.chat_retrieval.fail",
+            logging.INFO,
+            "search.chat_retrieval.start",
             component="search",
             trace_id=retrieval_trace_id,
             scene="chat_answer_generation",
             query=text_preview(retrieval_query),
-            elapsed_ms=elapsed_ms(retrieval_started_at),
-            **error_fields(exc),
+            top_k=settings.TOP_K,
         )
-        retrieved_docs = []
 
-    log_event(
-        logger,
-        logging.INFO,
-        "search.chat_retrieval.done",
-        component="search",
-        trace_id=retrieval_trace_id,
-        scene="chat_answer_generation",
-        query=text_preview(retrieval_query),
-        docs=len(retrieved_docs),
-        elapsed_ms=elapsed_ms(retrieval_started_at),
-    )
-    chat_record = _build_retrieval_record(
-        subquery_id="chat_0",
-        subquery=retrieval_query,
-        docs=retrieved_docs,
-    )
-    retrieval_records = list(_get_field(state, "retrieval_records", []) or [])
-    retrieval_records.append(chat_record)
-    retrieved_doc_ids = _merge_doc_ids(
-        list(_get_field(state, "retrieved_doc_ids", []) or []),
-        chat_record.get("retrieved_doc_ids", []),
-    )
+        retrieval_started_at = time.perf_counter()
+        try:
+            retrieved_docs = retrieve(retrieval_query, top_k=settings.TOP_K)
+        except Exception as exc:
+            log_event(
+                logger,
+                logging.WARNING,
+                "search.chat_retrieval.fail",
+                component="search",
+                trace_id=retrieval_trace_id,
+                scene="chat_answer_generation",
+                query=text_preview(retrieval_query),
+                elapsed_ms=elapsed_ms(retrieval_started_at),
+                **error_fields(exc),
+            )
+            retrieved_docs = []
+
+        log_event(
+            logger,
+            logging.INFO,
+            "search.chat_retrieval.done",
+            component="search",
+            trace_id=retrieval_trace_id,
+            scene="chat_answer_generation",
+            query=text_preview(retrieval_query),
+            docs=len(retrieved_docs),
+            elapsed_ms=elapsed_ms(retrieval_started_at),
+        )
+        chat_record = _build_retrieval_record(
+            subquery_id="chat_0",
+            subquery=retrieval_query,
+            docs=retrieved_docs,
+        )
+        retrieval_records.append(chat_record)
+        retrieved_doc_ids = _merge_doc_ids(
+            retrieved_doc_ids,
+            chat_record.get("retrieved_doc_ids", []),
+        )
+    else:
+        log_event(
+            logger,
+            logging.INFO,
+            "search.chat_retrieval.skipped",
+            component="search",
+            scene="chat_answer_generation",
+            query=text_preview(retrieval_query),
+            reason="mode_direct",
+        )
 
     def _format_retrieved_context(docs: List[Document]) -> str:
         lines: List[str] = []

@@ -464,7 +464,7 @@ async def _execute_recommend_turn(
     graph_input: Any,
     config: Dict[str, Any],
     fallback_answer: Optional[str] = None,
-    fallback_mode: str = "chat",
+    fallback_mode: str = "direct",
     interrupt_source: str = "recommend",
 ) -> RecommendationResponse:
     try:
@@ -662,7 +662,7 @@ async def get_software_recommendation(request_data: RecommendationRequest):
                 status="success",
                 final_answer=memory_answer,
                 candidates=[],
-                mode="chat",
+                mode="direct",
                 iteration_count=0,
                 coverage=1.0,
                 session_id=session_id,
@@ -697,7 +697,7 @@ async def get_software_recommendation(request_data: RecommendationRequest):
                     graph_input=Command(resume=resume_payload),
                     config=config,
                     fallback_answer="当前没有待确认任务，请直接提交新的需求问题。",
-                    fallback_mode="chat",
+                    fallback_mode="direct",
                     interrupt_source="confirm_shortcut",
                 ),
                 session_id=session_id,

@@ -67,7 +67,7 @@ class RecommendationResponse(BaseModel):
         None,
         description="Candidate recommendations",
     )
-    mode: Optional[str] = Field(None, description="Mode used (rag/chat/draw)")
+    mode: Optional[str] = Field(None, description="Mode used (rag/direct/hitl)")
     iteration_count: Optional[int] = Field(None, description="Iteration count")
     coverage: Optional[float] = Field(None, description="Coverage score")
     session_id: Optional[str] = Field(None, description="Session id for resume")

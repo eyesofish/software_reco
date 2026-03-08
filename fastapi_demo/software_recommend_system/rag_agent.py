@@ -157,12 +157,12 @@ def create_rag_with_routing_agent():
     # 根据路由结果决定流程走向
     def route_based_on_mode(state: AgentState) -> str:
         """根据模式决定下一步"""
-        if state.mode == "rag":
+        if state.mode in {"rag", "hitl"}:
             return "rag"
         if state.mode == "draw":
             return "draw"
         else:
-            return "chat"
+            return "direct"
     
     # 添加条件边处理路由
     workflow.add_conditional_edges(
@@ -170,7 +170,7 @@ def create_rag_with_routing_agent():
         route_based_on_mode,
         {
             "rag": "sub_question_generation",  # RAG 分支
-            "chat": "chat_answer_generation",  # Chat 分支
+            "direct": "chat_answer_generation",  # Direct 分支
             "draw": "pre_drawing"              # 画图分支
         }
     )

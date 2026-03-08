@@ -26,6 +26,15 @@ class Settings:
     EMBEDDING_LOCAL_FILES_ONLY = os.getenv("EMBEDDING_LOCAL_FILES_ONLY", "true").lower() == "true"
     TAVILY_API_KEY = os.getenv("TAVILY_API_KEY", "")
 
+    # Router config (OpenAI-compatible local service)
+    ROUTER_ENABLE = os.getenv("ROUTER_ENABLE", "true").lower() == "true"
+    ROUTER_BASE_URL = os.getenv("ROUTER_BASE_URL", "http://127.0.0.1:18001/v1")
+    ROUTER_API_KEY = os.getenv("ROUTER_API_KEY", "LOCAL_DUMMY_KEY")
+    ROUTER_MODEL = os.getenv("ROUTER_MODEL", "qwen3-0.6b-instruct-router")
+    ROUTER_TIMEOUT_SECONDS = float(os.getenv("ROUTER_TIMEOUT_SECONDS", "8"))
+    ROUTER_CONFIDENCE_THRESHOLD = float(os.getenv("ROUTER_CONFIDENCE_THRESHOLD", "0.65"))
+    ROUTER_FALLBACK_MODE = os.getenv("ROUTER_FALLBACK_MODE", "rag")
+
     # Vector store + embedding config
     CHROMA_DB_PATH = os.getenv("CHROMA_DB_PATH", "./chroma_db")
     EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "Qwen/Qwen3-Embedding-0.6B")
