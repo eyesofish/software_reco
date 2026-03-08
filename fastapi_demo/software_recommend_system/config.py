@@ -39,6 +39,9 @@ class Settings:
     # Search config
     TOP_K = int(os.getenv("TOP_K", "5"))
     QUALITY_THRESHOLD = float(os.getenv("QUALITY_THRESHOLD", "0.6"))
+    RETRIEVAL_ENABLE_RERANK = os.getenv("RETRIEVAL_ENABLE_RERANK", "false").lower() == "true"
+    SUB_QUESTION_MIN_COUNT = max(1, int(os.getenv("SUB_QUESTION_MIN_COUNT", "2")))
+    SUB_QUESTION_MAX_COUNT = max(SUB_QUESTION_MIN_COUNT, int(os.getenv("SUB_QUESTION_MAX_COUNT", "3")))
 
     # Runtime config
     TIMEOUT_BUDGET = int(os.getenv("TIMEOUT_BUDGET", "60"))

@@ -879,21 +879,21 @@ def sub_question_generation_node(state: AgentState) -> Dict[str, Any]:
     """Sub-question generation node."""
     normalized_query = _get_field(state, "normalized_query", "")
     constraints = _get_field(state, "constraints", {})
+    min_sub_questions = max(1, int(getattr(settings, "SUB_QUESTION_MIN_COUNT", 2)))
+    max_sub_questions = max(min_sub_questions, int(getattr(settings, "SUB_QUESTION_MAX_COUNT", 3)))
 
     logger.info(f"Generating sub-questions for query: {normalized_query}")
 
     sub_questions = []
-    prompt="\n".join(
-                        [
-                            "You are a requirements analysis assistant for a software recommendation system.",
-                            "What core problem should this software solve, and who are the target users?",
-                            "Which software engineering domain does this requirement mainly belong to (e.g., recommendation systems, RAG, AI tools)?",
-                            "Are there explicit technology stack or runtime constraints (e.g., Java/Spring Boot, Python/FastAPI)?",
-                            "Does the system have non-functional requirements for performance, concurrency, or scalability?",
-                            "What data types are involved, and is a database or vector database required?",
-                            "What is the final delivery format of the software (web service, API, or tool platform)?",
-                            "Return only a JSON array or a JSON object containing the sub_questions field. Do not output any other text."
-                        ])
+    prompt = "\n".join(
+        [
+            "You are a requirements analysis assistant for a software recommendation system.",
+            f"Generate {min_sub_questions} to {max_sub_questions} concise and non-overlapping sub-questions.",
+            "Focus only on the most important dimensions: core problem/users, domain+stack constraints, and key non-functional/data requirements.",
+            f"Return only a JSON array (preferred length {min_sub_questions}-{max_sub_questions}) or a JSON object containing the sub_questions field.",
+            "Do not output any other text.",
+        ]
+    )
     try:
         future = sub_question_generation_with_llm(
             model=settings.LLM_MODEL,
@@ -934,10 +934,18 @@ def sub_question_generation_node(state: AgentState) -> Dict[str, Any]:
             parts = re.split(r'\band\b', normalized_query, flags=re.IGNORECASE)
             if len(parts) > 1:
                 sub_questions = [part.strip() for part in parts if part.strip()]
+    sub_questions = _enforce_sub_question_count(
+        sub_questions,
+        normalized_query,
+        min_count=min_sub_questions,
+        max_count=max_sub_questions,
+    )
 
     logger.warning(
-        "SUBQ_READY count=%d preview=%s",
+        "SUBQ_READY count=%d target=%d~%d preview=%s",
         len(sub_questions),
+        min_sub_questions,
+        max_sub_questions,
         sub_questions[:3],
     )
 
@@ -1012,6 +1020,51 @@ def _normalize_sub_questions(raw: Any) -> List[str]:
 
     collect(raw)
     return cleaned
+
+
+def _enforce_sub_question_count(
+    sub_questions: List[str],
+    normalized_query: str,
+    *,
+    min_count: int,
+    max_count: int,
+) -> List[str]:
+    result = _normalize_sub_questions(sub_questions)
+
+    if not result and str(normalized_query or "").strip():
+        result = [str(normalized_query).strip()]
+
+    if len(result) < min_count and str(normalized_query or "").strip():
+        parts = re.split(
+            r"\band\b|\bor\b|with|以及|并且|和|，|,|；|;",
+            normalized_query,
+            flags=re.IGNORECASE,
+        )
+        for part in parts:
+            candidate = str(part or "").strip()
+            if not candidate or candidate in result:
+                continue
+            result.append(candidate)
+            if len(result) >= min_count:
+                break
+
+    if len(result) < min_count:
+        fallback_templates = [
+            "What technology stack and runtime constraints should this solution satisfy?",
+            "What are the key non-functional requirements such as performance, scalability, and reliability?",
+            "What data and integration requirements should be considered?",
+        ]
+        for template in fallback_templates:
+            if template in result:
+                continue
+            result.append(template)
+            if len(result) >= min_count:
+                break
+
+    if len(result) > max_count:
+        result = result[:max_count]
+
+    return result
 
 
 @traceable(name="hitl_confirmation")

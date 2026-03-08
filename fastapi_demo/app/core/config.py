@@ -45,6 +45,9 @@ class Settings(BaseSettings):
 
     TOP_K: int = int(os.getenv("TOP_K", "5"))
     QUALITY_THRESHOLD: float = float(os.getenv("QUALITY_THRESHOLD", "0.6"))
+    RETRIEVAL_ENABLE_RERANK: bool = os.getenv("RETRIEVAL_ENABLE_RERANK", "false").lower() == "true"
+    SUB_QUESTION_MIN_COUNT: int = max(1, int(os.getenv("SUB_QUESTION_MIN_COUNT", "2")))
+    SUB_QUESTION_MAX_COUNT: int = max(SUB_QUESTION_MIN_COUNT, int(os.getenv("SUB_QUESTION_MAX_COUNT", "3")))
 
     TIMEOUT_BUDGET: int = int(os.getenv("TIMEOUT_BUDGET", "60"))
     MAX_ITERATIONS: int = int(os.getenv("MAX_ITERATIONS", "3"))
