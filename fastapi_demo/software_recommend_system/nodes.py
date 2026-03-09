@@ -898,6 +898,48 @@ def sub_question_generation_with_llm(model: str, prompt: str, query: str):
         raise
     _llm_invoke_done("sub_question_generation", model, trace_id, started_at, response)
     return response
+
+
+@task
+def retrieve_with_search(query: str, top_k: int):
+    return retrieve(query, top_k=top_k)
+
+
+@task
+def candidate_generation_with_llm(
+    model: str,
+    messages: List[Dict[str, str]],
+    temperature: float,
+):
+    client = _get_openai_client()
+    return client.chat.completions.create(
+        model=model,
+        messages=messages,
+        temperature=temperature,
+    )
+
+
+@task
+def chat_answer_with_llm(
+    model: str,
+    messages: List[Dict[str, str]],
+    temperature: float,
+    max_tokens: int,
+):
+    client = _get_openai_client()
+    return client.chat.completions.create(
+        model=model,
+        messages=messages,
+        temperature=temperature,
+        max_tokens=max_tokens,
+    )
+
+
+@task
+def draw_image_with_tool(structured_params: str):
+    return draw_image_tool(structured_params)
+
+
 @traceable(name="task_decomposition")
 def sub_question_generation_node(state: AgentState) -> Dict[str, Any]:
     """Sub-question generation node."""
@@ -1259,7 +1301,8 @@ def retrieve_node(state: AgentState) -> Dict[str, Any]:
             query=question_hint,
             top_k=settings.TOP_K,
         )
-        search_results = retrieve(question, top_k=settings.TOP_K)
+        search_results_future = retrieve_with_search(question, top_k=settings.TOP_K)
+        search_results = search_results_future.result()
         all_docs.extend(search_results)
         subquery_id = f"sq_{index}"
         retrieval_record = _build_retrieval_record(
@@ -1421,13 +1464,12 @@ def candidate_generation_node(state: AgentState) -> Dict[str, Any]:
 
     llm_candidates = []
     try:
-        client = _get_openai_client()
         trace_id, started_at = _llm_invoke_start(
             scene="candidate_generation",
             model=settings.LLM_MODEL,
             request_hint=f"evidence_items={len(evidence_payload)}",
         )
-        response = client.chat.completions.create(
+        response_future = candidate_generation_with_llm(
             model=settings.LLM_MODEL,
             messages=[
                 {
@@ -1440,8 +1482,9 @@ def candidate_generation_node(state: AgentState) -> Dict[str, Any]:
                 },
                 {"role": "user", "content": json.dumps(evidence_payload, ensure_ascii=False)}
             ],
-            temperature=0.4
+            temperature=0.4,
         )
+        response = response_future.result()
         _llm_invoke_done("candidate_generation", settings.LLM_MODEL, trace_id, started_at, response)
 
         content = ""
@@ -1623,7 +1666,8 @@ def chat_answer_generation_node(state: AgentState) -> Dict[str, Any]:
 
         retrieval_started_at = time.perf_counter()
         try:
-            retrieved_docs = retrieve(retrieval_query, top_k=settings.TOP_K)
+            retrieved_docs_future = retrieve_with_search(retrieval_query, top_k=settings.TOP_K)
+            retrieved_docs = retrieved_docs_future.result()
         except Exception as exc:
             log_event(
                 logger,
@@ -1722,18 +1766,18 @@ def chat_answer_generation_node(state: AgentState) -> Dict[str, Any]:
     )
 
     try:
-        client = _get_openai_client()
         trace_id, started_at = _llm_invoke_start(
             scene="chat_answer_generation",
             model=settings.LLM_MODEL,
             request_hint=f"messages={len(prepared_messages)}",
         )
-        response = client.chat.completions.create(
+        response_future = chat_answer_with_llm(
             model=settings.LLM_MODEL,
             messages=prepared_messages,
             temperature=0.7,
             max_tokens=max_output_tokens,
         )
+        response = response_future.result()
         _llm_invoke_done("chat_answer_generation", settings.LLM_MODEL, trace_id, started_at, response)
 
         final_answer = ""
@@ -1778,6 +1822,7 @@ def pre_drawing_node(state: AgentState) -> Dict[str, Any]:
 def draw_image_node(state: AgentState) -> Dict[str, Any]:
     """画图执行节点"""
     structured_params = _get_field(state, "drawing_params", "")
-    image_url = draw_image_tool(structured_params)
+    image_url_future = draw_image_with_tool(structured_params)
+    image_url = image_url_future.result()
     final_answer = f"图像已生成: {image_url}"
     return {"image_result": image_url, "final_answer": final_answer}

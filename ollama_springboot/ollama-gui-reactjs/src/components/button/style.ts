@@ -2,6 +2,7 @@ import styled from 'styled-components'
 
 export const StyledButton = styled.button`
   background-color: ${({ theme }) => theme.colors.accent};
+  border: none;
   border-radius: 8px;
   box-shadow: ${({ theme }) => theme.colors.shadowMedium};
   color: ${({ theme }) => theme.colors.hitlButtonText};
@@ -28,5 +29,6 @@ export const StyledButton = styled.button`
 
   svg {
     color: inherit;
+    pointer-events: none;
   }
 `
