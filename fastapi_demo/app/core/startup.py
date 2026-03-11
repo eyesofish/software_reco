@@ -88,6 +88,8 @@ def configure_runtime_file_logging() -> Path:
     logging.getLogger("software_recommend_system.nodes").setLevel(logging.INFO)
     logging.getLogger("software_recommend_system.ingestion.embedder").setLevel(logging.INFO)
     logging.getLogger("app.api.v1.routes").setLevel(logging.INFO)
+    logging.getLogger("app.api.v1.startup_ingest").setLevel(logging.INFO)
+    logging.getLogger("app.core.startup").setLevel(logging.INFO)
 
     logger.info(
         "runtime file logging enabled: embedding=%s tavily=%s llm_invoke=%s",

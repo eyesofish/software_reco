@@ -29,7 +29,12 @@ def _get_openai_client() -> openai.OpenAI:
     return wrap_openai(openai.OpenAI(api_key=api_key, base_url=base_url))
 
 
-def similarity_search(query: str, k: int = 5, trace_id: str | None = None) -> List[Document]:
+def similarity_search(
+    query: str,
+    k: int = 5,
+    trace_id: str | None = None,
+    _retry_on_tenant_error: bool = True,
+) -> List[Document]:
     """
     执行向量库相似性搜索，查找与查询最相关的文档
     """
@@ -162,6 +167,14 @@ def similarity_search(query: str, k: int = 5, trace_id: str | None = None) -> Li
         )
         return documents
     except Exception as exc:
+        if _retry_on_tenant_error and "default_tenant" in str(exc or "").lower():
+            time.sleep(0.1)
+            return similarity_search(
+                query=query,
+                k=k,
+                trace_id=current_trace_id,
+                _retry_on_tenant_error=False,
+            )
         if "Collection [software_recommendations] does not exist" in str(exc):
             log_event(
                 logger,

@@ -1,4 +1,4 @@
-import logging
+﻿import logging
 import json
 import ast
 import os
@@ -23,16 +23,19 @@ from app.api.v1.models import (
 from software_recommend_system.rag_agent import create_rag_with_routing_agent
 from software_recommend_system.observability import traceable
 from software_recommend_system.state import AgentState
+from software_recommend_system.config import settings as agent_settings
+from software_recommend_system.memory_retriever import build_memory_context
+from software_recommend_system.memory_store import write_episode, write_fact, write_semantic
 from software_recommend_system.utils import initialize_vector_store
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
 AGENT = create_rag_with_routing_agent()
 NAME_ZH_PATTERN = re.compile(
-    r"(?:(?:^|[，,。！？!\s])(?:\u6211\u53eb|\u8bb0\u4f4f\u6211\u53eb|\u8bb0\u4f4f\u6211\u7684\u540d\u5b57\u662f|\u6211\u7684\u540d\u5b57\u662f)\s*([\u4e00-\u9fffA-Za-z][\u4e00-\u9fffA-Za-z0-9_\-]{0,31}))"
+    r"(?:(?:^|[锛?銆傦紒锛?\s])(?:\u6211\u53eb|\u8bb0\u4f4f\u6211\u53eb|\u8bb0\u4f4f\u6211\u7684\u540d\u5b57\u662f|\u6211\u7684\u540d\u5b57\u662f)\s*([\u4e00-\u9fffA-Za-z][\u4e00-\u9fffA-Za-z0-9_\-]{0,31}))"
 )
 NAME_IS_ZH_PATTERN = re.compile(
-    r"(?:(?:^|[，,。！？!\s])(?:\u6211\u662f)\s*([\u4e00-\u9fffA-Za-z][\u4e00-\u9fffA-Za-z0-9_\-]{0,31}))"
+    r"(?:(?:^|[锛?銆傦紒锛?\s])(?:\u6211\u662f)\s*([\u4e00-\u9fffA-Za-z][\u4e00-\u9fffA-Za-z0-9_\-]{0,31}))"
 )
 NAME_EN_PATTERN = re.compile(r"(?i)(?:my name is|i am|i'm)\s+([A-Za-z][A-Za-z\-' ]{0,40})")
 USER_NAME_QUESTION_PATTERNS = (
@@ -59,6 +62,112 @@ CONFIRM_SHORT_QUERY_PATTERN = re.compile(
 SESSION_STATE_FILE = Path(os.getenv("SESSION_STATE_FILE", ".runtime/fastapi_session_state.json"))
 SESSION_MAX_MESSAGES = int(os.getenv("SESSION_MAX_MESSAGES", "30"))
 _SESSION_LOCK = RLock()
+
+
+def _layered_memory_enabled() -> bool:
+    return bool(getattr(agent_settings, "FEATURE_LAYERED_MEMORY", True))
+
+
+def _memory_writeback_enabled() -> bool:
+    return _layered_memory_enabled() and bool(getattr(agent_settings, "MEMORY_ENABLE_WRITEBACK", True))
+
+
+def _truncate_memory_text(text: str, max_chars: int = 800) -> str:
+    value = str(text or "").strip()
+    if max_chars <= 0 or len(value) <= max_chars:
+        return value
+    return value[:max_chars].rstrip() + "..."
+
+
+def _safe_build_memory_context(
+    *,
+    session_id: str,
+    query: str,
+    messages: List[Dict[str, str]],
+    facts: Dict[str, str],
+) -> List[Dict[str, Any]]:
+    if not _layered_memory_enabled():
+        return []
+    try:
+        return build_memory_context(
+            session_id=session_id,
+            query=query,
+            messages=messages,
+            facts=facts,
+        )
+    except Exception:
+        logger.exception("MEMORY_CONTEXT_BUILD_FAILED session_id=%s", session_id)
+        return []
+
+
+def _safe_write_fact_to_memory(session_id: str, key: str, value: str) -> None:
+    if not _memory_writeback_enabled():
+        return
+    try:
+        write_fact(session_id, key, value)
+    except Exception:
+        logger.exception(
+            "MEMORY_FACT_WRITE_FAILED session_id=%s key=%s",
+            session_id,
+            key,
+        )
+
+
+def _safe_write_turn_memories(
+    *,
+    session_id: str,
+    request_query: str,
+    final_answer: str,
+    selected_skill: Optional[str],
+    retrieved_doc_ids: List[str],
+) -> None:
+    if not _memory_writeback_enabled():
+        return
+    try:
+        min_chars = max(1, int(getattr(agent_settings, "MEMORY_WRITEBACK_MIN_CHARS", 24)))
+        query_text = str(request_query or "").strip()
+        answer_text = str(final_answer or "").strip()
+        skill = str(selected_skill or "").strip()
+        doc_ids = [str(item or "").strip() for item in retrieved_doc_ids if str(item or "").strip()]
+
+        if len(query_text) >= min_chars:
+            write_episode(
+                session_id,
+                _truncate_memory_text(f"user_query: {query_text}", max_chars=600),
+                tags=["turn", "user_query"],
+                salience=0.55,
+            )
+
+        if len(answer_text) >= min_chars:
+            answer_tags = ["turn", "assistant_answer"]
+            if skill:
+                answer_tags.append(f"skill:{skill}")
+            write_episode(
+                session_id,
+                _truncate_memory_text(f"assistant_answer: {answer_text}", max_chars=900),
+                tags=answer_tags,
+                salience=0.5,
+            )
+
+        if skill:
+            _safe_write_fact_to_memory(session_id, "last_selected_skill", skill)
+
+        if (
+            doc_ids
+            and bool(getattr(agent_settings, "MEMORY_WRITEBACK_ENABLE_SEMANTIC", True))
+        ):
+            short_ids = ", ".join(doc_ids[:8])
+            semantic_tags = ["retrieval_evidence"]
+            if skill:
+                semantic_tags.append(f"skill:{skill}")
+            write_semantic(
+                session_id,
+                f"relevant_doc_ids: {short_ids}",
+                tags=semantic_tags,
+                salience=0.72,
+            )
+    except Exception:
+        logger.exception("MEMORY_TURN_WRITEBACK_FAILED session_id=%s", session_id)
 
 
 def _normalize_session_facts(raw: Any) -> Dict[str, str]:
@@ -178,15 +287,80 @@ def _normalize_retrieval_records(raw: Any) -> List[Dict[str, Any]]:
                 text = str(context or "").strip()
                 if text:
                     retrieved_contexts.append(text)
+        channel_counts_raw = item.get("channel_counts", {})
+        channel_counts: Dict[str, int] = {}
+        if isinstance(channel_counts_raw, dict):
+            for key, value in channel_counts_raw.items():
+                channel = str(key or "").strip().lower()
+                if not channel:
+                    continue
+                try:
+                    count = int(value)
+                except (TypeError, ValueError):
+                    continue
+                if count > 0:
+                    channel_counts[channel] = count
+        channels_used = sorted(channel_counts.keys())
+        selected_skill = str(item.get("selected_skill", "")).strip()
+        skill_used = str(item.get("skill_used", "")).strip() or selected_skill
+        rerank_mode = str(item.get("rerank_mode", "")).strip()
         normalized.append(
             {
                 "subquery_id": subquery_id,
                 "subquery": subquery,
                 "retrieved_doc_ids": retrieved_doc_ids,
                 "retrieved_contexts": retrieved_contexts,
+                "channel_counts": channel_counts,
+                "channels_used": channels_used,
+                "selected_skill": selected_skill,
+                "skill_used": skill_used,
+                "rerank_mode": rerank_mode,
             }
         )
     return normalized
+
+
+def _normalize_plan_steps(raw: Any) -> List[Dict[str, Any]]:
+    if not isinstance(raw, list):
+        return []
+    normalized: List[Dict[str, Any]] = []
+    for index, item in enumerate(raw, start=1):
+        if isinstance(item, dict):
+            step_id = str(item.get("step_id", "") or f"step_{index}").strip() or f"step_{index}"
+            objective = str(item.get("objective", "") or "").strip()
+            action = str(item.get("action", "retrieve") or "retrieve").strip() or "retrieve"
+            query = str(item.get("query", "") or "").strip()
+            retrieval_profile = str(item.get("retrieval_profile", "balanced") or "balanced").strip() or "balanced"
+            required = bool(item.get("required", True))
+        else:
+            step_id = f"step_{index}"
+            objective = str(item or "").strip()
+            action = "retrieve"
+            query = objective
+            retrieval_profile = "balanced"
+            required = True
+        if not objective and not query:
+            continue
+        normalized.append(
+            {
+                "step_id": step_id,
+                "objective": objective or query,
+                "action": action,
+                "query": query or objective,
+                "retrieval_profile": retrieval_profile,
+                "required": required,
+            }
+        )
+    return normalized
+
+
+def _extract_skill_planner_payload(result: Any) -> Dict[str, Any]:
+    selected_skill = str(_get_value(result, "selected_skill", "") or "").strip() or None
+    plan_steps = _normalize_plan_steps(_get_value(result, "plan_steps", []))
+    return {
+        "selected_skill": selected_skill,
+        "plan_steps": plan_steps,
+    }
 
 
 def _normalize_hitl_payload(raw: Any) -> Optional[Dict[str, Any]]:
@@ -312,10 +486,10 @@ def _build_human_confirmation_ack(sub_questions: List[str]) -> str:
     )
     suffix = "\n..." if len(normalized) > 3 else ""
     return (
-        "已收到请求，当前已生成子问题，正在等待确认后继续执行。\n"
+        "宸叉敹鍒拌姹傦紝褰撳墠宸茬敓鎴愬瓙闂锛屾鍦ㄧ瓑寰呯‘璁ゅ悗缁х画鎵ц銆俓n"
         "Status: waiting for confirmation.\n"
-        "请调用 /api/v1/recommend/confirm，并使用 action=confirm 或 action=edit。\n"
-        f"待确认子问题预览：\n{preview}{suffix}"
+        "璇疯皟鐢?/api/v1/recommend/confirm锛屽苟浣跨敤 action=confirm 鎴?action=edit銆俓n"
+        f"寰呯‘璁ゅ瓙闂棰勮锛歕n{preview}{suffix}"
     )
 
 
@@ -346,7 +520,7 @@ def _extract_name_fact(query: str) -> Optional[str]:
 
 def _normalize_candidate_name(raw: str) -> Optional[str]:
     candidate = (raw or "").strip()
-    candidate = candidate.strip(" \t\r\n，,。！？!?.；;:：\"'“”‘’()（）[]【】")
+    candidate = candidate.strip(" \t\r\n,.!?;:，。！？；：“”\"'()[]（）【】")
     if not candidate:
         return None
 
@@ -409,6 +583,7 @@ def _merge_session_facts(session_id: str, facts: Dict[str, str]) -> Dict[str, An
                 fact_value = normalized_name
             if fact_key and fact_value:
                 current_facts[fact_key] = fact_value
+                _safe_write_fact_to_memory(session_id, fact_key, fact_value)
         state["updated_at"] = time.time()
         _persist_session_state_store_locked()
         return state
@@ -480,6 +655,7 @@ async def _execute_recommend_turn(
                 "edited_subqueries": [],
             },
         )
+        skill_planner_payload = _extract_skill_planner_payload(result)
         interrupt_payload = _extract_interrupt_payload(result)
         if interrupt_payload and interrupt_payload.get("type") == "human_confirmation":
             pending_sub_questions = _normalize_pending_sub_questions(
@@ -515,6 +691,8 @@ async def _execute_recommend_turn(
                 pending_sub_questions=pending_sub_questions,
                 retrieval_records=eval_payload["retrieval_records"],
                 retrieved_doc_ids=eval_payload["retrieved_doc_ids"],
+                selected_skill=skill_planner_payload["selected_skill"],
+                plan_steps=skill_planner_payload["plan_steps"],
                 hitl=eval_payload["hitl"]
                 or _normalize_hitl_payload(
                     {
@@ -528,7 +706,7 @@ async def _execute_recommend_turn(
         final_answer = _get_value(result, "final_answer", "")
         if final_answer:
             _append_session_message_once(session_id, "assistant", final_answer)
-            return RecommendationResponse(
+            response = RecommendationResponse(
                 status="success",
                 final_answer=final_answer,
                 candidates=_get_value(result, "candidates", []),
@@ -539,8 +717,18 @@ async def _execute_recommend_turn(
                 awaiting_human_confirmation=False,
                 retrieval_records=eval_payload["retrieval_records"],
                 retrieved_doc_ids=eval_payload["retrieved_doc_ids"],
+                selected_skill=skill_planner_payload["selected_skill"],
+                plan_steps=skill_planner_payload["plan_steps"],
                 hitl=eval_payload["hitl"],
             )
+            _safe_write_turn_memories(
+                session_id=session_id,
+                request_query=request_query,
+                final_answer=response.final_answer,
+                selected_skill=response.selected_skill,
+                retrieved_doc_ids=list(response.retrieved_doc_ids or []),
+            )
+            return response
 
         if fallback_answer:
             _append_session_message_once(session_id, "assistant", fallback_answer)
@@ -552,7 +740,7 @@ async def _execute_recommend_turn(
                     "edited_subqueries": [],
                 },
             )
-            return RecommendationResponse(
+            response = RecommendationResponse(
                 status="success",
                 final_answer=fallback_answer,
                 candidates=[],
@@ -563,10 +751,20 @@ async def _execute_recommend_turn(
                 awaiting_human_confirmation=False,
                 retrieval_records=fallback_eval_payload["retrieval_records"],
                 retrieved_doc_ids=fallback_eval_payload["retrieved_doc_ids"],
+                selected_skill=skill_planner_payload["selected_skill"],
+                plan_steps=skill_planner_payload["plan_steps"],
                 hitl=fallback_eval_payload["hitl"],
             )
+            _safe_write_turn_memories(
+                session_id=session_id,
+                request_query=request_query,
+                final_answer=response.final_answer,
+                selected_skill=response.selected_skill,
+                retrieved_doc_ids=list(response.retrieved_doc_ids or []),
+            )
+            return response
 
-        return RecommendationResponse(
+        response = RecommendationResponse(
             status="success",
             final_answer=final_answer,
             candidates=_get_value(result, "candidates", []),
@@ -577,8 +775,18 @@ async def _execute_recommend_turn(
             awaiting_human_confirmation=False,
             retrieval_records=eval_payload["retrieval_records"],
             retrieved_doc_ids=eval_payload["retrieved_doc_ids"],
+            selected_skill=skill_planner_payload["selected_skill"],
+            plan_steps=skill_planner_payload["plan_steps"],
             hitl=eval_payload["hitl"],
         )
+        _safe_write_turn_memories(
+            session_id=session_id,
+            request_query=request_query,
+            final_answer=response.final_answer,
+            selected_skill=response.selected_skill,
+            retrieved_doc_ids=list(response.retrieved_doc_ids or []),
+        )
+        return response
     except Exception:
         logger.exception(
             "RECOMMEND_TURN_FAILED session_id=%s source=%s query=%r",
@@ -658,6 +866,13 @@ async def get_software_recommendation(request_data: RecommendationRequest):
         if known_name and _is_asking_user_name(request_data.query):
             memory_answer = f"你叫{known_name}。"
             _append_session_message_once(session_id, "assistant", memory_answer)
+            _safe_write_turn_memories(
+                session_id=session_id,
+                request_query=request_data.query,
+                final_answer=memory_answer,
+                selected_skill=None,
+                retrieved_doc_ids=[],
+            )
             return RecommendationResponse(
                 status="success",
                 final_answer=memory_answer,
@@ -714,9 +929,19 @@ async def get_software_recommendation(request_data: RecommendationRequest):
                 "If user asks identity-related questions, trust this fact."
             )
 
+        memory_seed_messages = list(session_messages)
+        memory_seed_messages.append({"role": "user", "content": request_data.query})
+        memory_context = _safe_build_memory_context(
+            session_id=session_id,
+            query=request_data.query,
+            messages=memory_seed_messages,
+            facts=dict(session_state.get("facts", {}) or {}),
+        )
+
         state = AgentState(
             user_query=effective_query,
             messages=session_messages,
+            memory_context=memory_context,
             timeout_budget=request_data.timeout,
             max_iterations=request_data.max_iterations,
             start_time=time.time(),
@@ -795,6 +1020,7 @@ async def confirm_software_recommendation(request_data: RecommendationConfirmReq
                 "edited_subqueries": edited_sub_questions if effective_action == "edit" else [],
             },
         )
+        skill_planner_payload = _extract_skill_planner_payload(result)
 
         if interrupt_payload and interrupt_payload.get("type") == "human_confirmation":
             if effective_action == "confirm":
@@ -846,6 +1072,8 @@ async def confirm_software_recommendation(request_data: RecommendationConfirmReq
                 pending_sub_questions=pending_sub_questions,
                 retrieval_records=eval_payload["retrieval_records"],
                 retrieved_doc_ids=eval_payload["retrieved_doc_ids"],
+                selected_skill=skill_planner_payload["selected_skill"],
+                plan_steps=skill_planner_payload["plan_steps"],
                 hitl=eval_payload["hitl"]
                 or _normalize_hitl_payload(
                     {
@@ -868,7 +1096,7 @@ async def confirm_software_recommendation(request_data: RecommendationConfirmReq
             request_data.session_id,
             len(final_answer or ""),
         )
-        return RecommendationResponse(
+        response = RecommendationResponse(
             status="success",
             final_answer=final_answer,
             candidates=_get_value(result, "candidates", []),
@@ -879,8 +1107,18 @@ async def confirm_software_recommendation(request_data: RecommendationConfirmReq
             awaiting_human_confirmation=False,
             retrieval_records=eval_payload["retrieval_records"],
             retrieved_doc_ids=eval_payload["retrieved_doc_ids"],
+            selected_skill=skill_planner_payload["selected_skill"],
+            plan_steps=skill_planner_payload["plan_steps"],
             hitl=eval_payload["hitl"],
         )
+        _safe_write_turn_memories(
+            session_id=request_data.session_id,
+            request_query=request_data.comment or "confirm",
+            final_answer=response.final_answer,
+            selected_skill=response.selected_skill,
+            retrieved_doc_ids=list(response.retrieved_doc_ids or []),
+        )
+        return response
     except Exception as exc:
         logger.exception(
             "HITL_CONFIRM_REQUEST_FAILED session_id=%s action=%s error=%s",
@@ -1052,3 +1290,4 @@ async def initialize_database():
             status_code=500,
             detail=f"Error initializing database: {exc}",
         ) from exc
+

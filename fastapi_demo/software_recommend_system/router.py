@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import time
 from dataclasses import dataclass
 from typing import Any, Dict, Optional
 
@@ -14,6 +15,7 @@ from .observability import wrap_openai
 logger = logging.getLogger(__name__)
 
 VALID_ROUTER_MODES = frozenset({"rag", "direct", "hitl"})
+_ROUTER_CIRCUIT_OPEN_UNTIL: float = 0.0
 
 
 def _get_field(obj: Any, field: str, default: Any = None) -> Any:
@@ -134,6 +136,42 @@ def _get_router_client() -> openai.OpenAI:
     )
 
 
+def _router_circuit_ttl_seconds() -> float:
+    try:
+        ttl = float(getattr(settings, "ROUTER_CIRCUIT_BREAKER_SECONDS", 30))
+    except Exception:
+        ttl = 30.0
+    return max(0.0, ttl)
+
+
+def _is_router_circuit_open() -> bool:
+    return time.time() < _ROUTER_CIRCUIT_OPEN_UNTIL
+
+
+def _open_router_circuit() -> None:
+    global _ROUTER_CIRCUIT_OPEN_UNTIL
+    ttl = _router_circuit_ttl_seconds()
+    if ttl <= 0:
+        _ROUTER_CIRCUIT_OPEN_UNTIL = 0.0
+        return
+    _ROUTER_CIRCUIT_OPEN_UNTIL = time.time() + ttl
+
+
+def _close_router_circuit() -> None:
+    global _ROUTER_CIRCUIT_OPEN_UNTIL
+    _ROUTER_CIRCUIT_OPEN_UNTIL = 0.0
+
+
+def _is_transient_connection_error(exc: Exception) -> bool:
+    error_name = type(exc).__name__.lower()
+    message = str(exc or "").lower()
+    if "timeout" in error_name or "connection" in error_name:
+        return True
+    if "connection error" in message or "timed out" in message:
+        return True
+    return False
+
+
 @dataclass(frozen=True)
 class RoutingDecision:
     mode: str
@@ -165,6 +203,15 @@ def route_query(
             mode=fallback_mode,
             confidence=0.0,
             reason="empty_query_fallback",
+            fallback_used=True,
+        )
+
+    # Only apply circuit breaker on default remote client path.
+    if client is None and _is_router_circuit_open():
+        return RoutingDecision(
+            mode=fallback_mode,
+            confidence=0.0,
+            reason="router_circuit_open",
             fallback_used=True,
         )
 
@@ -208,6 +255,8 @@ def route_query(
                 fallback_used=True,
             )
 
+        if client is None:
+            _close_router_circuit()
         return RoutingDecision(
             mode=parsed_mode,
             confidence=confidence,
@@ -215,6 +264,8 @@ def route_query(
             fallback_used=False,
         )
     except Exception as exc:
+        if client is None and _is_transient_connection_error(exc):
+            _open_router_circuit()
         logger.warning("router invocation failed: %s", exc)
         return RoutingDecision(
             mode=fallback_mode,

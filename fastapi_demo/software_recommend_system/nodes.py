@@ -1,5 +1,5 @@
 from typing import Dict, Any, List
-from .state import AgentState
+from .state import AgentState, CandidateSolution
 from .document_schema import Document, Metadata
 from .config import settings
 import openai
@@ -19,6 +19,8 @@ from .tools import pre_drawing_tool, draw_image_tool
 from .logging_utils import elapsed_ms, error_fields, log_event, log_exception, new_trace_id, text_preview
 from .observability import traceable, wrap_openai
 from .router import route_query
+from .skill_router import route_skill
+from .planner import build_execution_plan
 
 logger = logging.getLogger(__name__)
 
@@ -172,6 +174,7 @@ def _build_retrieval_record(
 ) -> Dict[str, Any]:
     retrieved_doc_ids: List[str] = []
     retrieved_contexts: List[str] = []
+    channel_counts: Dict[str, int] = {}
     for index, doc in enumerate(docs, start=1):
         doc_id = _extract_doc_id(doc, fallback_prefix=subquery_id, index=index)
         if doc_id not in retrieved_doc_ids:
@@ -181,11 +184,22 @@ def _build_retrieval_record(
         if content:
             retrieved_contexts.append(content[:280] + "..." if len(content) > 280 else content)
 
+        metadata = _get_field(doc, "metadata", {}) or {}
+        channel = str(
+            _get_field(metadata, "channel", "")
+            or _get_field(metadata, "retrieval_source", "")
+            or "unknown"
+        ).strip().lower()
+        if channel:
+            channel_counts[channel] = channel_counts.get(channel, 0) + 1
+
     return {
         "subquery_id": subquery_id,
         "subquery": str(subquery or ""),
         "retrieved_doc_ids": retrieved_doc_ids,
         "retrieved_contexts": retrieved_contexts[:8],
+        "channel_counts": channel_counts,
+        "channels_used": sorted(channel_counts.keys()),
     }
 
 # OpenAI client factory with explicit auth/base_url wiring.
@@ -723,6 +737,111 @@ def routing_node(state: AgentState) -> Dict[str, Any]:
     if tech_hits:
         logger.debug("routing heuristic tech_hits=%s", tech_hits[:8])
     return {"mode": mode}
+
+
+def _normalize_plan_steps(raw_steps: Any) -> List[Dict[str, Any]]:
+    if not isinstance(raw_steps, list):
+        return []
+    normalized: List[Dict[str, Any]] = []
+    for index, item in enumerate(raw_steps, start=1):
+        if isinstance(item, dict):
+            step_id = str(item.get("step_id", "") or f"step_{index}").strip() or f"step_{index}"
+            objective = str(item.get("objective", "") or "").strip()
+            action = str(item.get("action", "retrieve") or "retrieve").strip() or "retrieve"
+            query = str(item.get("query", "") or "").strip()
+            retrieval_profile = str(item.get("retrieval_profile", "balanced") or "balanced").strip() or "balanced"
+            required = bool(item.get("required", True))
+        else:
+            step_id = f"step_{index}"
+            objective = str(item or "").strip()
+            action = "retrieve"
+            query = objective
+            retrieval_profile = "balanced"
+            required = True
+        if not objective and not query:
+            continue
+        normalized.append(
+            {
+                "step_id": step_id,
+                "objective": objective or query,
+                "action": action,
+                "query": query or objective,
+                "retrieval_profile": retrieval_profile,
+                "required": required,
+            }
+        )
+    return normalized
+
+
+@traceable(name="skill_routing")
+def skill_routing_node(state: AgentState) -> Dict[str, Any]:
+    query = str(_get_field(state, "user_query", "") or "")
+    normalized_query = str(_get_field(state, "normalized_query", "") or "")
+    started_at = time.perf_counter()
+
+    result = route_skill(
+        query,
+        normalized_query=normalized_query,
+    )
+    log_event(
+        logger,
+        logging.INFO,
+        "skill_routing_decision",
+        component="routing",
+        selected_skill=result.selected_skill,
+        confidence=round(result.confidence, 4),
+        fallback_used=result.fallback_used,
+        reason=text_preview(result.reason, 160),
+        latency_ms=elapsed_ms(started_at),
+    )
+    return {
+        "selected_skill": result.selected_skill,
+        "skill_candidates": result.candidates,
+        "skill_router_reason": result.reason,
+    }
+
+
+@traceable(name="plan_generation")
+def planning_node(state: AgentState) -> Dict[str, Any]:
+    if not bool(getattr(settings, "PLANNER_ENABLE", True)):
+        return {
+            "plan": {},
+            "plan_steps": [],
+            "planner_reason": "planner_disabled",
+        }
+
+    selected_skill = str(_get_field(state, "selected_skill", "") or "").strip() or "generic_rag"
+    user_query = str(_get_field(state, "user_query", "") or "")
+    normalized_query = str(_get_field(state, "normalized_query", "") or "")
+    constraints = _get_field(state, "constraints", {}) or {}
+
+    started_at = time.perf_counter()
+    plan = build_execution_plan(
+        selected_skill=selected_skill,
+        user_query=user_query,
+        normalized_query=normalized_query,
+        constraints=constraints,
+    )
+    plan_steps = _normalize_plan_steps(plan.model_dump().get("steps", []))
+    planner_reason = str(plan.planner_reason or "").strip() or "template_plan"
+
+    log_event(
+        logger,
+        logging.INFO,
+        "planner_ready",
+        component="planner",
+        selected_skill=selected_skill,
+        steps=len(plan_steps),
+        reason=text_preview(planner_reason, 200),
+        latency_ms=elapsed_ms(started_at),
+    )
+    return {
+        "plan": plan.model_dump(),
+        "plan_steps": plan_steps,
+        "planner_reason": planner_reason,
+    }
+
+
 @task
 def normalize_query_with_llm(model: str, prompt: str, query: str):
     client = _get_openai_client()
@@ -799,40 +918,46 @@ def query_normalization_node(state: AgentState) -> Dict[str, Any]:
         '}',
     ])
 
-    try:
-        future = normalize_query_with_llm(model=settings.LLM_MODEL, prompt=prompt, query=user_query)
-        response = future.result()
-        content = ""
-        if hasattr(response, "choices") and response.choices:
-            first_choice = response.choices[0]
-            if isinstance(first_choice, dict):
-                message = first_choice.get("message") or {}
-                content = message.get("content") or ""
-            else:
-                message = getattr(first_choice, "message", None)
-                content = getattr(message, "content", "") if message else ""
+    use_llm_normalization = bool(getattr(settings, "QUERY_NORMALIZATION_USE_LLM", True))
+    max_chars_for_llm = max(0, int(getattr(settings, "QUERY_NORMALIZATION_MAX_CHARS_FOR_LLM", 320)))
+    if max_chars_for_llm > 0 and len(str(user_query or "")) > max_chars_for_llm:
+        use_llm_normalization = False
 
-        parsed = json.loads(content) if content else {}
-        if isinstance(parsed, dict):
-            normalized_queries = parsed.get("normalized_queries", [])
-        elif isinstance(parsed, list):
-            normalized_queries = parsed
+    if use_llm_normalization:
+        try:
+            future = normalize_query_with_llm(model=settings.LLM_MODEL, prompt=prompt, query=user_query)
+            response = future.result()
+            content = ""
+            if hasattr(response, "choices") and response.choices:
+                first_choice = response.choices[0]
+                if isinstance(first_choice, dict):
+                    message = first_choice.get("message") or {}
+                    content = message.get("content") or ""
+                else:
+                    message = getattr(first_choice, "message", None)
+                    content = getattr(message, "content", "") if message else ""
 
-        if not isinstance(normalized_queries, list):
-            raise ValueError("LLM返回格式不是列表")
+            parsed = json.loads(content) if content else {}
+            if isinstance(parsed, dict):
+                normalized_queries = parsed.get("normalized_queries", [])
+            elif isinstance(parsed, list):
+                normalized_queries = parsed
 
-        normalized_queries = [str(item).strip() for item in normalized_queries if str(item).strip()]
-    except Exception as exc:
-        log_event(
-            logger,
-            logging.ERROR,
-            "llm.output.parse.fail",
-            component="llm",
-            scene="normalize_query",
-            model=settings.LLM_MODEL,
-            query=text_preview(user_query),
-            **error_fields(exc),
-        )
+            if not isinstance(normalized_queries, list):
+                raise ValueError("LLM返回格式不是列表")
+
+            normalized_queries = [str(item).strip() for item in normalized_queries if str(item).strip()]
+        except Exception as exc:
+            log_event(
+                logger,
+                logging.ERROR,
+                "llm.output.parse.fail",
+                component="llm",
+                scene="normalize_query",
+                model=settings.LLM_MODEL,
+                query=text_preview(user_query),
+                **error_fields(exc),
+            )
 
     normalized_query = "\n".join(normalized_queries) if normalized_queries else user_query.strip()
 
@@ -901,8 +1026,20 @@ def sub_question_generation_with_llm(model: str, prompt: str, query: str):
 
 
 @task
-def retrieve_with_search(query: str, top_k: int):
-    return retrieve(query, top_k=top_k)
+def retrieve_with_search(
+    query: str,
+    top_k: int,
+    session_id: str = "",
+    selected_skill: str = "",
+    memory_context: List[Dict[str, Any]] | None = None,
+):
+    return retrieve(
+        query,
+        top_k=top_k,
+        session_id=session_id or None,
+        selected_skill=selected_skill or None,
+        memory_context=memory_context,
+    )
 
 
 @task
@@ -945,21 +1082,97 @@ def sub_question_generation_node(state: AgentState) -> Dict[str, Any]:
     """Sub-question generation node."""
     normalized_query = _get_field(state, "normalized_query", "")
     constraints = _get_field(state, "constraints", {})
+    selected_skill = str(_get_field(state, "selected_skill", "") or "").strip()
+    plan_steps = _normalize_plan_steps(_get_field(state, "plan_steps", []) or [])
+    planner_reason = str(_get_field(state, "planner_reason", "") or "").strip()
     min_sub_questions = max(1, int(getattr(settings, "SUB_QUESTION_MIN_COUNT", 2)))
     max_sub_questions = max(min_sub_questions, int(getattr(settings, "SUB_QUESTION_MAX_COUNT", 3)))
+
+    normalized_query_text = str(normalized_query or "").strip().lower()
+    factoid_prefix_match = re.match(
+        r"^\s*(what|how|why|when|where|which|who|can|could|should|is|are|does|do)\b",
+        normalized_query_text,
+    )
+    looks_like_question = (
+        ("?" in normalized_query_text)
+        or ("？" in normalized_query_text)
+        or (factoid_prefix_match is not None)
+        or normalized_query_text.startswith(("什么", "如何", "怎么", "为何", "为什么", "是否", "哪个", "哪种", "怎样"))
+    )
+    is_fact_qa = selected_skill == "quick_fact_qa" or (
+        selected_skill == "generic_rag" and looks_like_question
+    )
+    if is_fact_qa:
+        min_sub_questions = 1
+        max_sub_questions = min(max_sub_questions, 2)
 
     logger.info(f"Generating sub-questions for query: {normalized_query}")
 
     sub_questions = []
-    prompt = "\n".join(
-        [
-            "You are a requirements analysis assistant for a software recommendation system.",
-            f"Generate {min_sub_questions} to {max_sub_questions} concise and non-overlapping sub-questions.",
-            "Focus only on the most important dimensions: core problem/users, domain+stack constraints, and key non-functional/data requirements.",
-            f"Return only a JSON array (preferred length {min_sub_questions}-{max_sub_questions}) or a JSON object containing the sub_questions field.",
-            "Do not output any other text.",
-        ]
-    )
+    planned_seed_questions = []
+    for step in plan_steps:
+        candidate = str(step.get("query", "") or step.get("objective", "")).strip()
+        if candidate and candidate not in planned_seed_questions:
+            planned_seed_questions.append(candidate)
+    planned_seed_questions = planned_seed_questions[:max_sub_questions]
+
+    # For fact QA, planner seeds are already concise retrieval intents.
+    # Bypass an extra LLM decomposition round to reduce latency and parse instability.
+    if is_fact_qa and planned_seed_questions:
+        sub_questions = _enforce_sub_question_count(
+            planned_seed_questions,
+            normalized_query,
+            min_count=min_sub_questions,
+            max_count=max_sub_questions,
+        )
+        logger.warning(
+            "SUBQ_READY count=%d target=%d~%d preview=%s",
+            len(sub_questions),
+            min_sub_questions,
+            max_sub_questions,
+            sub_questions[:3],
+        )
+        return {
+            "sub_questions": sub_questions,
+            "pending_sub_questions": sub_questions,
+            "awaiting_human_confirmation": True,
+            "human_confirmation_done": False,
+        }
+
+    planner_hint_lines: List[str] = []
+    if selected_skill:
+        planner_hint_lines.append(f"Selected skill: {selected_skill}")
+    if planner_reason:
+        planner_hint_lines.append(f"Planner reason: {planner_reason}")
+    if planned_seed_questions:
+        planner_hint_lines.append("Planner seed sub-questions:")
+        planner_hint_lines.extend([f"- {item}" for item in planned_seed_questions])
+
+    if is_fact_qa:
+        prompt = "\n".join(
+            [
+                "You are a technical QA decomposition assistant.",
+                f"Generate {min_sub_questions} to {max_sub_questions} concise, non-overlapping factual sub-questions.",
+                "Focus on direct answerability from product documentation and official troubleshooting guidance.",
+                "Do not ask for business strategy, recommendation framing, or generic requirement analysis.",
+                f"Return only a JSON array (preferred length {min_sub_questions}-{max_sub_questions}) or a JSON object containing the sub_questions field.",
+                "Do not output any other text.",
+                "",
+                "\n".join(planner_hint_lines) if planner_hint_lines else "",
+            ]
+        )
+    else:
+        prompt = "\n".join(
+            [
+                "You are a requirements analysis assistant for a software recommendation system.",
+                f"Generate {min_sub_questions} to {max_sub_questions} concise and non-overlapping sub-questions.",
+                "Focus only on the most important dimensions: core problem/users, domain+stack constraints, and key non-functional/data requirements.",
+                f"Return only a JSON array (preferred length {min_sub_questions}-{max_sub_questions}) or a JSON object containing the sub_questions field.",
+                "Do not output any other text.",
+                "",
+                "\n".join(planner_hint_lines) if planner_hint_lines else "",
+            ]
+        )
     try:
         future = sub_question_generation_with_llm(
             model=settings.LLM_MODEL,
@@ -995,11 +1208,17 @@ def sub_question_generation_node(state: AgentState) -> Dict[str, Any]:
         )
 
     if not sub_questions:
-        sub_questions = [normalized_query]
+        if planned_seed_questions:
+            sub_questions = list(planned_seed_questions)
+        else:
+            sub_questions = [normalized_query]
         if " and " in normalized_query.lower():
             parts = re.split(r'\band\b', normalized_query, flags=re.IGNORECASE)
             if len(parts) > 1:
-                sub_questions = [part.strip() for part in parts if part.strip()]
+                sub_questions.extend([part.strip() for part in parts if part.strip()])
+    sub_questions = _normalize_sub_questions(sub_questions)
+    if not sub_questions:
+        sub_questions = [normalized_query]
     sub_questions = _enforce_sub_question_count(
         sub_questions,
         normalized_query,
@@ -1258,11 +1477,17 @@ def human_confirmation_node(state: AgentState) -> Dict[str, Any]:
 @traceable(name="retrieve_multi_subquery")
 def retrieve_node(state: AgentState) -> Dict[str, Any]:
     """Retrieve node: global merge -> dedup -> rerank -> top3 evidence."""
-    MAX_EVIDENCE = 3
-    RERANK_TOP_N = 5
+    BASE_MAX_EVIDENCE = 3
+    retrieved_doc_ids_full_limit = max(1, int(getattr(settings, "RETRIEVED_DOC_IDS_FULL_LIMIT", 20)))
     sub_questions = _get_field(state, "sub_questions", [])
     retrieval_records = list(_get_field(state, "retrieval_records", []) or [])
     iteration_count = _get_field(state, "iteration_count", 0)
+    session_id = str(_get_field(state, "session_id", "") or "").strip()
+    selected_skill = str(_get_field(state, "selected_skill", "") or "").strip()
+    max_evidence = BASE_MAX_EVIDENCE
+    if selected_skill in {"quick_fact_qa", "generic_rag"}:
+        max_evidence = max(BASE_MAX_EVIDENCE, int(getattr(settings, "QA_EVIDENCE_TOP_N", 5)))
+    memory_context = list(_get_field(state, "memory_context", []) or [])
     trace_id = new_trace_id("search")
     global_query = str(_get_field(state, "user_query", "") or "").strip()
     if not global_query:
@@ -1282,7 +1507,9 @@ def retrieve_node(state: AgentState) -> Dict[str, Any]:
         scene="retrieve_node",
         iteration=iteration_count,
         sub_question_count=len(sub_questions),
-        global_top_n=MAX_EVIDENCE,
+        global_top_n=max_evidence,
+        selected_skill=selected_skill,
+        has_memory_context=bool(memory_context),
     )
 
     for index, question in enumerate(sub_questions, start=1):
@@ -1301,7 +1528,13 @@ def retrieve_node(state: AgentState) -> Dict[str, Any]:
             query=question_hint,
             top_k=settings.TOP_K,
         )
-        search_results_future = retrieve_with_search(question, top_k=settings.TOP_K)
+        search_results_future = retrieve_with_search(
+            question,
+            top_k=settings.TOP_K,
+            session_id=session_id,
+            selected_skill=selected_skill,
+            memory_context=memory_context,
+        )
         search_results = search_results_future.result()
         all_docs.extend(search_results)
         subquery_id = f"sq_{index}"
@@ -1310,6 +1543,17 @@ def retrieve_node(state: AgentState) -> Dict[str, Any]:
             subquery=question,
             docs=search_results,
         )
+        retrieval_record["selected_skill"] = selected_skill
+        retrieval_record["skill_used"] = selected_skill
+        rerank_mode = ""
+        for candidate in search_results:
+            metadata = _get_field(candidate, "metadata", {}) or {}
+            rerank_features = _get_field(metadata, "rerank_features", {}) or {}
+            mode = str(_get_field(rerank_features, "mode", "") or "").strip()
+            if mode:
+                rerank_mode = mode
+                break
+        retrieval_record["rerank_mode"] = rerank_mode or "unknown"
         retrieval_records.append(retrieval_record)
         log_event(
             logger,
@@ -1343,23 +1587,45 @@ def retrieve_node(state: AgentState) -> Dict[str, Any]:
         seen_doc_ids.add(doc_id)
         unique_docs.append(doc)
 
-    ranked_docs = rerank_documents(query=global_query, docs=unique_docs, top_n=RERANK_TOP_N)
-    final_docs = ranked_docs[:MAX_EVIDENCE]
+    rerank_top_n = max(max_evidence, min(len(unique_docs), retrieved_doc_ids_full_limit))
+    ranked_docs = rerank_documents(
+        query=global_query,
+        docs=unique_docs,
+        top_n=rerank_top_n,
+        selected_skill=selected_skill,
+        session_id=session_id,
+    )
+    final_docs = ranked_docs[:max_evidence]
     quality_score = min(0.9, 0.5 + (len(final_docs) * 0.1))
 
     retrieved_doc_ids: List[str] = []
+    retrieved_doc_ids_full: List[str] = []
+    memory_doc_ids: List[str] = []
+    for doc_index, doc in enumerate(ranked_docs, start=1):
+        doc_id = _extract_doc_id(doc, fallback_prefix="ranked", index=doc_index)
+        if doc_id not in retrieved_doc_ids_full:
+            retrieved_doc_ids_full.append(doc_id)
+        if len(retrieved_doc_ids_full) >= retrieved_doc_ids_full_limit:
+            break
+
     evidence: List[Dict[str, Any]] = []
     for doc_index, doc in enumerate(final_docs, start=1):
         doc_id = _extract_doc_id(doc, fallback_prefix="global", index=doc_index)
         if doc_id not in retrieved_doc_ids:
             retrieved_doc_ids.append(doc_id)
         metadata = _get_field(doc, "metadata", {}) or {}
+        retrieval_source = str(_get_field(metadata, "retrieval_source", "") or "").strip().lower()
+        channel = str(_get_field(metadata, "channel", "") or "").strip().lower()
+        if retrieval_source == "memory" or channel == "memory":
+            if doc_id not in memory_doc_ids:
+                memory_doc_ids.append(doc_id)
         search_result = {
             "content": doc.content,
             "score": doc.score,
             "doc_id": doc_id,
             "source": str(_get_field(metadata, "source", "") or ""),
-            "retrieval_source": str(_get_field(metadata, "retrieval_source", "") or ""),
+            "retrieval_source": retrieval_source,
+            "channel": channel,
         }
         evidence.append(
             {
@@ -1384,11 +1650,16 @@ def retrieve_node(state: AgentState) -> Dict[str, Any]:
         evidence_items=len(evidence),
         total_evidence_docs=len(final_docs),
         total_retrieved_doc_ids=len(retrieved_doc_ids),
+        total_retrieved_doc_ids_full=len(retrieved_doc_ids_full),
+        memory_doc_ids=len(memory_doc_ids),
+        selected_skill=selected_skill,
     )
     return {
         "evidence": evidence,
         "retrieval_records": retrieval_records,
         "retrieved_doc_ids": retrieved_doc_ids,
+        "retrieved_doc_ids_full": retrieved_doc_ids_full,
+        "memory_doc_ids": memory_doc_ids,
     }
 
 
@@ -1429,140 +1700,181 @@ def evidence_evaluation_node(state: AgentState) -> Dict[str, Any]:
     }
 
 def candidate_generation_node(state: AgentState) -> Dict[str, Any]:
-    """候选方案生成节点"""
-    evidence = _get_field(state, "evidence", [])
-    candidates = _get_field(state, "candidates", [])
+    """Generate candidate solutions from evidence and normalize to CandidateSolution."""
+    evidence = list(_get_field(state, "evidence", []) or [])
+    raw_candidates = list(_get_field(state, "candidates", []) or [])
+    selected_skill = str(_get_field(state, "selected_skill", "") or "").strip()
 
-    logger.info(f"基于 {len(evidence)} 个证据项生成候选方案")
+    logger.info("candidate generation: evidence_count=%d", len(evidence))
+
+    def _to_candidate_solution(raw: Any) -> CandidateSolution | None:
+        if isinstance(raw, CandidateSolution):
+            return raw
+        if not isinstance(raw, dict):
+            return None
+
+        solution = str(raw.get("solution", "") or "").strip()
+        if not solution:
+            return None
+        rationale = str(raw.get("rationale", "") or "").strip()
+        pros_raw = raw.get("pros") if isinstance(raw.get("pros"), list) else []
+        cons_raw = raw.get("cons") if isinstance(raw.get("cons"), list) else []
+        pros = [str(item).strip() for item in pros_raw if str(item).strip()]
+        cons = [str(item).strip() for item in cons_raw if str(item).strip()]
+        try:
+            score = float(raw.get("relevance_score", 0.0))
+        except (TypeError, ValueError):
+            score = 0.0
+        score = max(0.0, min(1.0, score))
+
+        return CandidateSolution(
+            solution=solution,
+            rationale=rationale,
+            pros=pros,
+            cons=cons,
+            relevance_score=score,
+        )
+
+    candidates: List[CandidateSolution] = []
+    for item in raw_candidates:
+        parsed = _to_candidate_solution(item if isinstance(item, dict) else _get_field(item, "__dict__", {}))
+        if parsed is not None:
+            candidates.append(parsed)
 
     if not evidence:
         return {"candidates": candidates}
 
-    def _truncate(text: str, max_len: int = 600) -> str:
-        if not text:
-            return ""
-        return text if len(text) <= max_len else text[:max_len] + "..."
+    def _truncate(content: str, max_len: int = 600) -> str:
+        value = str(content or "")
+        if len(value) <= max_len:
+            return value
+        return value[:max_len] + "..."
 
     evidence_payload = []
     for item in evidence:
         docs = _get_field(item, "documents", [])
         doc_summaries = []
         for doc in docs[:3]:
-            content = _get_field(doc, "content", "")
-            metadata = _get_field(doc, "metadata", {})
-            source = _get_field(metadata, "source", "")
-            doc_summaries.append({
-                "source": source,
-                "content": _truncate(content, 600),
-                "score": _get_field(doc, "score", 0.0)
-            })
-        evidence_payload.append({
-            "question": _get_field(item, "question", ""),
-            "quality_score": _get_field(item, "quality_score", 0.0),
-            "documents": doc_summaries
-        })
-
-    llm_candidates = []
-    try:
-        trace_id, started_at = _llm_invoke_start(
-            scene="candidate_generation",
-            model=settings.LLM_MODEL,
-            request_hint=f"evidence_items={len(evidence_payload)}",
-        )
-        response_future = candidate_generation_with_llm(
-            model=settings.LLM_MODEL,
-            messages=[
+            metadata = _get_field(doc, "metadata", {}) or {}
+            doc_summaries.append(
                 {
-                    "role": "system",
-                    "content": (
-                        "You are a software recommendation assistant. Generate a list of candidate solutions based on the provided evidence. "
-                        "Return only a JSON array or a JSON object containing the candidates field. Do not output any other text. "
-                        "Each candidate must include: solution, rationale, pros, cons, relevance_score (0-1)."
-                    )
-                },
-                {"role": "user", "content": json.dumps(evidence_payload, ensure_ascii=False)}
-            ],
-            temperature=0.4,
+                    "source": _get_field(metadata, "source", ""),
+                    "content": _truncate(_get_field(doc, "content", ""), 600),
+                    "score": _get_field(doc, "score", 0.0),
+                }
+            )
+        evidence_payload.append(
+            {
+                "question": _get_field(item, "question", ""),
+                "quality_score": _get_field(item, "quality_score", 0.0),
+                "documents": doc_summaries,
+            }
         )
-        response = response_future.result()
-        _llm_invoke_done("candidate_generation", settings.LLM_MODEL, trace_id, started_at, response)
 
-        content = ""
-        if hasattr(response, "choices") and response.choices:
-            first_choice = response.choices[0]
-            if isinstance(first_choice, dict):
-                message = first_choice.get("message") or {}
-                content = message.get("content") or ""
-            else:
-                message = getattr(first_choice, "message", None)
-                content = getattr(message, "content", "") if message else ""
+    llm_candidates: List[CandidateSolution] = []
+    should_skip_llm = selected_skill == "quick_fact_qa"
+    if not should_skip_llm:
+        try:
+            trace_id, started_at = _llm_invoke_start(
+                scene="candidate_generation",
+                model=settings.LLM_MODEL,
+                request_hint=f"evidence_items={len(evidence_payload)}",
+            )
+            response_future = candidate_generation_with_llm(
+                model=settings.LLM_MODEL,
+                messages=[
+                    {
+                        "role": "system",
+                        "content": (
+                            "You are a software recommendation assistant. Generate candidate solutions based on evidence. "
+                            "Return JSON array or object{candidates:[...]}. Each candidate includes: "
+                            "solution, rationale, pros, cons, relevance_score(0-1)."
+                        ),
+                    },
+                    {"role": "user", "content": json.dumps(evidence_payload, ensure_ascii=False)},
+                ],
+                temperature=0.4,
+            )
+            response = response_future.result()
+            _llm_invoke_done("candidate_generation", settings.LLM_MODEL, trace_id, started_at, response)
 
-        parsed = json.loads(content) if content else []
-        if isinstance(parsed, dict):
-            parsed = parsed.get("candidates", [])
+            content = ""
+            if hasattr(response, "choices") and response.choices:
+                first_choice = response.choices[0]
+                if isinstance(first_choice, dict):
+                    message = first_choice.get("message") or {}
+                    content = message.get("content") or ""
+                else:
+                    message = getattr(first_choice, "message", None)
+                    content = getattr(message, "content", "") if message else ""
 
-        if not isinstance(parsed, list):
-            raise ValueError("LLM返回格式不是候选列表")
+            parsed = json.loads(content) if content else []
+            if isinstance(parsed, dict):
+                parsed = parsed.get("candidates", [])
+            if not isinstance(parsed, list):
+                raise ValueError("candidate_generation_non_list")
 
-        for item in parsed:
-            if not isinstance(item, dict):
-                continue
-            solution = str(item.get("solution", "")).strip()
-            if not solution:
-                continue
-            rationale = str(item.get("rationale", "")).strip()
-            pros = item.get("pros") if isinstance(item.get("pros"), list) else []
-            cons = item.get("cons") if isinstance(item.get("cons"), list) else []
-            score = item.get("relevance_score", 0.0)
-            try:
-                score = float(score)
-            except (TypeError, ValueError):
-                score = 0.0
-            score = max(0.0, min(1.0, score))
-
-            llm_candidates.append({
-                "solution": solution,
-                "rationale": rationale,
-                "pros": pros,
-                "cons": cons,
-                "relevance_score": score
-            })
-    except Exception as exc:
-        _llm_invoke_failed(
-            scene="candidate_generation",
-            model=settings.LLM_MODEL,
-            trace_id=trace_id if "trace_id" in locals() else new_trace_id("llm"),
-            exc=exc,
-            started_at=started_at if "started_at" in locals() else None,
-            with_stack=True,
-        )
+            for raw in parsed:
+                item = _to_candidate_solution(raw)
+                if item is not None:
+                    llm_candidates.append(item)
+        except Exception as exc:
+            _llm_invoke_failed(
+                scene="candidate_generation",
+                model=settings.LLM_MODEL,
+                trace_id=trace_id if "trace_id" in locals() else new_trace_id("llm"),
+                exc=exc,
+                started_at=started_at if "started_at" in locals() else None,
+                with_stack=True,
+            )
 
     if llm_candidates:
         candidates.extend(llm_candidates)
     else:
         for item in evidence:
             docs = _get_field(item, "documents", [])
-            if docs:
-                first_doc = docs[0]
-                solution_text = first_doc.content[:200] + "..." if len(first_doc.content) > 200 else first_doc.content
+            if not docs:
+                continue
+            first_doc = docs[0]
+            solution_text = str(_get_field(first_doc, "content", "") or "").strip()
+            if len(solution_text) > 240:
+                solution_text = solution_text[:240] + "..."
 
-                relevance_score = _get_field(item, "quality_score", 0.5)
+            score = _get_field(item, "quality_score", 0.5)
+            try:
+                score = float(score)
+            except (TypeError, ValueError):
+                score = 0.5
+            score = max(0.0, min(1.0, score))
+            source = _get_field(_get_field(first_doc, "metadata", {}) or {}, "source", "unknown")
 
-                candidate_solution = {
-                    "solution": solution_text,
-                    "rationale": f"根据文档来源 {first_doc.metadata.source} 推荐",
-                    "pros": ["相关性强", "来源可靠"] if relevance_score > 0.7 else ["有一定参考价值"],
-                    "cons": ["信息可能不够全面"] if relevance_score < 0.8 else [],
-                    "relevance_score": relevance_score
-                }
+            candidates.append(
+                CandidateSolution(
+                    solution=solution_text or "No concise solution text from evidence.",
+                    rationale=f"Based on evidence source {source}",
+                    pros=["Relevant to question", "Grounded on retrieved evidence"],
+                    cons=[] if score >= 0.75 else ["Evidence may be incomplete"],
+                    relevance_score=score,
+                )
+            )
 
-                candidates.append(candidate_solution)
+    # Deduplicate by solution while keeping best score.
+    best_by_solution: Dict[str, CandidateSolution] = {}
+    for item in candidates:
+        key = item.solution.strip()
+        if not key:
+            continue
+        existing = best_by_solution.get(key)
+        if existing is None or item.relevance_score > existing.relevance_score:
+            best_by_solution[key] = item
 
-    candidates.sort(key=lambda x: _get_field(x, "relevance_score", 0.0), reverse=True)
+    normalized_candidates = sorted(
+        best_by_solution.values(),
+        key=lambda x: float(x.relevance_score),
+        reverse=True,
+    )
 
-    return {
-        "candidates": candidates
-    }
+    return {"candidates": normalized_candidates}
 
 def coverage_check_node(state: AgentState) -> Dict[str, Any]:
     """覆盖率检查节点"""
@@ -1598,34 +1910,144 @@ def coverage_check_node(state: AgentState) -> Dict[str, Any]:
 
 @traceable(name="final_generation_rag")
 def answer_generation_node(state: AgentState) -> Dict[str, Any]:
-    """答案生成节点（RAG模式）"""
-    user_query = _get_field(state, "user_query", "")
-    candidates = _get_field(state, "candidates", [])
-    evidence = _get_field(state, "evidence", [])
+    """Answer generation node (RAG mode)."""
+    user_query = str(_get_field(state, "user_query", "") or "")
+    candidates = list(_get_field(state, "candidates", []) or [])
+    evidence = list(_get_field(state, "evidence", []) or [])
+    retrieval_records = list(_get_field(state, "retrieval_records", []) or [])
+    selected_skill = str(_get_field(state, "selected_skill", "") or "").strip()
 
     logger.warning(
-        "ANSWER_GENERATION_ENTER candidate_count=%d evidence_count=%d",
+        "ANSWER_GENERATION_ENTER candidate_count=%d evidence_count=%d selected_skill=%s",
         len(candidates),
         len(evidence),
+        selected_skill,
     )
-    logger.info(f"生成最终答案，基于 {len(candidates)} 个候选方案")
-    
-    if candidates:
-        # 选择得分最高的候选方案
-        best_candidate = candidates[0]
-        
-        # 构造最终答案
-        final_answer = f"根据您的查询 '{user_query}'，我推荐:\n\n"
-        final_answer += f"方案: {_get_field(best_candidate, 'solution', '')}\n"
-        final_answer += f"理由: {_get_field(best_candidate, 'rationale', '')}\n"
-        pros = _get_field(best_candidate, 'pros', [])
-        cons = _get_field(best_candidate, 'cons', [])
-        final_answer += f"优点: {', '.join(pros) if pros else '无'}\n"
-        if cons:
-            final_answer += f"缺点: {', '.join(cons)}\n"
-    else:
-        final_answer = f"抱歉，基于现有知识库，我无法为您的查询 '{user_query}' 找到合适的软件推荐方案。"
-    
+
+    def _qa_evidence_context(
+        evidence_items: List[Dict[str, Any]],
+        records: List[Dict[str, Any]],
+        *,
+        max_docs: int = 8,
+        max_chars: int = 520,
+    ) -> str:
+        blocks: List[str] = []
+        seen_keys: set[str] = set()
+
+        def _append_block(header: str, content: str) -> None:
+            normalized = str(content or "").strip().replace("\n", " ")
+            if not normalized:
+                return
+            if len(normalized) > max_chars:
+                normalized = normalized[:max_chars] + "..."
+            dedup_key = f"{header}|{normalized[:120]}"
+            if dedup_key in seen_keys:
+                return
+            seen_keys.add(dedup_key)
+            blocks.append(f"[{len(blocks) + 1}] {header}\n{normalized}")
+
+        for entry in evidence_items:
+            docs = _get_field(entry, "documents", []) or []
+            for index, doc in enumerate(docs, start=1):
+                if len(blocks) >= max_docs:
+                    break
+                metadata = _get_field(doc, "metadata", {}) or {}
+                source = str(_get_field(metadata, "source", "") or "").strip() or "unknown"
+                doc_id = _extract_doc_id(doc, fallback_prefix="evidence", index=index)
+                score = _get_field(doc, "score", 0.0)
+                try:
+                    score_text = f"{float(score):.4f}"
+                except Exception:
+                    score_text = str(score)
+                _append_block(
+                    header=f"doc_id={doc_id} source={source} score={score_text}",
+                    content=str(_get_field(doc, "content", "") or ""),
+                )
+            if len(blocks) >= max_docs:
+                break
+
+        if len(blocks) < max_docs:
+            for record in records:
+                subquery = str(_get_field(record, "subquery", "") or "").strip()
+                snippets = _get_field(record, "retrieved_contexts", []) or []
+                for snippet in snippets:
+                    if len(blocks) >= max_docs:
+                        break
+                    header = f"subquery={subquery}" if subquery else "subquery=unknown"
+                    _append_block(header=header, content=str(snippet or ""))
+                if len(blocks) >= max_docs:
+                    break
+
+        return "\n\n".join(blocks).strip()
+
+    final_answer = ""
+    if selected_skill in {"quick_fact_qa", "generic_rag"}:
+        context = _qa_evidence_context(evidence, retrieval_records)
+        if context:
+            try:
+                trace_id, started_at = _llm_invoke_start(
+                    scene="qa_answer_generation",
+                    model=settings.LLM_MODEL,
+                    request_hint=f"evidence_len={len(context)}",
+                )
+                response_future = candidate_generation_with_llm(
+                    model=settings.LLM_MODEL,
+                    messages=[
+                        {
+                            "role": "system",
+                            "content": (
+                                "You are a technical support QA assistant. "
+                                "Use only the provided evidence. "
+                                "Provide a direct, concrete answer in 2-6 sentences. "
+                                "If steps are required, provide short numbered steps. "
+                                "Include concrete product names, versions, commands, or settings when present. "
+                                "Avoid generic recommendation language and avoid speculative claims."
+                            ),
+                        },
+                        {
+                            "role": "user",
+                            "content": f"Question:\n{user_query}\n\nEvidence:\n{context}",
+                        },
+                    ],
+                    temperature=0.0,
+                )
+                response = response_future.result()
+                _llm_invoke_done("qa_answer_generation", settings.LLM_MODEL, trace_id, started_at, response)
+                if hasattr(response, "choices") and response.choices:
+                    first_choice = response.choices[0]
+                    if isinstance(first_choice, dict):
+                        message = first_choice.get("message") or {}
+                        final_answer = str(message.get("content") or "").strip()
+                    else:
+                        message = getattr(first_choice, "message", None)
+                        final_answer = str(getattr(message, "content", "") if message else "").strip()
+            except Exception as exc:
+                _llm_invoke_failed(
+                    scene="qa_answer_generation",
+                    model=settings.LLM_MODEL,
+                    trace_id=trace_id if "trace_id" in locals() else new_trace_id("llm"),
+                    exc=exc,
+                    started_at=started_at if "started_at" in locals() else None,
+                    with_stack=True,
+                )
+        if not final_answer and context:
+            first_block = context.split("\n\n")[0] if context else ""
+            final_answer = f"Based on retrieved evidence, the likely answer is:\n{first_block}"
+
+    if not final_answer:
+        if candidates:
+            best_candidate = candidates[0]
+            final_answer = f"Answer to '{user_query}':\n\n"
+            final_answer += f"Solution: {_get_field(best_candidate, 'solution', '')}\n"
+            final_answer += f"Reasoning: {_get_field(best_candidate, 'rationale', '')}\n"
+            pros = _get_field(best_candidate, "pros", [])
+            cons = _get_field(best_candidate, "cons", [])
+            final_answer += f"Pros: {', '.join(pros) if pros else 'N/A'}\n"
+            if cons:
+                final_answer += f"Cons: {', '.join(cons)}\n"
+        else:
+            final_answer = f"Insufficient evidence to answer '{user_query}' confidently."
+
     messages = list(_get_field(state, "messages", []) or [])
     messages.append({"role": "assistant", "content": final_answer})
 
@@ -1634,6 +2056,7 @@ def answer_generation_node(state: AgentState) -> Dict[str, Any]:
         "messages": messages,
         "retrieval_records": list(_get_field(state, "retrieval_records", []) or []),
         "retrieved_doc_ids": list(_get_field(state, "retrieved_doc_ids", []) or []),
+        "retrieved_doc_ids_full": list(_get_field(state, "retrieved_doc_ids_full", []) or []),
         "hitl": dict(_get_field(state, "hitl", {}) or {}),
     }
 
@@ -1643,6 +2066,9 @@ def chat_answer_generation_node(state: AgentState) -> Dict[str, Any]:
     user_query = _get_field(state, "user_query", "")
     retrieval_query = _extract_current_user_query(user_query) or user_query
     mode = str(_get_field(state, "mode", "") or "").strip().lower()
+    session_id = str(_get_field(state, "session_id", "") or "").strip()
+    selected_skill = str(_get_field(state, "selected_skill", "") or "").strip()
+    memory_context = list(_get_field(state, "memory_context", []) or [])
 
     messages = list(_get_field(state, "messages", []) or [])
     if not messages:
@@ -1650,6 +2076,7 @@ def chat_answer_generation_node(state: AgentState) -> Dict[str, Any]:
 
     retrieval_records = list(_get_field(state, "retrieval_records", []) or [])
     retrieved_doc_ids = list(_get_field(state, "retrieved_doc_ids", []) or [])
+    retrieved_doc_ids_full = list(_get_field(state, "retrieved_doc_ids_full", []) or [])
     retrieved_docs: List[Document] = []
     if mode != "direct":
         retrieval_trace_id = new_trace_id("search")
@@ -1666,7 +2093,13 @@ def chat_answer_generation_node(state: AgentState) -> Dict[str, Any]:
 
         retrieval_started_at = time.perf_counter()
         try:
-            retrieved_docs_future = retrieve_with_search(retrieval_query, top_k=settings.TOP_K)
+            retrieved_docs_future = retrieve_with_search(
+                retrieval_query,
+                top_k=settings.TOP_K,
+                session_id=session_id,
+                selected_skill=selected_skill,
+                memory_context=memory_context,
+            )
             retrieved_docs = retrieved_docs_future.result()
         except Exception as exc:
             log_event(
@@ -1698,9 +2131,14 @@ def chat_answer_generation_node(state: AgentState) -> Dict[str, Any]:
             subquery=retrieval_query,
             docs=retrieved_docs,
         )
+        chat_record["selected_skill"] = selected_skill
         retrieval_records.append(chat_record)
         retrieved_doc_ids = _merge_doc_ids(
             retrieved_doc_ids,
+            chat_record.get("retrieved_doc_ids", []),
+        )
+        retrieved_doc_ids_full = _merge_doc_ids(
+            retrieved_doc_ids_full,
             chat_record.get("retrieved_doc_ids", []),
         )
     else:
@@ -1810,6 +2248,7 @@ def chat_answer_generation_node(state: AgentState) -> Dict[str, Any]:
         "messages": messages,
         "retrieval_records": retrieval_records,
         "retrieved_doc_ids": retrieved_doc_ids,
+        "retrieved_doc_ids_full": retrieved_doc_ids_full,
         "hitl": dict(_get_field(state, "hitl", {}) or {}),
     }
 

@@ -87,6 +87,7 @@ def _run_pipeline(question: str, hitl_policy: str, oracle_edits: Optional[list[s
         "hitl": _get_value(result, "hitl", {}),
         "retrieval_records": _get_value(result, "retrieval_records", []),
         "retrieved_doc_ids": _get_value(result, "retrieved_doc_ids", []),
+        "retrieved_doc_ids_full": _get_value(result, "retrieved_doc_ids_full", []),
     }
 
 
@@ -130,7 +131,10 @@ def routing_accuracy(run: Run, example: Example) -> EvaluationResult:
 
 
 def retrieval_recall(run: Run, example: Example) -> EvaluationResult:
-    retrieved = _as_set(_get_value(_get_value(run, "outputs", {}), "retrieved_doc_ids"))
+    outputs = _get_value(run, "outputs", {}) or {}
+    retrieved_full = _as_set(_get_value(outputs, "retrieved_doc_ids_full"))
+    retrieved_top = _as_set(_get_value(outputs, "retrieved_doc_ids"))
+    retrieved = retrieved_full or retrieved_top
     gold = _as_set(_get_value(_get_value(example, "outputs", {}), "gold_doc_ids"))
 
     if not gold:
@@ -147,6 +151,7 @@ def retrieval_recall(run: Run, example: Example) -> EvaluationResult:
         score=score,
         metadata={
             "retrieved_count": len(retrieved),
+            "retrieved_source": "retrieved_doc_ids_full" if retrieved_full else "retrieved_doc_ids",
             "gold_count": len(gold),
             "hit_count": len(hit),
         },

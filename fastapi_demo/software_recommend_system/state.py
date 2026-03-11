@@ -26,10 +26,19 @@ class AgentState(BaseModel):
     constraints: Dict[str, str] = Field(
         default_factory=lambda: {"language": "", "scenario": "", "preference": ""}
     )
+    skill_candidates: List[Dict[str, Any]] = Field(default_factory=list)
+    selected_skill: str = ""
+    skill_router_reason: str = ""
+    plan: Dict[str, Any] = Field(default_factory=dict)
+    plan_steps: List[Dict[str, Any]] = Field(default_factory=list)
+    planner_reason: str = ""
     sub_questions: List[str] = Field(default_factory=list)
     evidence: List[EvidenceItem] = Field(default_factory=list)
     retrieval_records: List[Dict[str, Any]] = Field(default_factory=list)
     retrieved_doc_ids: List[str] = Field(default_factory=list)
+    retrieved_doc_ids_full: List[str] = Field(default_factory=list)
+    memory_context: List[Dict[str, Any]] = Field(default_factory=list)
+    memory_doc_ids: List[str] = Field(default_factory=list)
     candidates: List[CandidateSolution] = Field(default_factory=list)
     final_answer: str = ""
     drawing_params: str = ""

@@ -4,6 +4,7 @@ $root = "D:\Github\software_reco\fastapi_demo"
 $py = "C:\Users\UYou2\.conda\envs\dech2\python.exe"
 $runtime = Join-Path $root ".runtime"
 $serverLog = Join-Path $runtime "fastapi_e2e_real.log"
+$embeddingLog = Join-Path $runtime "embedding.log"
 $reportDir = Join-Path $root "evaluation\reports"
 $ts = Get-Date -Format "yyyyMMdd_HHmmss"
 $reportPath = Join-Path $reportDir ("e2e_real_evaluation_report_" + $ts + ".md")
@@ -13,6 +14,12 @@ $sampleCount = 25
 $policy = "auto_confirm"
 $maxConcurrency = 1
 $prefix = "rag-hitl-real-" + (Get-Date -Format "yyyyMMdd-HHmmss")
+
+# Evaluation-time router guardrail: keep fallback behavior, but avoid slow repeated connection failures.
+$env:ROUTER_TIMEOUT_SECONDS = "1"
+$env:ROUTER_CIRCUIT_BREAKER_SECONDS = "180"
+# Evaluation-time speed guardrail: skip normalize-query LLM call for deterministic latency.
+$env:QUERY_NORMALIZATION_USE_LLM = "false"
 
 New-Item -ItemType Directory -Force $runtime | Out-Null
 New-Item -ItemType Directory -Force $reportDir | Out-Null
@@ -112,7 +119,25 @@ $vectorCount = ($vectorCountOutput | Out-String).Trim()
 
 $ingestSummary = ""
 if (Test-Path $serverLog) {
+    $summaryLine = Select-String -Path $serverLog -Pattern "startup\.ingest\.complete" | Select-Object -Last 1
+    if ($summaryLine) {
+        $ingestSummary = $summaryLine.Line
+    }
+}
+if ([string]::IsNullOrWhiteSpace($ingestSummary) -and (Test-Path $embeddingLog)) {
+    $summaryLine = Select-String -Path $embeddingLog -Pattern "startup\.ingest\.complete" | Select-Object -Last 1
+    if ($summaryLine) {
+        $ingestSummary = $summaryLine.Line
+    }
+}
+if ([string]::IsNullOrWhiteSpace($ingestSummary) -and (Test-Path $serverLog)) {
     $summaryLine = Select-String -Path $serverLog -Pattern "startup ingest complete" | Select-Object -Last 1
+    if ($summaryLine) {
+        $ingestSummary = $summaryLine.Line
+    }
+}
+if ([string]::IsNullOrWhiteSpace($ingestSummary) -and (Test-Path $embeddingLog)) {
+    $summaryLine = Select-String -Path $embeddingLog -Pattern "startup ingest complete" | Select-Object -Last 1
     if ($summaryLine) {
         $ingestSummary = $summaryLine.Line
     }

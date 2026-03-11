@@ -2,6 +2,8 @@ import hashlib
 import logging
 import math
 import re
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime, timezone
 from threading import Lock
 from typing import Any, Iterable, List
 
@@ -9,18 +11,23 @@ from .config import settings
 from .document_schema import Document
 from .logging_utils import log_event, new_trace_id, text_preview
 from .observability import traceable
-from .tools import _tavily_search, similarity_search
+from .retrieval_channels import recall_keyword, recall_memory, recall_vector, recall_web
 
 logger = logging.getLogger(__name__)
 
-# Simple linear rerank weights (baseline, replaceable by CE/LLM reranker later).
-_RETRIEVAL_SCORE_WEIGHT = 0.6
-_KEYWORD_OVERLAP_WEIGHT = 0.3
+# Simple linear rerank weights (baseline, override via env in settings).
+_RETRIEVAL_SCORE_WEIGHT = 0.35
+_KEYWORD_OVERLAP_WEIGHT = 0.25
 _SOURCE_WEIGHT = 0.1
+_FRESHNESS_WEIGHT = 0.1
+_SKILL_WEIGHT = 0.1
+_MEMORY_WEIGHT = 0.1
 _SOURCE_PRIOR = {
     "vector": 1.0,
     "web": 0.8,
     "tavily": 0.8,
+    "keyword": 0.7,
+    "memory": 0.9,
 }
 
 _CROSS_ENCODER_MODEL: Any = None
@@ -39,6 +46,29 @@ def _safe_float(value: Any, default: float = 0.0) -> float:
         return float(value)
     except (TypeError, ValueError):
         return default
+
+
+def _normalize_weights() -> dict[str, float]:
+    raw = {
+        "retrieval": _safe_float(getattr(settings, "RERANK_LINEAR_WEIGHT_RETRIEVAL", _RETRIEVAL_SCORE_WEIGHT), _RETRIEVAL_SCORE_WEIGHT),
+        "overlap": _safe_float(getattr(settings, "RERANK_LINEAR_WEIGHT_OVERLAP", _KEYWORD_OVERLAP_WEIGHT), _KEYWORD_OVERLAP_WEIGHT),
+        "source": _safe_float(getattr(settings, "RERANK_LINEAR_WEIGHT_SOURCE", _SOURCE_WEIGHT), _SOURCE_WEIGHT),
+        "freshness": _safe_float(getattr(settings, "RERANK_LINEAR_WEIGHT_FRESHNESS", _FRESHNESS_WEIGHT), _FRESHNESS_WEIGHT),
+        "skill": _safe_float(getattr(settings, "RERANK_LINEAR_WEIGHT_SKILL", _SKILL_WEIGHT), _SKILL_WEIGHT),
+        "memory": _safe_float(getattr(settings, "RERANK_LINEAR_WEIGHT_MEMORY", _MEMORY_WEIGHT), _MEMORY_WEIGHT),
+    }
+    clipped = {key: max(0.0, value) for key, value in raw.items()}
+    total = sum(clipped.values())
+    if total <= 0:
+        return {
+            "retrieval": _RETRIEVAL_SCORE_WEIGHT,
+            "overlap": _KEYWORD_OVERLAP_WEIGHT,
+            "source": _SOURCE_WEIGHT,
+            "freshness": _FRESHNESS_WEIGHT,
+            "skill": _SKILL_WEIGHT,
+            "memory": _MEMORY_WEIGHT,
+        }
+    return {key: value / total for key, value in clipped.items()}
 
 
 def _sigmoid(value: float) -> float:
@@ -153,7 +183,7 @@ def _resolve_doc_id(metadata: Any, content: str, source: str, index: int) -> str
     return f"{source}:{digest}:{index}"
 
 
-def _normalize_documents(documents: Iterable[Document], source_hint: str) -> List[Document]:
+def _normalize_documents(documents: Iterable[Document], source_hint: str, channel: str) -> List[Document]:
     normalized: List[Document] = []
     for index, doc in enumerate(documents):
         content = str(_get_field(doc, "content", "") or "")
@@ -174,13 +204,19 @@ def _normalize_documents(documents: Iterable[Document], source_hint: str) -> Lis
                     "doc_id": doc_id,
                     "source": source,
                     "retrieval_source": source_hint,
+                    "channel": channel,
+                    "channel_score": score,
                     "score": score,
                     "author": _get_field(metadata, "author"),
                     "published_date": _get_field(metadata, "published_date"),
                     "updated_date": _get_field(metadata, "updated_date"),
                     "url": _get_field(metadata, "url"),
                     "tags": _get_field(metadata, "tags", []) or [],
+                    "skill_tags": _get_field(metadata, "skill_tags", []) or [],
+                    "memory_level": _get_field(metadata, "memory_level"),
+                    "session_id": _get_field(metadata, "session_id"),
                     "source_ranking": _get_field(metadata, "source_ranking", 0.0) or 0.0,
+                    "rerank_features": _get_field(metadata, "rerank_features", {}) or {},
                 },
                 score=score,
             )
@@ -198,11 +234,18 @@ def _tokenize(text: str) -> set[str]:
 def _score_from_retrieval(doc: Document) -> float:
     metadata = _get_field(doc, "metadata", {}) or {}
     retrieval_source = str(_get_field(metadata, "retrieval_source", "") or "").lower()
+    if not retrieval_source:
+        retrieval_source = str(_get_field(metadata, "channel", "") or "").lower()
     raw_score = _safe_float(_get_field(doc, "score", 0.0), default=0.0)
 
     if retrieval_source == "vector":
         distance = abs(raw_score)
         return 1.0 / (1.0 + distance)
+
+    if retrieval_source == "keyword":
+        return min(max(raw_score, 0.0), 1.0)
+    if retrieval_source == "memory":
+        return min(max(raw_score, 0.0), 1.0)
 
     if raw_score <= 0:
         return 0.0
@@ -229,6 +272,8 @@ def _score_from_keyword_overlap(query_tokens: set[str], doc: Document) -> float:
 def _score_from_source_prior(doc: Document) -> float:
     metadata = _get_field(doc, "metadata", {}) or {}
     retrieval_source = str(_get_field(metadata, "retrieval_source", "") or "").lower()
+    if not retrieval_source:
+        retrieval_source = str(_get_field(metadata, "channel", "") or "").lower()
     source = str(_get_field(metadata, "source", "") or "").lower()
     source_ranking = _safe_float(_get_field(metadata, "source_ranking", 0.0), default=0.0)
     source_ranking = min(max(source_ranking, 0.0), 1.0)
@@ -254,8 +299,138 @@ def _apply_rerank_score(doc: Document, score: float) -> None:
             pass
 
 
+def _parse_datetime(value: Any) -> datetime | None:
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        if value.tzinfo is None:
+            return value.replace(tzinfo=timezone.utc)
+        return value.astimezone(timezone.utc)
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _score_from_freshness(doc: Document) -> float:
+    metadata = _get_field(doc, "metadata", {}) or {}
+    updated_date = _parse_datetime(_get_field(metadata, "updated_date"))
+    published_date = _parse_datetime(_get_field(metadata, "published_date"))
+    reference = updated_date or published_date
+    if reference is None:
+        return 0.0
+    age_days = (datetime.now(timezone.utc) - reference).total_seconds() / 86400.0
+    if age_days <= 0:
+        return 1.0
+    # 30 days half-life style decay.
+    return 1.0 / (1.0 + (age_days / 30.0))
+
+
+def _score_from_skill_match(selected_skill: str | None, doc: Document) -> float:
+    normalized_skill = str(selected_skill or "").strip().lower().replace("_", " ")
+    if not normalized_skill:
+        return 0.0
+    skill_tokens = _tokenize(normalized_skill)
+    if not skill_tokens:
+        return 0.0
+
+    metadata = _get_field(doc, "metadata", {}) or {}
+    tags = _get_field(metadata, "tags", []) or []
+    skill_tags = _get_field(metadata, "skill_tags", []) or []
+    bag = " ".join(str(item) for item in list(tags) + list(skill_tags))
+    doc_tokens = _tokenize(bag)
+    doc_tokens.update(_tokenize(str(_get_field(doc, "content", "") or "")))
+    if not doc_tokens:
+        return 0.0
+    overlap = len(skill_tokens & doc_tokens)
+    return overlap / max(len(skill_tokens), 1)
+
+
+def _score_from_memory_boost(doc: Document, session_id: str | None) -> float:
+    metadata = _get_field(doc, "metadata", {}) or {}
+    retrieval_source = str(_get_field(metadata, "retrieval_source", "") or "").lower()
+    channel = str(_get_field(metadata, "channel", "") or "").lower()
+    memory_level = str(_get_field(metadata, "memory_level", "") or "").strip().lower()
+    doc_session_id = str(_get_field(metadata, "session_id", "") or "").strip()
+    current_session_id = str(session_id or "").strip()
+
+    if retrieval_source == "memory" or channel == "memory":
+        return 1.0
+    if current_session_id and current_session_id == doc_session_id:
+        return 0.6
+    if memory_level in {"working", "episodic", "semantic"}:
+        return 0.4
+    return 0.0
+
+
+def _set_rerank_features(doc: Document, features: dict[str, float], mode: str) -> None:
+    metadata = _get_field(doc, "metadata", None)
+    payload = {k: round(_safe_float(v), 6) for k, v in features.items()}
+    payload["mode"] = mode
+    if isinstance(metadata, dict):
+        metadata["rerank_features"] = payload
+    elif metadata is not None:
+        try:
+            setattr(metadata, "rerank_features", payload)
+        except Exception:
+            pass
+    doc.freshness_score = payload.get("freshness", 0.0)
+
+
+def _dedup_key(doc: Document, index: int) -> str:
+    metadata = _get_field(doc, "metadata", {}) or {}
+    doc_id = str(_get_field(metadata, "doc_id", "") or "").strip()
+    if doc_id:
+        return f"doc_id:{doc_id}"
+    url = str(_get_field(metadata, "url", "") or "").strip()
+    if url:
+        return f"url:{url}"
+    source = str(_get_field(metadata, "source", "") or "").strip()
+    content = str(_get_field(doc, "content", "") or "")
+    digest = hashlib.sha1(content.encode("utf-8", errors="ignore")).hexdigest()[:12]
+    return f"fallback:{source}:{digest}:{index}"
+
+
+def _deduplicate_documents(docs: List[Document]) -> List[Document]:
+    best_by_key: dict[str, Document] = {}
+    for index, doc in enumerate(docs, start=1):
+        key = _dedup_key(doc, index=index)
+        current = best_by_key.get(key)
+        if current is None:
+            best_by_key[key] = doc
+            continue
+        incoming_score = _safe_float(_get_field(doc, "score", 0.0), default=0.0)
+        current_score = _safe_float(_get_field(current, "score", 0.0), default=0.0)
+        if incoming_score > current_score:
+            best_by_key[key] = doc
+    return list(best_by_key.values())
+
+
+def _channel_counts(docs: List[Document]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for doc in docs:
+        metadata = _get_field(doc, "metadata", {}) or {}
+        channel = str(_get_field(metadata, "channel", "") or _get_field(metadata, "retrieval_source", "") or "unknown")
+        channel = channel.lower()
+        counts[channel] = counts.get(channel, 0) + 1
+    return counts
+
+
 @traceable(name="rerank_documents")
-def rerank_documents(query: str, docs: List[Document], top_n: int) -> List[Document]:
+def rerank_documents(
+    query: str,
+    docs: List[Document],
+    top_n: int,
+    *,
+    selected_skill: str | None = None,
+    session_id: str | None = None,
+) -> List[Document]:
     """Rerank merged documents and keep top_n with normalized metadata.score."""
 
     if not docs:
@@ -264,25 +439,76 @@ def rerank_documents(query: str, docs: List[Document], top_n: int) -> List[Docum
     limit = max(1, int(top_n))
     scored_docs: List[Document] = list(docs)
     mode = "linear"
+    weights = _normalize_weights()
+    query_tokens = _tokenize(query)
 
     cross_encoder_scores = _score_with_cross_encoder(query, scored_docs)
     if cross_encoder_scores is not None and len(cross_encoder_scores) == len(scored_docs):
-        for doc, rerank_score in zip(scored_docs, cross_encoder_scores):
-            _apply_rerank_score(doc, rerank_score)
-        mode = "cross_encoder"
+        mode = "cross_encoder_hybrid"
+        for doc, ce_score in zip(scored_docs, cross_encoder_scores):
+            retrieval_score = _score_from_retrieval(doc)
+            overlap_score = _score_from_keyword_overlap(query_tokens, doc)
+            source_score = _score_from_source_prior(doc)
+            freshness_score = _score_from_freshness(doc)
+            skill_score = _score_from_skill_match(selected_skill, doc)
+            memory_score = _score_from_memory_boost(doc, session_id)
+
+            linear_score = (
+                (weights["retrieval"] * retrieval_score)
+                + (weights["overlap"] * overlap_score)
+                + (weights["source"] * source_score)
+                + (weights["freshness"] * freshness_score)
+                + (weights["skill"] * skill_score)
+                + (weights["memory"] * memory_score)
+            )
+            final_score = (0.8 * ce_score) + (0.2 * linear_score)
+            _apply_rerank_score(doc, final_score)
+            _set_rerank_features(
+                doc,
+                {
+                    "cross_encoder": ce_score,
+                    "retrieval": retrieval_score,
+                    "overlap": overlap_score,
+                    "source": source_score,
+                    "freshness": freshness_score,
+                    "skill": skill_score,
+                    "memory": memory_score,
+                    "linear": linear_score,
+                    "final": final_score,
+                },
+                mode=mode,
+            )
     else:
-        query_tokens = _tokenize(query)
         for doc in scored_docs:
             retrieval_score = _score_from_retrieval(doc)
             overlap_score = _score_from_keyword_overlap(query_tokens, doc)
             source_score = _score_from_source_prior(doc)
+            freshness_score = _score_from_freshness(doc)
+            skill_score = _score_from_skill_match(selected_skill, doc)
+            memory_score = _score_from_memory_boost(doc, session_id)
 
             rerank_score = (
-                (_RETRIEVAL_SCORE_WEIGHT * retrieval_score)
-                + (_KEYWORD_OVERLAP_WEIGHT * overlap_score)
-                + (_SOURCE_WEIGHT * source_score)
+                (weights["retrieval"] * retrieval_score)
+                + (weights["overlap"] * overlap_score)
+                + (weights["source"] * source_score)
+                + (weights["freshness"] * freshness_score)
+                + (weights["skill"] * skill_score)
+                + (weights["memory"] * memory_score)
             )
             _apply_rerank_score(doc, rerank_score)
+            _set_rerank_features(
+                doc,
+                {
+                    "retrieval": retrieval_score,
+                    "overlap": overlap_score,
+                    "source": source_score,
+                    "freshness": freshness_score,
+                    "skill": skill_score,
+                    "memory": memory_score,
+                    "final": rerank_score,
+                },
+                mode=mode,
+            )
 
     log_event(
         logger,
@@ -290,7 +516,7 @@ def rerank_documents(query: str, docs: List[Document], top_n: int) -> List[Docum
         "search.rerank.rank.done",
         component="search",
         mode=mode,
-        model=settings.RERANK_MODEL_NAME if mode == "cross_encoder" else None,
+        model=settings.RERANK_MODEL_NAME if mode.startswith("cross_encoder") else None,
         query=text_preview(query),
         docs=len(scored_docs),
         top_n=limit,
@@ -305,16 +531,72 @@ def rerank_documents(query: str, docs: List[Document], top_n: int) -> List[Docum
 
 
 @traceable(name="retrieve_shared")
-def retrieve(query: str, top_k: int = 5) -> List[Document]:
+def retrieve(
+    query: str,
+    top_k: int = 5,
+    *,
+    session_id: str | None = None,
+    selected_skill: str | None = None,
+    memory_context: list[dict[str, Any]] | None = None,
+) -> List[Document]:
     """Run shared hybrid retrieval (vector + web) and return normalized documents."""
 
     trace_id = new_trace_id("search")
-    vector_docs = similarity_search(query=query, k=top_k)
-    web_docs = _tavily_search(query=query)
+    query_hint = text_preview(query)
+    vector_k = max(1, int(getattr(settings, "RECALL_VECTOR_TOP_K", top_k)))
+    web_k = max(1, int(getattr(settings, "RECALL_WEB_TOP_K", top_k)))
+    keyword_k = max(1, int(getattr(settings, "RECALL_KEYWORD_TOP_K", top_k)))
+    memory_k = max(1, int(getattr(settings, "RECALL_MEMORY_TOP_K", top_k)))
+    rerank_top_n = max(int(top_k), int(getattr(settings, "RERANK_FINAL_TOP_N", top_k)))
+
+    recall_tasks: list[tuple[str, Any]] = []
+    if getattr(settings, "RECALL_ENABLE_VECTOR", True):
+        recall_tasks.append(("vector", lambda: recall_vector(query=query, top_k=vector_k, trace_id=trace_id)))
+    if getattr(settings, "RECALL_ENABLE_WEB", True):
+        recall_tasks.append(("web", lambda: recall_web(query=query, top_k=web_k, trace_id=trace_id)))
+    if getattr(settings, "RECALL_ENABLE_KEYWORD", True):
+        recall_tasks.append(("keyword", lambda: recall_keyword(query=query, top_k=keyword_k, trace_id=trace_id)))
+    if getattr(settings, "RECALL_ENABLE_MEMORY", True):
+        recall_tasks.append(
+            (
+                "memory",
+                lambda: recall_memory(
+                    query=query,
+                    session_id=session_id,
+                    top_k=memory_k,
+                    memory_context=memory_context,
+                ),
+            )
+        )
+
+    channel_docs: dict[str, List[Document]] = {}
+    if recall_tasks:
+        with ThreadPoolExecutor(max_workers=min(4, len(recall_tasks))) as executor:
+            future_map = {executor.submit(run): channel for channel, run in recall_tasks}
+            for future in as_completed(future_map):
+                channel = future_map[future]
+                try:
+                    channel_docs[channel] = future.result() or []
+                except Exception as exc:
+                    log_event(
+                        logger,
+                        logging.WARNING,
+                        "search.retrieve.channel.fail",
+                        component="search",
+                        trace_id=trace_id,
+                        channel=channel,
+                        query=query_hint,
+                        error_type=type(exc).__name__,
+                        error=str(exc),
+                    )
+                    channel_docs[channel] = []
 
     merged_docs: List[Document] = []
-    merged_docs.extend(_normalize_documents(vector_docs, source_hint="vector"))
-    merged_docs.extend(_normalize_documents(web_docs, source_hint="web"))
+    merged_docs.extend(_normalize_documents(channel_docs.get("vector", []), source_hint="vector", channel="vector"))
+    merged_docs.extend(_normalize_documents(channel_docs.get("web", []), source_hint="web", channel="web"))
+    merged_docs.extend(_normalize_documents(channel_docs.get("keyword", []), source_hint="keyword", channel="keyword"))
+    merged_docs.extend(_normalize_documents(channel_docs.get("memory", []), source_hint="memory", channel="memory"))
+    merged_docs = _deduplicate_documents(merged_docs)
 
     merged_top5 = []
     for doc in merged_docs[:5]:
@@ -323,6 +605,7 @@ def retrieve(query: str, top_k: int = 5) -> List[Document]:
             {
                 "doc_id": str(_get_field(metadata, "doc_id", "") or ""),
                 "score": round(_safe_float(_get_field(metadata, "score", _get_field(doc, "score", 0.0))), 6),
+                "channel": str(_get_field(metadata, "channel", "") or _get_field(metadata, "retrieval_source", "")),
             }
         )
 
@@ -333,14 +616,21 @@ def retrieve(query: str, top_k: int = 5) -> List[Document]:
             "search.retrieve.rerank.skip",
             component="search",
             trace_id=trace_id,
-            query=text_preview(query),
+            query=query_hint,
             before_count=len(merged_docs),
             after_count=len(merged_docs),
+            channels=_channel_counts(merged_docs),
             top5=merged_top5,
         )
         return merged_docs
 
-    reranked_docs = rerank_documents(query=query, docs=merged_docs, top_n=top_k)
+    reranked_docs = rerank_documents(
+        query=query,
+        docs=merged_docs,
+        top_n=rerank_top_n,
+        selected_skill=selected_skill,
+        session_id=session_id,
+    )
 
     top5 = []
     for doc in reranked_docs[:5]:
@@ -349,6 +639,7 @@ def retrieve(query: str, top_k: int = 5) -> List[Document]:
             {
                 "doc_id": str(_get_field(metadata, "doc_id", "") or ""),
                 "score": round(_safe_float(_get_field(metadata, "score", _get_field(doc, "score", 0.0))), 6),
+                "channel": str(_get_field(metadata, "channel", "") or _get_field(metadata, "retrieval_source", "")),
             }
         )
 
@@ -358,9 +649,11 @@ def retrieve(query: str, top_k: int = 5) -> List[Document]:
         "search.retrieve.rerank.done",
         component="search",
         trace_id=trace_id,
-        query=text_preview(query),
+        query=query_hint,
         before_count=len(merged_docs),
         after_count=len(reranked_docs),
+        channels=_channel_counts(reranked_docs),
+        selected_skill=str(selected_skill or ""),
         top5=top5,
     )
     return reranked_docs

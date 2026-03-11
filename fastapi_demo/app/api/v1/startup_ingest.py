@@ -147,16 +147,26 @@ def run_startup_ingestion_if_needed() -> None:
     logger.info("startup ingest vector count before run=%s", current_count)
     if current_count > 0:
         logger.info("startup ingest skipped: vector store already populated")
+        logger.info(
+            "startup.ingest.complete status=skipped reason=vector_store_not_empty vector_count_before=%s processed_files=0 added_vectors=0",
+            current_count,
+        )
         return
 
     if not ingest_root.exists() or not ingest_root.is_dir():
         logger.info("startup ingest skipped: ingest path not found or not a directory")
+        logger.info(
+            "startup.ingest.complete status=skipped reason=ingest_path_missing processed_files=0 added_vectors=0"
+        )
         return
 
     files = _list_candidate_files(ingest_root)
     logger.info("startup ingest files found=%s", len(files))
     if not files:
         logger.info("startup ingest skipped: no supported files")
+        logger.info(
+            "startup.ingest.complete status=skipped reason=no_supported_files processed_files=0 added_vectors=0"
+        )
         return
 
     total_files = 0
@@ -189,4 +199,10 @@ def run_startup_ingestion_if_needed() -> None:
         "startup ingest complete: processed_files=%s added_vectors=%s",
         total_files,
         total_vectors,
+    )
+    logger.info(
+        "startup.ingest.complete status=ok processed_files=%s added_vectors=%s vector_count_before=%s",
+        total_files,
+        total_vectors,
+        current_count,
     )

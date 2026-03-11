@@ -91,6 +91,14 @@ class RecommendationResponse(BaseModel):
         None,
         description="Deduplicated union of retrieved doc ids across all subqueries",
     )
+    selected_skill: Optional[str] = Field(
+        None,
+        description="Skill selected by skill router",
+    )
+    plan_steps: Optional[List[Dict[str, Any]]] = Field(
+        None,
+        description="Planner output steps",
+    )
 
 
 class SessionStateUpdateRequest(BaseModel):
