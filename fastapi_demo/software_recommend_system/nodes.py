@@ -709,6 +709,9 @@ def _is_drawing_request(text: str) -> bool:
     return False
 
 KNOWN_FACTS_MARKER = "[Known User Facts]"
+SPRING_CONTEXT_QUERY_PATTERN = re.compile(
+    r"(?is)^\s*current user input:\s*(?P<input>.*?)(?:\n\s*known user facts:\s*|\n\s*recent conversation history:\s*|$)"
+)
 ALL_TECH_TERMS = tuple(
     str(term).strip()
     for group in TECH_TERMS.values()
@@ -739,6 +742,15 @@ def _extract_current_user_query(raw_query: str) -> str:
     query = (raw_query or "").strip()
     if not query:
         return ""
+
+    # Spring may enrich query into a block that starts with:
+    # "Current user input:\n<question>\n..."
+    context_match = SPRING_CONTEXT_QUERY_PATTERN.match(query)
+    if context_match:
+        extracted = str(context_match.group("input") or "").strip()
+        if extracted:
+            return extracted
+
     marker_index = query.find(KNOWN_FACTS_MARKER)
     if marker_index >= 0:
         return query[:marker_index].strip()
@@ -981,7 +993,7 @@ def normalize_query_with_llm(model: str, prompt: str, query: str):
 @traceable(name="query_normalization")
 def query_normalization_node(state: AgentState) -> Dict[str, Any]:
     """查询规范化节点"""
-    user_query = _get_field(state, "user_query", "")
+    user_query = _extract_current_user_query(_get_field(state, "user_query", ""))
     logger.info(f"规范化查询: {user_query}")
 
     normalized_queries = []

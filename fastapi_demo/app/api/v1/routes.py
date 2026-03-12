@@ -524,6 +524,29 @@ def _sse(event: str, payload: Optional[Dict[str, Any]] = None) -> str:
     return f"event: {event}\ndata: {json.dumps(body, ensure_ascii=False, default=str)}\n\n"
 
 
+async def _iter_awaiting_confirmation_sse(
+    session_id: str,
+    sub_questions: List[str],
+    *,
+    delay_seconds: float = 0.12,
+) -> AsyncIterator[str]:
+    """Emit awaiting_confirmation incrementally so sub-questions render progressively."""
+    normalized = _normalize_pending_sub_questions(sub_questions)
+    if not normalized:
+        return
+
+    for idx in range(1, len(normalized) + 1):
+        yield _sse(
+            "awaiting_confirmation",
+            {
+                "session_id": session_id,
+                "sub_questions": normalized[:idx],
+            },
+        )
+        if idx < len(normalized) and delay_seconds > 0:
+            await asyncio.sleep(delay_seconds)
+
+
 def _to_stream_mode_chunk(item: Any) -> Tuple[str, Any]:
     if (
         isinstance(item, tuple)
@@ -1156,13 +1179,11 @@ async def stream_software_recommendation(request_data: RecommendationRequest):
                     interrupt_source="confirm_shortcut_stream",
                 )
                 if response.awaiting_human_confirmation:
-                    yield _sse(
-                        "awaiting_confirmation",
-                        {
-                            "session_id": session_id,
-                            "sub_questions": response.pending_sub_questions or [],
-                        },
-                    )
+                    async for frame in _iter_awaiting_confirmation_sse(
+                        session_id,
+                        response.pending_sub_questions or [],
+                    ):
+                        yield frame
                 else:
                     yield _sse(
                         "final",
@@ -1246,13 +1267,11 @@ async def stream_software_recommendation(request_data: RecommendationRequest):
                         )
                         if pending_sub_questions:
                             awaiting_emitted = True
-                            yield _sse(
-                                "awaiting_confirmation",
-                                {
-                                    "session_id": session_id,
-                                    "sub_questions": pending_sub_questions,
-                                },
-                            )
+                            async for frame in _iter_awaiting_confirmation_sse(
+                                session_id,
+                                pending_sub_questions,
+                            ):
+                                yield frame
                 elif mode == "custom":
                     for custom_event in _iter_custom_events(chunk):
                         event_type = str(custom_event.get("type", "state") or "state").strip()
@@ -1278,25 +1297,21 @@ async def stream_software_recommendation(request_data: RecommendationRequest):
                             awaiting_emitted = True
 
             interrupt_payload = _extract_interrupt_payload(merged_result)
-            if (
-                interrupt_payload
-                and interrupt_payload.get("type") == "human_confirmation"
-                and not awaiting_emitted
-            ):
-                pending_sub_questions = _normalize_pending_sub_questions(
-                    interrupt_payload.get("sub_questions", [])
-                )
-                if pending_sub_questions:
-                    ack_message = _build_human_confirmation_ack(pending_sub_questions)
-                    _append_session_message_once(session_id, "assistant", ack_message)
-                    yield _sse(
-                        "awaiting_confirmation",
-                        {
-                            "session_id": session_id,
-                            "sub_questions": pending_sub_questions,
-                        },
+            if interrupt_payload and interrupt_payload.get("type") == "human_confirmation":
+                if not awaiting_emitted:
+                    pending_sub_questions = _normalize_pending_sub_questions(
+                        interrupt_payload.get("sub_questions", [])
                     )
-                    return
+                    if pending_sub_questions:
+                        ack_message = _build_human_confirmation_ack(pending_sub_questions)
+                        _append_session_message_once(session_id, "assistant", ack_message)
+                        async for frame in _iter_awaiting_confirmation_sse(
+                            session_id,
+                            pending_sub_questions,
+                        ):
+                            yield frame
+                # Stop stream on confirmation interrupt; do not emit final in this turn.
+                return
 
             final_answer = str(merged_result.get("final_answer", "") or "")
             if not final_answer and token_parts:
@@ -1437,13 +1452,11 @@ async def confirm_software_recommendation_stream(request_data: RecommendationCon
                         )
                         if pending_sub_questions:
                             awaiting_emitted = True
-                            yield _sse(
-                                "awaiting_confirmation",
-                                {
-                                    "session_id": session_id,
-                                    "sub_questions": pending_sub_questions,
-                                },
-                            )
+                            async for frame in _iter_awaiting_confirmation_sse(
+                                session_id,
+                                pending_sub_questions,
+                            ):
+                                yield frame
                 elif mode == "custom":
                     for custom_event in _iter_custom_events(chunk):
                         event_type = str(custom_event.get("type", "state") or "state").strip()
@@ -1524,13 +1537,11 @@ async def confirm_software_recommendation_stream(request_data: RecommendationCon
                     )
 
                 if not awaiting_emitted:
-                    yield _sse(
-                        "awaiting_confirmation",
-                        {
-                            "session_id": session_id,
-                            "sub_questions": pending_sub_questions,
-                        },
-                    )
+                    async for frame in _iter_awaiting_confirmation_sse(
+                        session_id,
+                        pending_sub_questions,
+                    ):
+                        yield frame
                 ack_message = _build_human_confirmation_ack(pending_sub_questions)
                 _append_session_message_once(session_id, "assistant", ack_message)
                 return

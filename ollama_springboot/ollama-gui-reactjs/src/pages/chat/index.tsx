@@ -21,7 +21,6 @@ export default function Chat () {
     taskId,
     taskStatus,
     subQuestions,
-    finalResult,
     loading,
     error,
     handleDeleteChat,
@@ -31,12 +30,6 @@ export default function Chat () {
 
   const isConfirming = taskStatus === 'CONFIRMING'
   const showConfirming = isConfirming
-  const showGenerating = taskStatus === 'GENERATING'
-  const hasFinalInMessages = finalResult.trim().length > 0
-    && messages.some(
-      (message) => message.role === 'assistant' && message.content.trim() === finalResult.trim()
-    )
-  const showFinalResult = taskStatus === 'DONE' && finalResult.trim().length > 0 && !hasFinalInMessages
 
   return (
     <ChatErrorBoundary>
@@ -50,20 +43,6 @@ export default function Chat () {
             <div className='hitlPanel'>
               <div className='hitlPanelTitle'>Confirming...</div>
               <p>Submitting confirmation and syncing task state.</p>
-            </div>
-          )}
-
-          {showGenerating && (
-            <div className='hitlPanel'>
-              <div className='hitlPanelTitle'>Generating final result...</div>
-              <p>{finalResult.trim().length > 0 ? finalResult : 'The backend is still processing your request.'}</p>
-            </div>
-          )}
-
-          {showFinalResult && (
-            <div className='hitlPanel'>
-              <div className='hitlPanelTitle'>Final result</div>
-              <p>{finalResult}</p>
             </div>
           )}
 
