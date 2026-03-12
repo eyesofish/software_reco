@@ -169,6 +169,131 @@ public class RecommendTaskStateService {
     }
 
     @Transactional
+    public RecommendTaskStateResponse createStreamingTask(
+            String conversationId,
+            String query,
+            Integer timeout,
+            Integer maxIterations,
+            String modelName
+    ) {
+        String normalizedQuery = trimToNull(query);
+        if (normalizedQuery == null) {
+            throw new IllegalArgumentException("query is required");
+        }
+
+        ConversationEntity conversation = conversationService.ensureConversation(conversationId, normalizedQuery, modelName);
+
+        RecommendTaskEntity task = new RecommendTaskEntity();
+        task.setConversation(conversation);
+        task.setFastapiSessionId(conversation.getId());
+        applyCanonicalTaskState(task, RecommendTaskStatus.GENERATING, List.of(), null, null);
+        task.setProgress(progressForStatus(RecommendTaskStatus.GENERATING));
+        task.setLastHeartbeatAt(Instant.now());
+        task.setExpireAt(Instant.now().plus(TASK_EXPIRE_AFTER));
+
+        RecommendTaskEntity savedTask = recommendTaskRepository.save(task);
+        logger.info(
+                "stream task created task_id={}, conversation_id={}, status={}",
+                savedTask.getId(),
+                conversation.getId(),
+                savedTask.getStatus()
+        );
+        return toResponse(savedTask);
+    }
+
+    @Transactional
+    public RecommendTaskStateResponse applyStreamEvent(
+            String taskId,
+            String eventType,
+            Map<String, Object> payload
+    ) {
+        String normalizedTaskId = trimToNull(taskId);
+        if (normalizedTaskId == null) {
+            return expiredResponse("", "missing task id");
+        }
+
+        RecommendTaskEntity task = recommendTaskRepository.findById(normalizedTaskId)
+                .orElse(null);
+        if (task == null) {
+            return expiredResponse(normalizedTaskId, "task not found");
+        }
+
+        task = applyLifecycleRules(task, Instant.now());
+        String normalizedEventType = firstNonBlank(
+                        trimToNull(eventType),
+                        asText(payload == null ? null : payload.get("type")),
+                        "state"
+                )
+                .toLowerCase(Locale.ROOT);
+        Instant now = Instant.now();
+
+        switch (normalizedEventType) {
+            case "meta" -> {
+                String sessionId = firstNonBlank(
+                        asText(payload == null ? null : payload.get("session_id")),
+                        asText(payload == null ? null : payload.get("conversation_id")),
+                        task.getFastapiSessionId()
+                );
+                task.setFastapiSessionId(sessionId);
+                if (!isTerminal(task.getStatus()) && task.getStatus() != RecommendTaskStatus.PENDING_CONFIRM) {
+                    applyCanonicalTaskState(task, RecommendTaskStatus.GENERATING, List.of(), null, null);
+                    task.setProgress(
+                            Math.max(
+                                    progressForStatus(RecommendTaskStatus.GENERATING),
+                                    task.getProgress() == null ? 0 : task.getProgress()
+                            )
+                    );
+                }
+                task.setLastHeartbeatAt(now);
+            }
+            case "node", "state", "token" -> {
+                if (!isTerminal(task.getStatus()) && task.getStatus() != RecommendTaskStatus.PENDING_CONFIRM) {
+                    applyCanonicalTaskState(task, RecommendTaskStatus.GENERATING, List.of(), null, null);
+                    int progress = task.getProgress() == null
+                            ? progressForStatus(RecommendTaskStatus.GENERATING)
+                            : task.getProgress();
+                    task.setProgress(Math.min(Math.max(progress, progressForStatus(RecommendTaskStatus.GENERATING)) + 1, 95));
+                }
+                task.setLastHeartbeatAt(now);
+            }
+            case "awaiting_confirmation" -> {
+                List<String> pending = normalizeSubQuestions(payload == null ? null : payload.get("sub_questions"));
+                applyCanonicalTaskState(task, RecommendTaskStatus.PENDING_CONFIRM, pending, null, null);
+                task.setProgress(progressForStatus(RecommendTaskStatus.PENDING_CONFIRM));
+                task.setLastHeartbeatAt(now);
+            }
+            case "final" -> {
+                String finalAnswer = firstNonBlank(
+                        asText(payload == null ? null : payload.get("final_answer")),
+                        asText(payload == null ? null : payload.get("message")),
+                        ""
+                );
+                applyCanonicalTaskState(task, RecommendTaskStatus.DONE, List.of(), finalAnswer, null);
+                task.setProgress(progressForStatus(RecommendTaskStatus.DONE));
+                task.setLastHeartbeatAt(now);
+                RecommendTaskEntity saved = recommendTaskRepository.save(task);
+                if (trimToNull(finalAnswer) != null) {
+                    appendAssistantIfNeeded(saved.getConversation().getId(), finalAnswer);
+                }
+                return toResponse(saved);
+            }
+            case "error" -> {
+                String errorMessage = firstNonBlank(
+                        asText(payload == null ? null : payload.get("message")),
+                        "stream failed"
+                );
+                applyCanonicalTaskState(task, RecommendTaskStatus.FAILED, List.of(), null, errorMessage);
+                task.setProgress(progressForStatus(RecommendTaskStatus.FAILED));
+                task.setLastHeartbeatAt(now);
+            }
+            default -> task.setLastHeartbeatAt(now);
+        }
+
+        RecommendTaskEntity saved = recommendTaskRepository.save(task);
+        return toResponse(saved);
+    }
+
+    @Transactional
     public RecommendTaskStateResponse confirmTask(
             String taskId,
             String action,
@@ -212,6 +337,57 @@ public class RecommendTaskStateService {
         );
 
         return toResponse(savedTask);
+    }
+
+    @Transactional
+    public ConfirmStreamPreparation prepareConfirmStreamingTask(
+            String taskId,
+            String action,
+            List<String> subQuestions,
+            String comment
+    ) {
+        String normalizedTaskId = trimToNull(taskId);
+        if (normalizedTaskId == null) {
+            throw new IllegalArgumentException("missing task id");
+        }
+
+        RecommendTaskEntity task = recommendTaskRepository.findById(normalizedTaskId)
+                .orElse(null);
+        if (task == null) {
+            throw new IllegalArgumentException("task not found");
+        }
+
+        task = applyLifecycleRules(task, Instant.now());
+        if (isTerminal(task.getStatus()) || task.getStatus() == RecommendTaskStatus.EXPIRED) {
+            throw new IllegalStateException("task is not confirmable");
+        }
+        if (task.getStatus() != RecommendTaskStatus.PENDING_CONFIRM) {
+            throw new IllegalStateException("task is not awaiting confirmation");
+        }
+
+        String normalizedAction = normalizeAction(action);
+        List<String> normalizedSubQuestions = normalizeSubQuestions(subQuestions);
+        if (normalizedSubQuestions.isEmpty()) {
+            normalizedSubQuestions = deserializeSubQuestions(task.getSubQuestions());
+        }
+
+        applyCanonicalTaskState(task, RecommendTaskStatus.GENERATING, List.of(), null, null);
+        task.setProgress(progressForStatus(RecommendTaskStatus.GENERATING));
+        task.setLastHeartbeatAt(Instant.now());
+
+        RecommendTaskEntity savedTask = recommendTaskRepository.save(task);
+        RecommendTaskStateResponse taskState = toResponse(savedTask);
+
+        return new ConfirmStreamPreparation(
+                taskState,
+                firstNonBlank(
+                        savedTask.getFastapiSessionId(),
+                        savedTask.getConversation() == null ? null : savedTask.getConversation().getId()
+                ),
+                normalizedAction,
+                normalizedSubQuestions,
+                firstNonBlank(comment, "confirm")
+        );
     }
 
     @Transactional
@@ -771,6 +947,13 @@ public class RecommendTaskStateService {
         return status == RecommendTaskStatus.FAILED || status == RecommendTaskStatus.EXPIRED;
     }
 
+    private String asText(Object value) {
+        if (value == null) {
+            return null;
+        }
+        return value.toString();
+    }
+
     private String toErrorMessage(Exception ex) {
         String message = trimToNull(ex.getMessage());
         return firstNonBlank(message, ex.getClass().getSimpleName(), "unexpected error");
@@ -815,6 +998,15 @@ public class RecommendTaskStateService {
             String fastapiSessionId,
             boolean awaitingHumanConfirmation,
             List<String> pendingSubQuestions
+    ) {
+    }
+
+    public record ConfirmStreamPreparation(
+            RecommendTaskStateResponse taskState,
+            String sessionId,
+            String action,
+            List<String> subQuestions,
+            String comment
     ) {
     }
 }

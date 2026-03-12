@@ -13,7 +13,10 @@ const root = ReactDOM.createRoot(
 root.render(
   <React.StrictMode>
     <AppThemeProvider>
-      <RouterProvider router={router} />
+      <RouterProvider
+        future={{ v7_startTransition: true }}
+        router={router}
+      />
     </AppThemeProvider>
   </React.StrictMode>
 )

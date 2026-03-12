@@ -68,7 +68,7 @@ export const ChatsContainer = styled.div`
   width: 100%;
 `
 
-export const Container = styled.div<{ isMobile : boolean }>`
+export const Container = styled.div<{ $isMobile : boolean }>`
   background-color: ${({ theme }) => theme.colors.menuBg};
   border-right: 1px solid ${({ theme }) => theme.colors.menuBorder};
   box-shadow: ${({ theme }) => theme.colors.menuShadow};
@@ -76,5 +76,5 @@ export const Container = styled.div<{ isMobile : boolean }>`
   display: flex;
   flex-direction: column;
   height: 100%;
-  min-width: ${({ isMobile }) => isMobile ? '100vw' : '20%'};
+  min-width: ${({ $isMobile }) => $isMobile ? '100vw' : '20%'};
 `

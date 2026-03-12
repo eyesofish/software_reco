@@ -50,7 +50,7 @@ export default function Menu ({ onDeleteChat, scrollRef } : MenuProps) {
   }
 
   return (
-    <Container isMobile={isMobile}>
+    <Container $isMobile={isMobile}>
       <ChatsContainer>
         { chats.map((messages, index) => {
           const { content } = messages[0]

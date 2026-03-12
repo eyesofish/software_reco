@@ -1,4 +1,4 @@
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Callable
 from .state import AgentState, CandidateSolution
 from .document_schema import Document, Metadata
 from .config import settings
@@ -12,6 +12,7 @@ from datetime import datetime
 import logging
 from langgraph.func import task
 from langgraph.types import interrupt
+from langgraph.config import get_stream_writer
 
 # 导入新的工具系统
 from .retriever import retrieve, rerank_documents
@@ -207,6 +208,111 @@ def _get_openai_client() -> openai.OpenAI:
     api_key = settings.DASHSCOPE_API_KEY or settings.OPENAI_API_KEY
     base_url = settings.OPENAI_BASE_URL or None
     return wrap_openai(openai.OpenAI(api_key=api_key, base_url=base_url))
+
+
+def _safe_get_stream_writer() -> Callable[[Dict[str, Any]], None] | None:
+    try:
+        writer = get_stream_writer()
+    except Exception:
+        return None
+    return writer
+
+
+def _extract_stream_delta_text(chunk: Any) -> str:
+    choices = _get_field(chunk, "choices", []) or []
+    if not choices:
+        return ""
+
+    first_choice = choices[0]
+    delta = _get_field(first_choice, "delta", None)
+    if delta is None and isinstance(first_choice, dict):
+        delta = first_choice.get("delta")
+
+    content = _get_field(delta, "content", "")
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts: List[str] = []
+        for item in content:
+            text = _get_field(item, "text", "") if isinstance(item, dict) else ""
+            if not text and isinstance(item, dict):
+                text = _get_field(item, "content", "")
+            if text:
+                parts.append(str(text))
+        return "".join(parts)
+    return ""
+
+
+def _stream_chat_completion_text(
+    *,
+    scene: str,
+    model: str,
+    messages: List[Dict[str, str]],
+    temperature: float,
+    stream_node: str,
+    max_tokens: int | None = None,
+) -> str:
+    client = _get_openai_client()
+    writer = _safe_get_stream_writer()
+    trace_id, started_at = _llm_invoke_start(
+        scene=scene,
+        model=model,
+        request_hint=f"messages={len(messages)}",
+    )
+    kwargs: Dict[str, Any] = {
+        "model": model,
+        "messages": messages,
+        "temperature": temperature,
+        "stream": True,
+    }
+    if max_tokens is not None:
+        kwargs["max_tokens"] = max_tokens
+
+    try:
+        stream = client.chat.completions.create(**kwargs)
+        parts: List[str] = []
+        for chunk in stream:
+            delta = _extract_stream_delta_text(chunk)
+            if not delta:
+                continue
+            parts.append(delta)
+            if writer is not None:
+                writer({"type": "token", "node": stream_node, "delta": delta})
+
+        response_text = "".join(parts).strip()
+        if not response_text:
+            # Defensive fallback for providers that occasionally suppress stream deltas.
+            kwargs["stream"] = False
+            fallback = client.chat.completions.create(**kwargs)
+            if hasattr(fallback, "choices") and fallback.choices:
+                first_choice = fallback.choices[0]
+                if isinstance(first_choice, dict):
+                    message = first_choice.get("message") or {}
+                    response_text = str(message.get("content") or "").strip()
+                else:
+                    message = getattr(first_choice, "message", None)
+                    response_text = str(
+                        getattr(message, "content", "") if message else ""
+                    ).strip()
+
+        _llm_invoke_done(
+            scene,
+            model,
+            trace_id,
+            started_at,
+            {"choices": [1]},
+        )
+        return response_text
+    except Exception as exc:
+        _llm_invoke_failed(
+            scene=scene,
+            model=model,
+            trace_id=trace_id,
+            exc=exc,
+            started_at=started_at,
+            with_stack=True,
+        )
+        raise
 
 # 分流词表
 TECH_TERMS = {
@@ -1985,12 +2091,8 @@ def answer_generation_node(state: AgentState) -> Dict[str, Any]:
         context = _qa_evidence_context(evidence, retrieval_records)
         if context:
             try:
-                trace_id, started_at = _llm_invoke_start(
+                final_answer = _stream_chat_completion_text(
                     scene="qa_answer_generation",
-                    model=settings.LLM_MODEL,
-                    request_hint=f"evidence_len={len(context)}",
-                )
-                response_future = candidate_generation_with_llm(
                     model=settings.LLM_MODEL,
                     messages=[
                         {
@@ -2010,26 +2112,10 @@ def answer_generation_node(state: AgentState) -> Dict[str, Any]:
                         },
                     ],
                     temperature=0.0,
+                    stream_node="rag_answer_generation",
                 )
-                response = response_future.result()
-                _llm_invoke_done("qa_answer_generation", settings.LLM_MODEL, trace_id, started_at, response)
-                if hasattr(response, "choices") and response.choices:
-                    first_choice = response.choices[0]
-                    if isinstance(first_choice, dict):
-                        message = first_choice.get("message") or {}
-                        final_answer = str(message.get("content") or "").strip()
-                    else:
-                        message = getattr(first_choice, "message", None)
-                        final_answer = str(getattr(message, "content", "") if message else "").strip()
-            except Exception as exc:
-                _llm_invoke_failed(
-                    scene="qa_answer_generation",
-                    model=settings.LLM_MODEL,
-                    trace_id=trace_id if "trace_id" in locals() else new_trace_id("llm"),
-                    exc=exc,
-                    started_at=started_at if "started_at" in locals() else None,
-                    with_stack=True,
-                )
+            except Exception:
+                final_answer = ""
         if not final_answer and context:
             first_block = context.split("\n\n")[0] if context else ""
             final_answer = f"Based on retrieved evidence, the likely answer is:\n{first_block}"
@@ -2204,41 +2290,18 @@ def chat_answer_generation_node(state: AgentState) -> Dict[str, Any]:
     )
 
     try:
-        trace_id, started_at = _llm_invoke_start(
+        final_answer = _stream_chat_completion_text(
             scene="chat_answer_generation",
-            model=settings.LLM_MODEL,
-            request_hint=f"messages={len(prepared_messages)}",
-        )
-        response_future = chat_answer_with_llm(
             model=settings.LLM_MODEL,
             messages=prepared_messages,
             temperature=0.7,
             max_tokens=max_output_tokens,
+            stream_node="chat_answer_generation",
         )
-        response = response_future.result()
-        _llm_invoke_done("chat_answer_generation", settings.LLM_MODEL, trace_id, started_at, response)
-
-        final_answer = ""
-        if hasattr(response, "choices") and response.choices:
-            first_choice = response.choices[0]
-            if isinstance(first_choice, dict):
-                message = first_choice.get("message") or {}
-                final_answer = message.get("content") or ""
-            else:
-                message = getattr(first_choice, "message", None)
-                final_answer = getattr(message, "content", "") if message else ""
 
         if not final_answer:
             final_answer = "抱歉，暂时无法获取LLM回复，请稍后再试。"
-    except Exception as exc:
-        _llm_invoke_failed(
-            scene="chat_answer_generation",
-            model=settings.LLM_MODEL,
-            trace_id=trace_id if "trace_id" in locals() else new_trace_id("llm"),
-            exc=exc,
-            started_at=started_at if "started_at" in locals() else None,
-            with_stack=True,
-        )
+    except Exception:
         final_answer = "抱歉，暂时无法获取LLM回复，请稍后再试。"
 
     messages.append({"role": "assistant", "content": final_answer})

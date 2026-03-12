@@ -9,6 +9,7 @@ import org.springframework.http.client.SimpleClientHttpRequestFactory;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.web.client.RestTemplate;
+import org.springframework.web.reactive.function.client.WebClient;
 import org.springframework.web.servlet.config.annotation.CorsRegistry;
 import org.springframework.web.servlet.config.annotation.WebMvcConfigurer;
 
@@ -32,6 +33,20 @@ public class AppConfig {
                             request.getHeaders(),
                             bodyText);
                     return execution.execute(request, body);
+                })
+                .build();
+    }
+
+    @Bean
+    public WebClient webClient(WebClient.Builder builder) {
+        return builder
+                .filter((request, next) -> {
+                    logger.info(
+                            "WebClient request method={}, uri={}, headers={}",
+                            request.method(),
+                            request.url(),
+                            request.headers());
+                    return next.exchange(request);
                 })
                 .build();
     }

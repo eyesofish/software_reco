@@ -13,7 +13,7 @@ export function ColumnContainer ({ children, style } : ContainerProps) {
   const isMobile = useIsMobile()
 
   return (
-    <StyledColumnContainer isMobile={isMobile} style={style}>
+    <StyledColumnContainer $isMobile={isMobile} style={style}>
       { children }
     </StyledColumnContainer>
   )
@@ -26,7 +26,7 @@ export const RowContainer = forwardRef<HTMLDivElement, ContainerProps>
   const isMobile = useIsMobile()
 
   return (
-    <StyledRowContainer isMobile={isMobile} ref={ref} style={style}>
+    <StyledRowContainer $isMobile={isMobile} ref={ref} style={style}>
       { children }
     </StyledRowContainer>
   )

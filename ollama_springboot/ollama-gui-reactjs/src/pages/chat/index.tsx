@@ -56,7 +56,7 @@ export default function Chat () {
           {showGenerating && (
             <div className='hitlPanel'>
               <div className='hitlPanelTitle'>Generating final result...</div>
-              <p>The backend is still processing your request.</p>
+              <p>{finalResult.trim().length > 0 ? finalResult : 'The backend is still processing your request.'}</p>
             </div>
           )}
 

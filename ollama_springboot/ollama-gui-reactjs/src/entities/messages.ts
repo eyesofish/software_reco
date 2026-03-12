@@ -125,3 +125,72 @@ export interface RecommendTaskConfirmRequest {
   sub_questions ?: string[],
   comment ?: string
 }
+
+export type ChatStreamEventType =
+  | 'meta'
+  | 'node'
+  | 'token'
+  | 'state'
+  | 'awaiting_confirmation'
+  | 'final'
+  | 'error'
+
+interface ChatStreamBaseEvent {
+  type : ChatStreamEventType,
+  task_id ?: string,
+  conversation_id ?: string,
+  session_id ?: string
+}
+
+export interface ChatStreamMetaEvent extends ChatStreamBaseEvent {
+  type : 'meta',
+  status : string
+}
+
+export interface ChatStreamNodeEvent extends ChatStreamBaseEvent {
+  type : 'node',
+  node : string,
+  status : string,
+  payload_keys : string[]
+}
+
+export interface ChatStreamTokenEvent extends ChatStreamBaseEvent {
+  type : 'token',
+  delta : string,
+  node : string
+}
+
+export interface ChatStreamStateEvent extends ChatStreamBaseEvent {
+  type : 'state',
+  payload : Record<string, unknown>
+}
+
+export interface ChatStreamAwaitingConfirmationEvent extends ChatStreamBaseEvent {
+  type : 'awaiting_confirmation',
+  sub_questions : string[]
+}
+
+export interface ChatStreamFinalEvent extends ChatStreamBaseEvent {
+  type : 'final',
+  status : string,
+  final_answer : string,
+  retrieved_doc_ids : string[]
+}
+
+export interface ChatStreamErrorEvent extends ChatStreamBaseEvent {
+  type : 'error',
+  message : string
+}
+
+export type ChatStreamEvent =
+  | ChatStreamMetaEvent
+  | ChatStreamNodeEvent
+  | ChatStreamTokenEvent
+  | ChatStreamStateEvent
+  | ChatStreamAwaitingConfirmationEvent
+  | ChatStreamFinalEvent
+  | ChatStreamErrorEvent
+
+// Backward-compat alias for existing imports.
+export type RecommendStreamEventType = ChatStreamEventType
+export type RecommendStreamEvent = ChatStreamEvent

@@ -7,13 +7,11 @@ import {
   CONFIRM_FAILED_MESSAGE,
   CONFIRM_GUIDE_MESSAGE,
   CONFIRM_ONLY_PATTERN,
-  REQUEST_FAILED_MESSAGE,
-  TASK_ID_STORAGE_PREFIX,
-  TASK_POLL_INTERVAL_MS
+  REQUEST_FAILED_MESSAGE
 } from '~/constants/chat'
 import {
+  ChatStreamEvent,
   Message,
-  RecommendTaskStateResponse
 } from '~/entities/messages'
 import createAssistantMessage from '~/services/createAssistantMessage'
 import createUserMessage from '~/services/createUserMessage'
@@ -21,16 +19,13 @@ import getChatIndex from '~/services/getChatIndex'
 import scroller from '~/services/scroller'
 import Store from '~/services/store'
 import { disChats, useChats } from '~/stores/chats'
-import { addMessage } from '~/stores/chats/actions'
+import { addMessage, updateMessageContent } from '~/stores/chats/actions'
 import { useConfig } from '~/stores/config'
 import {
-  confirmTaskRequester,
   createConversationRequester,
-  createRecommendTaskRequester,
-  getTaskStateRequester,
-  listConversationTasksRequester
+  streamChatConfirmRequester,
+  streamChatRequester
 } from '~/services/requester'
-import useTaskPolling from './hooks/useTaskPolling'
 
 export type TaskStatus =
   | 'IDLE'
@@ -188,50 +183,6 @@ function normalizeSubQuestions (raw : unknown) : string[] {
   return normalized
 }
 
-function normalizeTaskStatus (
-  rawStatus : unknown,
-  subQuestions : string[],
-  finalResult : string,
-  errorMessage : string
-) : TaskStatus {
-  const normalized = normalizeText(rawStatus).toUpperCase()
-
-  if (normalized === 'PENDING_CONFIRM') {
-    return 'PENDING_CONFIRM'
-  }
-
-  if (normalized === 'CONFIRMED' || normalized === 'GENERATING' || normalized === 'CONFIRMING') {
-    return 'GENERATING'
-  }
-
-  if (normalized === 'DONE' || normalized === 'SUCCESS') {
-    return 'DONE'
-  }
-
-  if (normalized === 'FAILED' || normalized === 'EXPIRED' || normalized === 'ERROR') {
-    return 'ERROR'
-  }
-
-  if (subQuestions.length > 0) {
-    return 'PENDING_CONFIRM'
-  }
-
-  if (errorMessage) {
-    return 'ERROR'
-  }
-
-  if (finalResult) {
-    // Non-DONE backend statuses must never be rendered as completed.
-    return 'GENERATING'
-  }
-
-  return 'IDLE'
-}
-
-function taskStorageKey (conversationId : string) {
-  return `${TASK_ID_STORAGE_PREFIX}${conversationId}`
-}
-
 function createEmptySnapshot (conversationId : string) : ConversationTaskSnapshot {
   return {
     conversationId,
@@ -276,35 +227,6 @@ function toErrorMessage (error : unknown, fallback = REQUEST_FAILED_MESSAGE) {
   return fallback
 }
 
-function buildSnapshotFromTask (
-  fallbackConversationId : string,
-  taskState : RecommendTaskStateResponse,
-  loading : boolean
-) : ConversationTaskSnapshot {
-  const conversationId = normalizeText(taskState.conversation_id || taskState.conversationId) || fallbackConversationId
-  const taskId = normalizeText(taskState.task_id || taskState.taskId)
-  const subQuestions = normalizeSubQuestions(
-    taskState.pending_sub_questions
-    ?? taskState.pendingSubQuestions
-    ?? taskState.sub_questions
-    ?? taskState.subQuestions
-  )
-  const finalResult = normalizeText(taskState.final_result ?? taskState.finalResult)
-  const errorMessage = normalizeText(taskState.error_message ?? taskState.errorMessage)
-
-  const taskStatus = normalizeTaskStatus(taskState.status, subQuestions, finalResult, errorMessage)
-
-  return {
-    conversationId,
-    activeTaskId: taskId || undefined,
-    taskStatus,
-    subQuestions: taskStatus === 'PENDING_CONFIRM' ? subQuestions : [],
-    finalResult: taskStatus === 'DONE' ? finalResult : '',
-    loading: taskStatus === 'PENDING_CONFIRM' ? false : loading,
-    error: taskStatus === 'ERROR' ? (errorMessage || REQUEST_FAILED_MESSAGE) : undefined
-  }
-}
-
 function resolveConversationIdFromMessages (messages : Message[]|undefined) : string|undefined {
   if (!messages || messages.length === 0) return undefined
 
@@ -321,15 +243,23 @@ function resolveConversationIdFromMessages (messages : Message[]|undefined) : st
   return undefined
 }
 
-function isTerminalTaskStatus (status : TaskStatus) {
-  return status === 'DONE' || status === 'ERROR' || status === 'IDLE'
+function streamEventType (event : ChatStreamEvent) {
+  return event.type
+}
+
+function streamEventTaskId (event : ChatStreamEvent) {
+  return normalizeText(event.task_id) || undefined
+}
+
+function streamEventConversationId (event : ChatStreamEvent) {
+  return normalizeText(event.conversation_id || event.session_id) || undefined
 }
 
 export default function useChatLogic () : UseChatLogicResult {
   const navigate = useNavigate()
   const { chat } = useParams()
   const chats = useChats('chats')
-  const { autoSaveChats, modelUrl } = useConfig('config')
+  const { autoSaveChats, modelUrl, modelName } = useConfig('config')
 
   const [chatState, setChatState] = useState<ChatState>(DEFAULT_VIEW_STATE)
 
@@ -339,26 +269,14 @@ export default function useChatLogic () : UseChatLogicResult {
   const chatsRef = useRef(chats)
   const currentChatIdRef = useRef<number|null>(null)
   const activeConversationIdRef = useRef<string|undefined>(undefined)
-  const destroyedRef = useRef(false)
   const renderCountRef = useRef(0)
-  const bootstrapTokenRef = useRef(0)
-
-  const conversationSnapshotsRef = useRef<Record<string, ConversationTaskSnapshot>>({})
-
-  const pollTaskContextRef = useRef<{ taskId ?: string, conversationId ?: string }>({})
+  const activeStreamRunIdRef = useRef(0)
+  const streamAbortControllerRef = useRef<AbortController|null>(null)
   const confirmInFlightRef = useRef(false)
+  const conversationSnapshotsRef = useRef<Record<string, ConversationTaskSnapshot>>({})
 
   const applySnapshot = useCallback((snapshot : ConversationTaskSnapshot) => {
     conversationSnapshotsRef.current[snapshot.conversationId] = snapshot
-
-    if (snapshot.activeTaskId) {
-      try {
-        localStorage.setItem(taskStorageKey(snapshot.conversationId), snapshot.activeTaskId)
-      }
-      catch {
-        // ignore storage failures
-      }
-    }
 
     if (activeConversationIdRef.current !== snapshot.conversationId) {
       return
@@ -378,7 +296,6 @@ export default function useChatLogic () : UseChatLogicResult {
 
   const setSnapshotPatch = useCallback((conversationId : string, patch : Partial<ConversationTaskSnapshot>) => {
     const current = conversationSnapshotsRef.current[conversationId] || createEmptySnapshot(conversationId)
-
     const nextTaskStatus = patch.taskStatus ?? current.taskStatus
     const nextLoading = patch.loading ?? current.loading
 
@@ -390,137 +307,26 @@ export default function useChatLogic () : UseChatLogicResult {
     })
   }, [applySnapshot])
 
-  const hasAuthoritativeSnapshot = useCallback((conversationId : string) => {
-    const snapshot = conversationSnapshotsRef.current[conversationId]
-    if (!snapshot) return false
-
-    const hasTaskId = !!normalizeText(snapshot.activeTaskId)
-    const isInFlight = snapshot.taskStatus === 'GENERATING' || snapshot.taskStatus === 'CONFIRMING'
-    const isPendingWithQuestions = snapshot.taskStatus === 'PENDING_CONFIRM' && snapshot.subQuestions.length > 0
-    const isDoneWithResult = snapshot.taskStatus === 'DONE' && normalizeText(snapshot.finalResult).length > 0
-
-    return hasTaskId || isInFlight || isPendingWithQuestions || isDoneWithResult
+  const stopActiveStream = useCallback(() => {
+    activeStreamRunIdRef.current += 1
+    streamAbortControllerRef.current?.abort()
+    streamAbortControllerRef.current = null
   }, [])
 
-  const shouldIgnoreFetchedTask = useCallback((conversationId : string, fetchedTaskId : string|undefined) => {
-    const normalizedFetchedTaskId = normalizeText(fetchedTaskId)
-    if (!normalizedFetchedTaskId) return false
-
-    const snapshot = conversationSnapshotsRef.current[conversationId]
-    if (!snapshot) return false
-
-    const currentTaskId = normalizeText(snapshot.activeTaskId)
-    if (!currentTaskId || currentTaskId === normalizedFetchedTaskId) {
-      return false
+  const beginStream = useCallback(() => {
+    const runId = activeStreamRunIdRef.current + 1
+    activeStreamRunIdRef.current = runId
+    const controller = new AbortController()
+    streamAbortControllerRef.current = controller
+    return {
+      runId,
+      controller
     }
-
-    return hasAuthoritativeSnapshot(conversationId)
-  }, [hasAuthoritativeSnapshot])
-
-  const appendAssistantMessage = useCallback((chatId : number, content : string, conversationId ?: string, taskId ?: string) => {
-    const text = normalizeText(content)
-    if (!text) return
-
-    const existing = chatsRef.current[chatId] || []
-    const duplicated = existing.some(
-      (message) => message.role === 'assistant' && normalizeText(message.content) === text
-    )
-    if (duplicated) return
-
-    disChats(addMessage({
-      index: chatId,
-      message: createAssistantMessage(text, conversationId, taskId)
-    }))
   }, [])
 
-  const { startPolling, stopPolling } = useTaskPolling({
-    modelUrl,
-    intervalMs: TASK_POLL_INTERVAL_MS,
-    onTask : (taskState) => {
-      const conversationId = normalizeText(taskState.conversation_id || taskState.conversationId)
-        || pollTaskContextRef.current.conversationId
-      if (!conversationId) return
-
-      const snapshot = buildSnapshotFromTask(conversationId, taskState, false)
-      applySnapshot(snapshot)
-
-      if (snapshot.taskStatus === 'DONE' && snapshot.finalResult) {
-        const activeChatId = currentChatIdRef.current
-        if (activeChatId !== null && activeConversationIdRef.current === conversationId) {
-          appendAssistantMessage(activeChatId, snapshot.finalResult, conversationId, snapshot.activeTaskId)
-        }
-      }
-
-      if (isTerminalTaskStatus(snapshot.taskStatus)) {
-        pollTaskContextRef.current = {}
-      }
-    },
-    onError : (error) => {
-      const conversationId = pollTaskContextRef.current.conversationId
-      if (!conversationId) return
-      setSnapshotPatch(conversationId, {
-        loading: false,
-        taskStatus: 'ERROR',
-        error: toErrorMessage(error)
-      })
-      pollTaskContextRef.current = {}
-    }
-  })
-
-  const stopActivePolling = useCallback(() => {
-    stopPolling()
-    pollTaskContextRef.current = {}
-  }, [stopPolling])
-
-  const startPollingForTask = useCallback((conversationId : string, taskId : string) => {
-    const normalizedConversationId = normalizeText(conversationId)
-    const normalizedTaskId = normalizeText(taskId)
-    if (!normalizedConversationId || !normalizedTaskId) return
-
-    pollTaskContextRef.current = {
-      conversationId: normalizedConversationId,
-      taskId: normalizedTaskId
-    }
-
-    startPolling(normalizedTaskId)
-  }, [startPolling])
-
-  const syncTaskState = useCallback(async (
-    conversationId : string,
-    taskId : string,
-    loading : boolean
-  ) => {
-    const normalizedTaskId = normalizeText(taskId)
-    if (!normalizedTaskId) {
-      return conversationSnapshotsRef.current[conversationId] || createEmptySnapshot(conversationId)
-    }
-
-    const taskState = await getTaskStateRequester(modelUrl, normalizedTaskId)
-    const responseTaskId = normalizeText(taskState.task_id || taskState.taskId) || normalizedTaskId
-    if (shouldIgnoreFetchedTask(conversationId, responseTaskId)) {
-      return conversationSnapshotsRef.current[conversationId] || createEmptySnapshot(conversationId)
-    }
-
-    const snapshot = buildSnapshotFromTask(conversationId, taskState, loading)
-    if (shouldIgnoreFetchedTask(conversationId, snapshot.activeTaskId || responseTaskId)) {
-      return conversationSnapshotsRef.current[conversationId] || snapshot
-    }
-
-    applySnapshot(snapshot)
-
-    if (snapshot.taskStatus === 'DONE' && snapshot.finalResult) {
-      const chatId = currentChatIdRef.current
-      if (chatId !== null && activeConversationIdRef.current === snapshot.conversationId) {
-        appendAssistantMessage(chatId, snapshot.finalResult, snapshot.conversationId, snapshot.activeTaskId)
-      }
-    }
-
-    if (snapshot.activeTaskId && snapshot.taskStatus === 'GENERATING') {
-      startPollingForTask(snapshot.conversationId, snapshot.activeTaskId)
-    }
-
-    return snapshot
-  }, [applySnapshot, appendAssistantMessage, modelUrl, shouldIgnoreFetchedTask, startPollingForTask])
+  const isStreamActive = useCallback((runId : number) => {
+    return activeStreamRunIdRef.current === runId
+  }, [])
 
   const getConversationIdForChat = useCallback((chatId : number) => {
     const messages = chatsRef.current[chatId] || []
@@ -548,136 +354,50 @@ export default function useChatLogic () : UseChatLogicResult {
     writeConversationIdsStorage(mapping)
   }, [])
 
-  const loadConversationState = useCallback(async (chatId : number, conversationId : string, token : number) => {
-    if (!hasAuthoritativeSnapshot(conversationId)) {
-      setSnapshotPatch(conversationId, { loading: true, error: undefined })
-    }
+  const appendAssistantMessage = useCallback((chatId : number, content : string, conversationId ?: string, taskId ?: string) => {
+    const text = normalizeText(content)
+    if (!text) return
 
-    const snapshot = conversationSnapshotsRef.current[conversationId]
-    let candidateTaskId = normalizeText(snapshot?.activeTaskId)
+    const existing = chatsRef.current[chatId] || []
+    const duplicated = existing.some(
+      (message) => message.role === 'assistant' && normalizeText(message.content) === text
+    )
+    if (duplicated) return
 
-    if (!candidateTaskId) {
-      try {
-        candidateTaskId = normalizeText(localStorage.getItem(taskStorageKey(conversationId)))
-      }
-      catch {
-        candidateTaskId = ''
-      }
-    }
-
-    if (!candidateTaskId) {
-      try {
-        const tasks = await listConversationTasksRequester(modelUrl, conversationId)
-        const firstTask = tasks[0]
-        candidateTaskId = normalizeText(firstTask?.task_id || firstTask?.taskId)
-      }
-      catch (error) {
-        if (token !== bootstrapTokenRef.current || destroyedRef.current) return
-        if (hasAuthoritativeSnapshot(conversationId)) return
-        setSnapshotPatch(conversationId, {
-          loading: false,
-          taskStatus: 'ERROR',
-          error: toErrorMessage(error)
-        })
-        return
-      }
-    }
-
-    if (!candidateTaskId) {
-      if (token !== bootstrapTokenRef.current || destroyedRef.current) return
-      if (hasAuthoritativeSnapshot(conversationId)) return
-      setSnapshotPatch(conversationId, {
-        activeTaskId: undefined,
-        taskStatus: 'IDLE',
-        subQuestions: [],
-        finalResult: '',
-        loading: false,
-        error: undefined
-      })
-      return
-    }
-
-    if (shouldIgnoreFetchedTask(conversationId, candidateTaskId)) {
-      return
-    }
-
-    try {
-      const synced = await syncTaskState(conversationId, candidateTaskId, false)
-      if (token !== bootstrapTokenRef.current || destroyedRef.current) return
-
-      if (synced.taskStatus === 'GENERATING' && synced.activeTaskId) {
-        startPollingForTask(conversationId, synced.activeTaskId)
-      }
-    }
-    catch (error) {
-      if (token !== bootstrapTokenRef.current || destroyedRef.current) return
-      if (hasAuthoritativeSnapshot(conversationId)) return
-      setSnapshotPatch(conversationId, {
-        loading: false,
-        taskStatus: 'ERROR',
-        error: toErrorMessage(error)
-      })
-    }
-
-    if (token !== bootstrapTokenRef.current || destroyedRef.current) return
-    scroller(rowContainerRef, 1)
-
-    const currentMessages = chatsRef.current[chatId] || []
-    if (currentMessages.length === 0) {
-      return
-    }
-  }, [hasAuthoritativeSnapshot, modelUrl, setSnapshotPatch, shouldIgnoreFetchedTask, startPollingForTask, syncTaskState])
+    disChats(addMessage({
+      index: chatId,
+      message: createAssistantMessage(text, conversationId, taskId)
+    }))
+  }, [])
 
   const handleDeleteChat = useCallback((chatId : number) => {
-    deleteConversationIdForChat(chatId)
     const deletedConversationId = getConversationIdForChat(chatId)
+    deleteConversationIdForChat(chatId)
     if (deletedConversationId) {
       delete conversationSnapshotsRef.current[deletedConversationId]
     }
 
     if (currentChatIdRef.current !== chatId) return
 
-    stopActivePolling()
+    stopActiveStream()
     activeConversationIdRef.current = undefined
     setChatState({
       ...DEFAULT_VIEW_STATE,
       currentChatId: null
     })
-  }, [deleteConversationIdForChat, getConversationIdForChat, stopActivePolling])
+  }, [deleteConversationIdForChat, getConversationIdForChat, stopActiveStream])
 
   const tryConfirmCurrentTask = useCallback(async () : Promise<boolean> => {
     const chatId = currentChatIdRef.current
     const conversationId = activeConversationIdRef.current
     if (chatId === null || !conversationId) return false
 
-    const currentSnapshot = conversationSnapshotsRef.current[conversationId]
-    const taskId = normalizeText(currentSnapshot?.activeTaskId || chatState.taskId)
-    if (!taskId) {
-      return false
-    }
+    const snapshot = conversationSnapshotsRef.current[conversationId]
+    const taskId = normalizeText(snapshot?.activeTaskId || chatState.taskId || conversationId)
+    const subQuestions = snapshot?.subQuestions || chatState.subQuestions
+    const status = snapshot?.taskStatus || chatState.taskStatus
 
-    let effectiveSnapshot = currentSnapshot
-    const localStatus = effectiveSnapshot?.taskStatus || chatState.taskStatus
-    const localSubQuestions = effectiveSnapshot?.subQuestions || chatState.subQuestions
-
-    if (localStatus !== 'PENDING_CONFIRM' || localSubQuestions.length === 0) {
-      try {
-        effectiveSnapshot = await syncTaskState(conversationId, taskId, false)
-      }
-      catch (error) {
-        setSnapshotPatch(conversationId, {
-          taskStatus: 'ERROR',
-          loading: false,
-          error: toErrorMessage(error)
-        })
-        return true
-      }
-    }
-
-    const status = effectiveSnapshot?.taskStatus || localStatus
-    const subQuestions = effectiveSnapshot?.subQuestions || localSubQuestions
-
-    if (status !== 'PENDING_CONFIRM') {
+    if (!taskId || status !== 'PENDING_CONFIRM' || subQuestions.length === 0) {
       return false
     }
 
@@ -685,80 +405,204 @@ export default function useChatLogic () : UseChatLogicResult {
       return true
     }
 
+    stopActiveStream()
     confirmInFlightRef.current = true
-
     setSnapshotPatch(conversationId, {
+      activeTaskId: taskId,
       loading: true,
       taskStatus: 'CONFIRMING',
       error: undefined
     })
 
+    const {
+      runId: streamRunId,
+      controller: streamAbort
+    } = beginStream()
+
+    let streamedTaskId : string|undefined = taskId
+    let streamedConversationId = conversationId
+    let streamedText = ''
+    let streamMessageTime : number|undefined
+    let streamReachedTerminal = false
+
+    const ensureStreamAssistant = () => {
+      if (streamMessageTime !== undefined) return
+      const draft = createAssistantMessage('', streamedConversationId, streamedTaskId)
+      streamMessageTime = draft.time
+      disChats(addMessage({
+        index: chatId,
+        message: draft
+      }))
+    }
+
+    const syncStreamAssistant = () => {
+      if (streamMessageTime === undefined) return
+      disChats(updateMessageContent({
+        index: chatId,
+        time: streamMessageTime,
+        content: streamedText,
+        conversationId: streamedConversationId,
+        sessionId: streamedTaskId
+      }))
+    }
+
     try {
-      const confirmed = await confirmTaskRequester(modelUrl, taskId, 'confirm', {
-        sub_questions: subQuestions,
-        comment: 'confirm'
-      })
+      await streamChatConfirmRequester(
+        modelUrl,
+        {
+          model: modelName,
+          task_id: taskId,
+          session_id: taskId,
+          conversation_id: conversationId,
+          action: 'confirm',
+          sub_questions: subQuestions,
+          comment: 'confirm'
+        },
+        (event : ChatStreamEvent) => {
+          if (!isStreamActive(streamRunId)) {
+            return
+          }
 
-      const snapshot = buildSnapshotFromTask(conversationId, confirmed, false)
-      applySnapshot(snapshot)
+          const eventType = streamEventType(event)
+          const eventTaskId = streamEventTaskId(event)
+          const eventConversationId = streamEventConversationId(event)
 
-      if (snapshot.taskStatus === 'DONE' && snapshot.finalResult) {
-        appendAssistantMessage(chatId, snapshot.finalResult, snapshot.conversationId, snapshot.activeTaskId)
+          if (eventTaskId) {
+            streamedTaskId = eventTaskId
+          }
+          if (eventConversationId) {
+            streamedConversationId = eventConversationId
+          }
+
+          if (eventType === 'meta' || eventType === 'node' || eventType === 'state') {
+            setSnapshotPatch(streamedConversationId, {
+              activeTaskId: streamedTaskId,
+              taskStatus: 'GENERATING',
+              loading: true,
+              error: undefined
+            })
+            return
+          }
+
+          if (event.type === 'token') {
+            if (!event.delta) return
+            streamedText += event.delta
+            ensureStreamAssistant()
+            syncStreamAssistant()
+            setSnapshotPatch(streamedConversationId, {
+              activeTaskId: streamedTaskId,
+              taskStatus: 'GENERATING',
+              finalResult: streamedText,
+              loading: true,
+              error: undefined
+            })
+            return
+          }
+
+          if (event.type === 'awaiting_confirmation') {
+            streamReachedTerminal = true
+            setSnapshotPatch(streamedConversationId, {
+              activeTaskId: streamedTaskId,
+              taskStatus: 'PENDING_CONFIRM',
+              subQuestions: normalizeSubQuestions(event.sub_questions),
+              finalResult: '',
+              loading: false,
+              error: undefined
+            })
+            return
+          }
+
+          if (event.type === 'final') {
+            streamReachedTerminal = true
+            const finalAnswer = normalizeText(event.final_answer) || streamedText
+            if (finalAnswer) {
+              streamedText = finalAnswer
+              if (streamMessageTime !== undefined) {
+                syncStreamAssistant()
+              } else {
+                appendAssistantMessage(chatId, finalAnswer, streamedConversationId, streamedTaskId)
+              }
+            }
+
+            setSnapshotPatch(streamedConversationId, {
+              activeTaskId: streamedTaskId,
+              taskStatus: 'DONE',
+              subQuestions: [],
+              finalResult: finalAnswer,
+              loading: false,
+              error: undefined
+            })
+            return
+          }
+
+          if (event.type === 'error') {
+            streamReachedTerminal = true
+            setSnapshotPatch(streamedConversationId, {
+              activeTaskId: streamedTaskId,
+              taskStatus: 'ERROR',
+              loading: false,
+              error: toErrorMessage(event.message, CONFIRM_FAILED_MESSAGE)
+            })
+          }
+        },
+        streamAbort.signal
+      )
+
+      if (!isStreamActive(streamRunId)) {
+        return true
       }
 
-      if (snapshot.activeTaskId && snapshot.taskStatus === 'GENERATING') {
-        startPollingForTask(snapshot.conversationId, snapshot.activeTaskId)
+      if (!streamReachedTerminal && normalizeText(streamedText)) {
+        if (streamMessageTime !== undefined) {
+          syncStreamAssistant()
+        } else {
+          appendAssistantMessage(chatId, streamedText, streamedConversationId, streamedTaskId)
+        }
+        setSnapshotPatch(streamedConversationId, {
+          activeTaskId: streamedTaskId,
+          taskStatus: 'DONE',
+          subQuestions: [],
+          finalResult: streamedText,
+          loading: false,
+          error: undefined
+        })
       }
+
       return true
     }
-    catch (confirmError) {
-      try {
-        const recovered = await getTaskStateRequester(modelUrl, taskId)
-        const snapshot = buildSnapshotFromTask(conversationId, recovered, false)
-        applySnapshot(snapshot)
-
-        if (snapshot.taskStatus === 'DONE' && snapshot.finalResult) {
-          appendAssistantMessage(chatId, snapshot.finalResult, snapshot.conversationId, snapshot.activeTaskId)
-        }
-
-        if (snapshot.activeTaskId && snapshot.taskStatus === 'GENERATING') {
-          startPollingForTask(snapshot.conversationId, snapshot.activeTaskId)
-        }
-
-        if (snapshot.taskStatus !== 'ERROR') {
-          return true
-        }
+    catch (streamError) {
+      if (!streamAbort.signal.aborted && isStreamActive(streamRunId)) {
+        setSnapshotPatch(conversationId, {
+          activeTaskId: taskId,
+          loading: false,
+          taskStatus: 'ERROR',
+          error: toErrorMessage(streamError, CONFIRM_FAILED_MESSAGE)
+        })
       }
-      catch {
-        // fall through to explicit confirm error
-      }
-
-      setSnapshotPatch(conversationId, {
-        loading: false,
-        taskStatus: 'ERROR',
-        error: toErrorMessage(confirmError, CONFIRM_FAILED_MESSAGE)
-      })
       return true
     }
     finally {
+      if (streamAbortControllerRef.current === streamAbort) {
+        streamAbortControllerRef.current = null
+      }
       confirmInFlightRef.current = false
     }
   }, [
     appendAssistantMessage,
-    applySnapshot,
     chatState.subQuestions,
     chatState.taskId,
     chatState.taskStatus,
+    modelName,
     modelUrl,
+    beginStream,
+    isStreamActive,
     setSnapshotPatch,
-    startPollingForTask,
-    syncTaskState
+    stopActiveStream
   ])
 
   const requestHandler = useCallback(() => {
     const chatId = currentChatIdRef.current
     if (chatId === null) return
-
     if (chatState.taskStatus === 'CONFIRMING') return
 
     const text = normalizeText(textAreaRef.current?.value)
@@ -780,6 +624,8 @@ export default function useChatLogic () : UseChatLogicResult {
       return
     }
 
+    stopActiveStream()
+
     void (async () => {
       let conversationId = activeConversationIdRef.current
       if (!conversationId) {
@@ -796,6 +642,7 @@ export default function useChatLogic () : UseChatLogicResult {
           setChatState((prev) => ({
             ...prev,
             taskStatus: 'ERROR',
+            loading: false,
             error: toErrorMessage(error)
           }))
           return
@@ -815,6 +662,7 @@ export default function useChatLogic () : UseChatLogicResult {
       }
 
       setSnapshotPatch(taskConversationId, {
+        activeTaskId: taskConversationId,
         taskStatus: 'GENERATING',
         loading: true,
         error: undefined,
@@ -822,52 +670,184 @@ export default function useChatLogic () : UseChatLogicResult {
         finalResult: ''
       })
 
+      const {
+        runId: streamRunId,
+        controller: streamAbort
+      } = beginStream()
+
+      let streamedTaskId : string|undefined = taskConversationId
+      let streamedConversationId = taskConversationId
+      let streamedText = ''
+      let streamMessageTime : number|undefined
+      let streamReachedTerminal = false
+
+      const ensureStreamAssistant = () => {
+        if (streamMessageTime !== undefined) return
+        const draft = createAssistantMessage('', streamedConversationId, streamedTaskId)
+        streamMessageTime = draft.time
+        disChats(addMessage({
+          index: chatId,
+          message: draft
+        }))
+      }
+
+      const syncStreamAssistant = () => {
+        if (streamMessageTime === undefined) return
+        disChats(updateMessageContent({
+          index: chatId,
+          time: streamMessageTime,
+          content: streamedText,
+          conversationId: streamedConversationId,
+          sessionId: streamedTaskId
+        }))
+      }
+
       try {
-        const taskState = await createRecommendTaskRequester(modelUrl, {
-          query: text,
-          conversation_id: taskConversationId,
-          timeout: 60,
-          max_iterations: 3
-        })
+        await streamChatRequester(
+          modelUrl,
+          {
+            model: modelName,
+            stream: true,
+            conversation_id: taskConversationId,
+            session_id: taskConversationId,
+            messages: [{ role: 'user', content: text }]
+          },
+          (event : ChatStreamEvent) => {
+            if (!isStreamActive(streamRunId)) {
+              return
+            }
 
-        const snapshot = buildSnapshotFromTask(taskConversationId, taskState, false)
-        applySnapshot(snapshot)
+            const eventType = streamEventType(event)
+            const eventTaskId = streamEventTaskId(event)
+            const eventConversationId = streamEventConversationId(event)
 
-        if (
-          snapshot.taskStatus === 'PENDING_CONFIRM'
-          && snapshot.subQuestions.length === 0
-          && snapshot.activeTaskId
-        ) {
-          void syncTaskState(taskConversationId, snapshot.activeTaskId, false)
-            .catch(() => undefined)
+            if (eventTaskId) {
+              streamedTaskId = eventTaskId
+            }
+            if (eventConversationId) {
+              streamedConversationId = eventConversationId
+            }
+
+            if (eventType === 'meta' || eventType === 'node' || eventType === 'state') {
+              setSnapshotPatch(streamedConversationId, {
+                activeTaskId: streamedTaskId,
+                taskStatus: 'GENERATING',
+                loading: true,
+                error: undefined
+              })
+              return
+            }
+
+            if (event.type === 'token') {
+              if (!event.delta) return
+              streamedText += event.delta
+              ensureStreamAssistant()
+              syncStreamAssistant()
+              setSnapshotPatch(streamedConversationId, {
+                activeTaskId: streamedTaskId,
+                taskStatus: 'GENERATING',
+                finalResult: streamedText,
+                loading: true,
+                error: undefined
+              })
+              return
+            }
+
+            if (event.type === 'awaiting_confirmation') {
+              streamReachedTerminal = true
+              setSnapshotPatch(streamedConversationId, {
+                activeTaskId: streamedTaskId,
+                taskStatus: 'PENDING_CONFIRM',
+                subQuestions: normalizeSubQuestions(event.sub_questions),
+                finalResult: streamedText,
+                loading: false,
+                error: undefined
+              })
+              return
+            }
+
+            if (event.type === 'final') {
+              streamReachedTerminal = true
+              const finalAnswer = normalizeText(event.final_answer) || streamedText
+              if (finalAnswer) {
+                streamedText = finalAnswer
+                if (streamMessageTime !== undefined) {
+                  syncStreamAssistant()
+                } else {
+                  appendAssistantMessage(chatId, finalAnswer, streamedConversationId, streamedTaskId)
+                }
+              }
+              setSnapshotPatch(streamedConversationId, {
+                activeTaskId: streamedTaskId,
+                taskStatus: 'DONE',
+                subQuestions: [],
+                finalResult: finalAnswer,
+                loading: false,
+                error: undefined
+              })
+              return
+            }
+
+            if (event.type === 'error') {
+              streamReachedTerminal = true
+              setSnapshotPatch(streamedConversationId, {
+                activeTaskId: streamedTaskId,
+                taskStatus: 'ERROR',
+                loading: false,
+                error: toErrorMessage(event.message, REQUEST_FAILED_MESSAGE)
+              })
+            }
+          },
+          streamAbort.signal
+        )
+
+        if (!isStreamActive(streamRunId)) {
+          return
         }
 
-        if (snapshot.taskStatus === 'DONE' && snapshot.finalResult) {
-          appendAssistantMessage(chatId, snapshot.finalResult, snapshot.conversationId, snapshot.activeTaskId)
-        }
-
-        if (snapshot.activeTaskId && snapshot.taskStatus === 'GENERATING') {
-          startPollingForTask(snapshot.conversationId, snapshot.activeTaskId)
+        if (!streamReachedTerminal && normalizeText(streamedText)) {
+          if (streamMessageTime !== undefined) {
+            syncStreamAssistant()
+          } else {
+            appendAssistantMessage(chatId, streamedText, streamedConversationId, streamedTaskId)
+          }
+          setSnapshotPatch(streamedConversationId, {
+            activeTaskId: streamedTaskId,
+            taskStatus: 'DONE',
+            subQuestions: [],
+            finalResult: streamedText,
+            loading: false,
+            error: undefined
+          })
         }
       }
-      catch (error) {
-        setSnapshotPatch(taskConversationId, {
-          loading: false,
-          taskStatus: 'ERROR',
-          error: toErrorMessage(error)
-        })
+      catch (streamError) {
+        if (!streamAbort.signal.aborted && isStreamActive(streamRunId)) {
+          setSnapshotPatch(taskConversationId, {
+            activeTaskId: streamedTaskId,
+            loading: false,
+            taskStatus: 'ERROR',
+            error: toErrorMessage(streamError)
+          })
+        }
+      }
+      finally {
+        if (streamAbortControllerRef.current === streamAbort) {
+          streamAbortControllerRef.current = null
+        }
       }
     })()
   }, [
     appendAssistantMessage,
-    applySnapshot,
     chatState.taskId,
     chatState.taskStatus,
+    modelName,
     modelUrl,
+    beginStream,
+    isStreamActive,
     setConversationIdForChat,
     setSnapshotPatch,
-    syncTaskState,
-    startPollingForTask,
+    stopActiveStream,
     tryConfirmCurrentTask
   ])
 
@@ -904,19 +884,17 @@ export default function useChatLogic () : UseChatLogicResult {
   }, [autoSaveChats, chats])
 
   useEffect(() => {
+    stopActiveStream()
+  }, [chat, stopActiveStream])
+
+  useEffect(() => {
     const chatId = getChatIndex()
-    const token = ++bootstrapTokenRef.current
-
-    stopActivePolling()
-
     if (chatId < 0 || chatId > chatsRef.current.length) {
       navigate(ROUTES.ROOT)
       return
     }
 
     currentChatIdRef.current = chatId
-    setChatState((prev) => ({ ...prev, currentChatId: chatId, loading: true, error: undefined }))
-
     const currentMessages = chatsRef.current[chatId] || []
     const resolvedConversationId = resolveConversationIdFromMessages(currentMessages) || getConversationIdForChat(chatId)
 
@@ -936,21 +914,21 @@ export default function useChatLogic () : UseChatLogicResult {
     const existingSnapshot = conversationSnapshotsRef.current[resolvedConversationId]
     if (existingSnapshot) {
       applySnapshot(existingSnapshot)
-    } else {
-      setChatState((prev) => ({
-        ...prev,
-        currentChatId: chatId,
-        conversationId: resolvedConversationId,
-        taskStatus: 'IDLE',
-        subQuestions: [],
-        finalResult: '',
-        loading: true,
-        error: undefined
-      }))
+      return
     }
 
-    void loadConversationState(chatId, resolvedConversationId, token)
-  }, [chat, chats.length, getConversationIdForChat, loadConversationState, navigate, setConversationIdForChat, stopActivePolling, applySnapshot])
+    setChatState((prev) => ({
+      ...prev,
+      currentChatId: chatId,
+      conversationId: resolvedConversationId,
+      taskId: resolvedConversationId,
+      taskStatus: 'IDLE',
+      subQuestions: [],
+      finalResult: '',
+      loading: false,
+      error: undefined
+    }))
+  }, [chat, chats.length, applySnapshot, getConversationIdForChat, navigate, setConversationIdForChat])
 
   useEffect(() => {
     scroller(rowContainerRef, 1)
@@ -958,10 +936,9 @@ export default function useChatLogic () : UseChatLogicResult {
 
   useEffect(() => {
     return () => {
-      destroyedRef.current = true
-      stopActivePolling()
+      stopActiveStream()
     }
-  }, [stopActivePolling])
+  }, [stopActiveStream])
 
   const messages = useMemo(() => {
     if (chatState.currentChatId === null) return []
