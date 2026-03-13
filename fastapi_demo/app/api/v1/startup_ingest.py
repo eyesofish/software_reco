@@ -5,9 +5,13 @@ from typing import Dict, List, Set
 
 from app.core.config import settings
 from software_recommend_system.config import settings as rag_settings
-from software_recommend_system.ingestion.chunker import chunk_documents
+from software_recommend_system.ingestion.chunker import chunk_documents, chunk_documents_parent_child
 from software_recommend_system.ingestion.embedder import embed_texts
-from software_recommend_system.ingestion.indexer import get_chroma_collection, index_embeddings
+from software_recommend_system.ingestion.indexer import (
+    get_chroma_collection,
+    index_embeddings,
+    index_parent_documents,
+)
 from software_recommend_system.ingestion.loader import normalize_documents
 
 logger = logging.getLogger(__name__)
@@ -108,6 +112,54 @@ def _ingest_single_document(raw_doc: Dict[str, object]) -> int:
     normalized_docs = normalize_documents([raw_doc])
     if not normalized_docs:
         return 0
+
+    if rag_settings.ENABLE_PARENT_CHILD_CHUNKING:
+        parent_chunks, child_chunks = chunk_documents_parent_child(
+            normalized_docs,
+            parent_chunk_size=rag_settings.PARENT_CHUNK_SIZE,
+            parent_chunk_overlap=rag_settings.PARENT_CHUNK_OVERLAP,
+            child_chunk_size=rag_settings.CHILD_CHUNK_SIZE,
+            child_chunk_overlap=rag_settings.CHILD_CHUNK_OVERLAP,
+        )
+        if not parent_chunks or not child_chunks:
+            return 0
+
+        parent_ids = [str(chunk["id"]) for chunk in parent_chunks]
+        parent_texts = [str(chunk["content"]) for chunk in parent_chunks]
+        parent_metadatas = [dict(chunk.get("metadata", {})) for chunk in parent_chunks]
+
+        indexed_parents = index_parent_documents(
+            parent_ids=parent_ids,
+            parent_texts=parent_texts,
+            metadatas=parent_metadatas,
+            collection_name=rag_settings.PARENT_COLLECTION_NAME,
+        )
+
+        child_ids = [str(chunk["id"]) for chunk in child_chunks]
+        child_texts = [str(chunk["content"]) for chunk in child_chunks]
+        child_metadatas = [dict(chunk.get("metadata", {})) for chunk in child_chunks]
+
+        logger.info(
+            "startup ingest parent-child chunks generated: doc_id=%s parents=%s children=%s",
+            normalized_docs[0]["id"],
+            len(parent_chunks),
+            len(child_chunks),
+        )
+
+        child_embeddings = embed_texts(child_texts)
+        indexed_children = index_embeddings(
+            chunk_ids=child_ids,
+            chunk_texts=child_texts,
+            metadatas=child_metadatas,
+            embeddings=child_embeddings,
+        )
+        logger.info(
+            "startup ingest parent-child indexed: doc_id=%s parent_vectors=%s child_vectors=%s",
+            normalized_docs[0]["id"],
+            indexed_parents,
+            indexed_children,
+        )
+        return indexed_children
 
     chunks = chunk_documents(
         normalized_docs,

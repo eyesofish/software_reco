@@ -1,4 +1,4 @@
-from typing import List
+from typing import Any, Dict, List
 import json
 import logging
 import os
@@ -10,6 +10,7 @@ import openai
 from .config import settings
 from .document_schema import Document
 from .ingestion.embedder import embed_texts
+from .ingestion.indexer import get_parent_documents_by_ids
 from .logging_utils import elapsed_ms, error_fields, log_event, log_exception, new_trace_id, text_preview
 from .observability import wrap_openai
 
@@ -27,6 +28,177 @@ def _get_openai_client() -> openai.OpenAI:
     api_key = settings.DASHSCOPE_API_KEY or settings.OPENAI_API_KEY
     base_url = settings.OPENAI_BASE_URL or None
     return wrap_openai(openai.OpenAI(api_key=api_key, base_url=base_url))
+
+
+def _metadata_obj(doc_metadata: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "source": doc_metadata.get("source", ""),
+        # Preserve the upstream source document id so recall eval can
+        # match retrieved ids with dataset gold_doc_ids.
+        "doc_id": (
+            doc_metadata.get("source_doc_id")
+            or doc_metadata.get("doc_id")
+            or doc_metadata.get("filename")
+        ),
+        "author": doc_metadata.get("author"),
+        "published_date": doc_metadata.get("published_date"),
+        "updated_date": doc_metadata.get("updated_date"),
+        "url": doc_metadata.get("url"),
+        "tags": doc_metadata.get("tags", []),
+        "source_ranking": doc_metadata.get("source_ranking", 0.0),
+    }
+
+
+def _distance_score(distance_row: List[Any], index: int) -> float:
+    if index >= len(distance_row) or distance_row[index] is None:
+        return 0.0
+    try:
+        return float(distance_row[index])
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _build_child_documents(
+    doc_row: List[Any],
+    metadata_row: List[Any],
+    distance_row: List[Any],
+) -> List[Document]:
+    documents: List[Document] = []
+    for index, doc_content in enumerate(doc_row):
+        doc_metadata = metadata_row[index] if index < len(metadata_row) and metadata_row[index] else {}
+        if not isinstance(doc_metadata, dict):
+            doc_metadata = {}
+        documents.append(
+            Document(
+                content=str(doc_content),
+                metadata=_metadata_obj(doc_metadata),
+                score=_distance_score(distance_row, index),
+            )
+        )
+    return documents
+
+
+def _build_parent_child_documents(
+    doc_row: List[Any],
+    metadata_row: List[Any],
+    distance_row: List[Any],
+    k: int,
+    trace_id: str,
+    query_hint: str,
+) -> List[Document]:
+    limit = max(0, int(k))
+    if limit <= 0:
+        return []
+
+    child_hits: List[Dict[str, Any]] = []
+    for index, doc_content in enumerate(doc_row):
+        doc_metadata = metadata_row[index] if index < len(metadata_row) and metadata_row[index] else {}
+        if not isinstance(doc_metadata, dict):
+            doc_metadata = {}
+        child_hits.append(
+            {
+                "content": str(doc_content),
+                "metadata": doc_metadata,
+                "score": _distance_score(distance_row, index),
+                "parent_id": str(doc_metadata.get("parent_id", "")).strip(),
+            }
+        )
+
+    best_hit_by_parent: Dict[str, Dict[str, Any]] = {}
+    standalone_hits: List[Dict[str, Any]] = []
+    for hit in child_hits:
+        parent_id = str(hit.get("parent_id", "")).strip()
+        if not parent_id:
+            standalone_hits.append(hit)
+            continue
+
+        previous = best_hit_by_parent.get(parent_id)
+        if previous is None or float(hit["score"]) < float(previous["score"]):
+            best_hit_by_parent[parent_id] = hit
+
+    ranked_hits = list(best_hit_by_parent.values()) + standalone_hits
+    ranked_hits.sort(key=lambda item: float(item["score"]))
+
+    unique_parent_ids: List[str] = []
+    for hit in ranked_hits:
+        parent_id = str(hit.get("parent_id", "")).strip()
+        if not parent_id or parent_id in unique_parent_ids:
+            continue
+        unique_parent_ids.append(parent_id)
+        if len(unique_parent_ids) >= limit:
+            break
+
+    parent_lookup: Dict[str, Dict[str, Any]] = {}
+    if unique_parent_ids:
+        try:
+            parent_lookup = get_parent_documents_by_ids(
+                unique_parent_ids,
+                collection_name=settings.PARENT_COLLECTION_NAME,
+            )
+        except Exception as exc:
+            log_event(
+                logger,
+                logging.WARNING,
+                "search.vector.parent_lookup.fail",
+                component="search",
+                trace_id=trace_id,
+                query=query_hint,
+                **error_fields(exc),
+            )
+            parent_lookup = {}
+
+    log_event(
+        logger,
+        logging.INFO,
+        "search.vector.parent_lookup.done",
+        component="search",
+        trace_id=trace_id,
+        query=query_hint,
+        child_hits=len(child_hits),
+        unique_parent_ids=len(unique_parent_ids),
+        resolved_parent_docs=len(parent_lookup),
+    )
+
+    documents: List[Document] = []
+    for hit in ranked_hits:
+        if len(documents) >= limit:
+            break
+
+        child_metadata = hit["metadata"] if isinstance(hit.get("metadata"), dict) else {}
+        parent_id = str(hit.get("parent_id", "")).strip()
+        parent_entry = parent_lookup.get(parent_id) if parent_id else None
+
+        if parent_entry and str(parent_entry.get("content", "")).strip():
+            parent_metadata = parent_entry.get("metadata", {})
+            if not isinstance(parent_metadata, dict):
+                parent_metadata = {}
+
+            merged_metadata = dict(parent_metadata)
+            if child_metadata.get("source_doc_id") and not merged_metadata.get("source_doc_id"):
+                merged_metadata["source_doc_id"] = child_metadata.get("source_doc_id")
+            if child_metadata.get("doc_id") and not merged_metadata.get("doc_id"):
+                merged_metadata["doc_id"] = child_metadata.get("doc_id")
+            if child_metadata.get("source") and not merged_metadata.get("source"):
+                merged_metadata["source"] = child_metadata.get("source")
+
+            documents.append(
+                Document(
+                    content=str(parent_entry.get("content")),
+                    metadata=_metadata_obj(merged_metadata),
+                    score=float(hit["score"]),
+                )
+            )
+            continue
+
+        documents.append(
+            Document(
+                content=str(hit.get("content", "")),
+                metadata=_metadata_obj(child_metadata),
+                score=float(hit["score"]),
+            )
+        )
+
+    return documents
 
 
 def similarity_search(
@@ -126,33 +298,22 @@ def similarity_search(
             raw_count=len(doc_row),
         )
 
-        documents: List[Document] = []
-        for index, doc_content in enumerate(doc_row):
-            doc_metadata = metadata_row[index] if index < len(metadata_row) and metadata_row[index] else {}
-            doc_score = distance_row[index] if index < len(distance_row) and distance_row[index] is not None else 0.0
-            metadata_obj = {
-                "source": doc_metadata.get("source", ""),
-                # Preserve the upstream source document id so recall eval can
-                # match retrieved ids with dataset gold_doc_ids.
-                "doc_id": (
-                    doc_metadata.get("source_doc_id")
-                    or doc_metadata.get("doc_id")
-                    or doc_metadata.get("filename")
-                ),
-                "author": doc_metadata.get("author"),
-                "published_date": doc_metadata.get("published_date"),
-                "updated_date": doc_metadata.get("updated_date"),
-                "url": doc_metadata.get("url"),
-                "tags": doc_metadata.get("tags", []),
-                "source_ranking": doc_metadata.get("source_ranking", 0.0),
-            }
-            documents.append(
-                Document(
-                    content=doc_content,
-                    metadata=metadata_obj,
-                    score=doc_score,
-                )
+        documents = (
+            _build_parent_child_documents(
+                doc_row=doc_row,
+                metadata_row=metadata_row,
+                distance_row=distance_row,
+                k=k,
+                trace_id=current_trace_id,
+                query_hint=query_hint,
             )
+            if settings.ENABLE_PARENT_CHILD_CHUNKING
+            else _build_child_documents(
+                doc_row=doc_row,
+                metadata_row=metadata_row,
+                distance_row=distance_row,
+            )
+        )
 
         log_event(
             logger,

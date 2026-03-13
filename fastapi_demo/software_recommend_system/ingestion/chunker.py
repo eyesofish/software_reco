@@ -163,6 +163,26 @@ def _build_chunks(
     return chunks
 
 
+def _chunk_content_spans(
+    content: str,
+    chunk_size: int,
+    chunk_overlap: int,
+) -> List[_TextSpan]:
+    spans = _prepare_spans(
+        content=content,
+        chunk_size=chunk_size,
+        chunk_overlap=chunk_overlap,
+    )
+    if not spans:
+        return []
+    return _build_chunks(
+        content=content,
+        spans=spans,
+        chunk_size=chunk_size,
+        chunk_overlap=chunk_overlap,
+    )
+
+
 def chunk_documents(
     documents: List[Dict[str, Any]],
     chunk_size: int,
@@ -196,17 +216,8 @@ def chunk_documents(
         if not isinstance(base_metadata, dict):
             base_metadata = {}
 
-        spans = _prepare_spans(
+        chunk_spans = _chunk_content_spans(
             content=content,
-            chunk_size=chunk_size,
-            chunk_overlap=chunk_overlap,
-        )
-        if not spans:
-            continue
-
-        chunk_spans = _build_chunks(
-            content=content,
-            spans=spans,
             chunk_size=chunk_size,
             chunk_overlap=chunk_overlap,
         )
@@ -229,3 +240,83 @@ def chunk_documents(
             )
 
     return chunks
+
+
+def chunk_documents_parent_child(
+    documents: List[Dict[str, Any]],
+    parent_chunk_size: int,
+    parent_chunk_overlap: int,
+    child_chunk_size: int,
+    child_chunk_overlap: int,
+) -> tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    """Split docs into parent chunks and child chunks with parent linkage metadata."""
+    _validate_chunk_params(parent_chunk_size, parent_chunk_overlap)
+    _validate_chunk_params(child_chunk_size, child_chunk_overlap)
+
+    parent_chunks: List[Dict[str, Any]] = []
+    child_chunks: List[Dict[str, Any]] = []
+
+    for doc in documents or []:
+        if not isinstance(doc, dict):
+            continue
+
+        source_doc_id = str(doc.get("id", "")).strip()
+        if not source_doc_id:
+            continue
+
+        content = str(doc.get("content", ""))
+        if not content:
+            continue
+
+        base_metadata = doc.get("metadata", {})
+        if not isinstance(base_metadata, dict):
+            base_metadata = {}
+
+        parent_spans = _chunk_content_spans(
+            content=content,
+            chunk_size=parent_chunk_size,
+            chunk_overlap=parent_chunk_overlap,
+        )
+
+        for parent_index, parent_span in enumerate(parent_spans):
+            parent_id = f"{source_doc_id}:p:{parent_index}"
+            parent_metadata = {
+                **base_metadata,
+                "source_doc_id": source_doc_id,
+                "parent_id": parent_id,
+                "parent_index": parent_index,
+                "parent_start": parent_span.start,
+                "parent_end": parent_span.end,
+            }
+            parent_chunks.append(
+                {
+                    "id": parent_id,
+                    "content": parent_span.text,
+                    "metadata": parent_metadata,
+                }
+            )
+
+            child_spans = _chunk_content_spans(
+                content=parent_span.text,
+                chunk_size=child_chunk_size,
+                chunk_overlap=child_chunk_overlap,
+            )
+            for child_index, child_span in enumerate(child_spans):
+                child_id = f"{parent_id}:c:{child_index}"
+                child_metadata = {
+                    **base_metadata,
+                    "source_doc_id": source_doc_id,
+                    "parent_id": parent_id,
+                    "child_index": child_index,
+                    "chunk_start": parent_span.start + child_span.start,
+                    "chunk_end": parent_span.start + child_span.end,
+                }
+                child_chunks.append(
+                    {
+                        "id": child_id,
+                        "content": child_span.text,
+                        "metadata": child_metadata,
+                    }
+                )
+
+    return parent_chunks, child_chunks

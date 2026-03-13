@@ -41,6 +41,12 @@ class Settings:
     EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "Qwen/Qwen3-Embedding-0.6B")
     CHUNK_SIZE = int(os.getenv("CHUNK_SIZE", "800"))
     CHUNK_OVERLAP = int(os.getenv("CHUNK_OVERLAP", "120"))
+    ENABLE_PARENT_CHILD_CHUNKING = os.getenv("ENABLE_PARENT_CHILD_CHUNKING", "false").lower() == "true"
+    PARENT_CHUNK_SIZE = int(os.getenv("PARENT_CHUNK_SIZE", "1600"))
+    PARENT_CHUNK_OVERLAP = int(os.getenv("PARENT_CHUNK_OVERLAP", "200"))
+    CHILD_CHUNK_SIZE = int(os.getenv("CHILD_CHUNK_SIZE", "400"))
+    CHILD_CHUNK_OVERLAP = int(os.getenv("CHILD_CHUNK_OVERLAP", "80"))
+    PARENT_COLLECTION_NAME = os.getenv("PARENT_COLLECTION_NAME", "software_recommendations_parent")
 
     # Drawing config
     IMAGE_MODEL = os.getenv("IMAGE_MODEL", "qwen-image-edit")
