@@ -207,6 +207,16 @@ def answer_correctness(run: Run, example: Example) -> EvaluationResult:
     return EvaluationResult(key="answer_correctness", score=score, comment=reason)
 
 
+def _comparison_url(project: Any, example_dataset_id: Any) -> str:
+    project_url = str(_get_value(project, "url", "") or "").strip()
+    project_id = str(_get_value(project, "id", "") or "").strip()
+    dataset_id = str(example_dataset_id or "").strip()
+    if not project_url or not project_id or not dataset_id:
+        return ""
+    base_url = project_url.split("/projects/p/")[0]
+    return f"{base_url}/datasets/{dataset_id}/compare?selectedSessions={project_id}"
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Run LangSmith evaluation for this RAG system.")
     parser.add_argument("--dataset", required=True, help="LangSmith dataset name")
@@ -234,7 +244,7 @@ def main() -> None:
     client = Client()
     _ = client  # keep explicit client creation for env validation
 
-    evaluate(
+    results = evaluate(
         target,
         data=args.dataset,
         evaluators=[routing_accuracy, retrieval_recall, answer_correctness],
@@ -242,6 +252,16 @@ def main() -> None:
         metadata={"hitl_policy": args.policy, "pipeline": "rag+chat"},
         max_concurrency=args.max_concurrency,
     )
+    results.wait()
+
+    project = getattr(getattr(results, "_manager", None), "_experiment", None)
+    project_id = str(_get_value(project, "id", "") or "").strip()
+    dataset_id = str(_get_value(project, "reference_dataset_id", "") or "").strip()
+    experiment_url = _comparison_url(project, dataset_id) or str(_get_value(project, "url", "") or "").strip()
+
+    print(f"LANGSMITH_EXPERIMENT_NAME={results.experiment_name}")
+    print(f"LANGSMITH_PROJECT_ID={project_id}")
+    print(f"LANGSMITH_EXPERIMENT_URL={experiment_url}")
 
 
 if __name__ == "__main__":

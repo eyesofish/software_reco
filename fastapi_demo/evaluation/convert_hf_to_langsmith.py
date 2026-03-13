@@ -65,6 +65,18 @@ def _stable_example_id(langsmith_dataset: str, source_dataset: str, source_id: s
     return str(uuid5(NAMESPACE_URL, unique_key))
 
 
+def _bucket_assignment(
+    *,
+    source_dataset: str,
+    split_name: str,
+    source_id: str,
+    bucket_count: int,
+) -> int:
+    bucket_key = f"{source_dataset}||{split_name}||{source_id}"
+    digest = hashlib.sha1(bucket_key.encode("utf-8")).hexdigest()
+    return int(digest, 16) % bucket_count
+
+
 def _dedupe_keep_order(values: Iterable[str]) -> List[str]:
     seen = set()
     result: List[str] = []
@@ -178,7 +190,9 @@ def _convert_rows(
     source_dataset: str,
     langsmith_dataset: str,
     max_samples: Optional[int],
-) -> Tuple[List[Dict[str, Any]], Counter, List[Dict[str, Any]]]:
+    bucket_count: int = 0,
+    bucket_index: int = -1,
+) -> Tuple[List[Dict[str, Any]], Counter, List[Dict[str, Any]], Counter]:
     field_names = _select_field_names(split_ds)
     print(f"[Mapping] field_names={field_names}")
 
@@ -187,17 +201,37 @@ def _convert_rows(
     if not field_names["answer"]:
         raise ValueError("Could not find an answer/reference field in the HuggingFace split.")
 
-    total = len(split_ds) if max_samples is None else min(len(split_ds), max_samples)
+    use_buckets = bucket_count > 0 and bucket_index >= 0
     skip_reasons: Counter = Counter()
+    selection_stats: Counter = Counter()
     converted_examples: List[Dict[str, Any]] = []
     preview_rows: List[Dict[str, Any]] = []
 
-    for row_index in range(total):
+    if use_buckets:
+        row_indices = range(len(split_ds))
+    else:
+        total = len(split_ds) if max_samples is None else min(len(split_ds), max_samples)
+        row_indices = range(total)
+
+    for row_index in row_indices:
+        if use_buckets and max_samples is not None and len(converted_examples) >= max_samples:
+            break
         try:
             row = split_ds[row_index]
             source_id = _stringify(row.get(field_names["id"])) if field_names["id"] else ""
             if not source_id:
                 source_id = f"{split_name}_{row_index:06d}"
+
+            if use_buckets:
+                assigned_bucket = _bucket_assignment(
+                    source_dataset=source_dataset,
+                    split_name=split_name,
+                    source_id=source_id,
+                    bucket_count=bucket_count,
+                )
+                if assigned_bucket != bucket_index:
+                    continue
+                selection_stats["bucket_eligible_rows"] += 1
 
             question = _stringify(row.get(field_names["question"]))
             if not question:
@@ -246,7 +280,7 @@ def _convert_rows(
         except Exception as exc:
             skip_reasons[f"row_error:{type(exc).__name__}"] += 1
 
-    return converted_examples, skip_reasons, preview_rows
+    return converted_examples, skip_reasons, preview_rows, selection_stats
 
 
 def _write_preview_jsonl(
@@ -366,11 +400,30 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Delete and recreate existing LangSmith dataset before upload",
     )
+    parser.add_argument(
+        "--bucket-count",
+        type=int,
+        default=0,
+        help="Deterministic bucket count for dataset partitioning (optional)",
+    )
+    parser.add_argument(
+        "--bucket-index",
+        type=int,
+        default=-1,
+        help="Deterministic bucket index for dataset partitioning (optional)",
+    )
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
+
+    if args.bucket_count < 0:
+        raise ValueError("--bucket-count must be >= 0.")
+    if args.bucket_count == 0 and args.bucket_index >= 0:
+        raise ValueError("--bucket-index requires --bucket-count > 0.")
+    if args.bucket_count > 0 and not (0 <= args.bucket_index < args.bucket_count):
+        raise ValueError("--bucket-index must be within [0, bucket-count).")
 
     root_dir = Path(__file__).resolve().parents[1]
     load_dotenv(root_dir / ".env")
@@ -383,12 +436,21 @@ def main() -> None:
     split_ds = dataset_dict[split_name]
     print(f"\n[Load] using_split={split_name} rows={len(split_ds)}")
 
-    converted_examples, skip_reasons, preview_rows = _convert_rows(
+    if args.bucket_count > 0:
+        print(
+            "[Bucket] enabled "
+            f"bucket_count={args.bucket_count} bucket_index={args.bucket_index} "
+            "assignment=sha1(source_dataset||split_name||source_id) % bucket_count"
+        )
+
+    converted_examples, skip_reasons, preview_rows, selection_stats = _convert_rows(
         split_ds,
         split_name=split_name,
         source_dataset=args.hf_dataset,
         langsmith_dataset=args.langsmith_dataset,
         max_samples=args.max_samples,
+        bucket_count=args.bucket_count,
+        bucket_index=args.bucket_index,
     )
 
     preview_path = _write_preview_jsonl(
@@ -405,6 +467,12 @@ def main() -> None:
         f"{len(converted_examples)} skipped={sum(skip_reasons.values())} "
         f"skip_reasons={dict(skip_reasons)}"
     )
+    if args.bucket_count > 0:
+        print(
+            "[Bucket Stats] eligible_rows="
+            f"{selection_stats.get('bucket_eligible_rows', 0)} "
+            f"selected_rows={len(converted_examples)}"
+        )
 
     if args.dry_run:
         print("[Dry Run] Skipping LangSmith upload.")
