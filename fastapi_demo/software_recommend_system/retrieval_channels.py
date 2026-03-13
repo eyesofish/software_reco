@@ -4,6 +4,7 @@ import time
 from typing import Any, Iterable, List
 
 import chromadb
+from rank_bm25 import BM25Okapi
 
 from .config import settings
 from .document_schema import Document
@@ -40,11 +41,15 @@ def _normalize_tags(raw_tags: Any) -> list[str]:
     return []
 
 
-def _tokenize(text: str) -> set[str]:
+def _tokenize_terms(text: str) -> list[str]:
     normalized = str(text or "").lower()
     latin_tokens = re.findall(r"[a-z0-9_]+", normalized)
     cjk_chars = re.findall(r"[\u4e00-\u9fff]", normalized)
-    return set(latin_tokens + cjk_chars)
+    return latin_tokens + cjk_chars
+
+
+def _tokenize(text: str) -> set[str]:
+    return set(_tokenize_terms(text))
 
 
 def _keyword_circuit_ttl_seconds() -> float:
@@ -85,11 +90,19 @@ def recall_web(query: str, top_k: int, trace_id: str | None = None) -> List[Docu
     return _tavily_search(query=query, trace_id=trace_id)[:limit]
 
 
+def _keyword_corpus_tokens(text: str, metadata: dict[str, Any]) -> list[str]:
+    tokens = _tokenize_terms(text)
+    tags = _normalize_tags(metadata.get("tags"))
+    if tags:
+        tokens.extend(_tokenize_terms(" ".join(tags)))
+    return tokens
+
+
 def recall_keyword(query: str, top_k: int, trace_id: str | None = None) -> List[Document]:
     global _KEYWORD_RECALL_UNAVAILABLE_UNTIL
     limit = max(1, int(top_k))
     scan_limit = max(limit, int(getattr(settings, "RECALL_KEYWORD_SCAN_LIMIT", 2000)))
-    query_tokens = _tokenize(query)
+    query_tokens = _tokenize_terms(query)
     if not query_tokens:
         return []
 
@@ -116,6 +129,8 @@ def recall_keyword(query: str, top_k: int, trace_id: str | None = None) -> List[
         metadatas = list(metadatas)[:scan_limit]
 
         scored: list[tuple[float, str, dict[str, Any]]] = []
+        corpus_rows: list[tuple[str, dict[str, Any], list[str], set[str]]] = []
+        query_token_set = set(query_tokens)
         for idx, content in enumerate(documents):
             text = str(content or "").strip()
             if not text:
@@ -124,15 +139,32 @@ def recall_keyword(query: str, top_k: int, trace_id: str | None = None) -> List[
             if idx < len(metadatas):
                 metadata = metadatas[idx] or {}
 
-            text_tokens = _tokenize(text)
-            text_tokens.update(_tokenize(str(metadata.get("tags", ""))))
-            if not text_tokens:
+            text_tokens = _keyword_corpus_tokens(text, metadata)
+            text_token_set = set(text_tokens)
+            if not text_token_set:
                 continue
+            corpus_rows.append((text, metadata, text_tokens, text_token_set))
 
-            overlap = len(query_tokens & text_tokens) / max(len(query_tokens), 1)
-            if overlap <= 0:
-                continue
-            scored.append((overlap, text, metadata))
+        if corpus_rows:
+            bm25 = BM25Okapi([tokens for _, _, tokens, _ in corpus_rows])
+            scores = bm25.get_scores(query_tokens)
+            matched_rows: list[tuple[float, str, dict[str, Any]]] = []
+            for score, (text, metadata, _, text_token_set) in zip(scores, corpus_rows):
+                if not (query_token_set & text_token_set):
+                    continue
+                matched_rows.append((float(score), text, metadata))
+
+            score_shift = 0.0
+            if matched_rows and max(score for score, _, _ in matched_rows) <= 0:
+                # BM25Okapi can return non-positive scores for very small corpora.
+                # Shift only matching rows so real hits are retained without changing their order.
+                score_shift = abs(min(score for score, _, _ in matched_rows)) + 1e-9
+
+            for score, text, metadata in matched_rows:
+                adjusted_score = score + score_shift
+                if adjusted_score <= 0:
+                    continue
+                scored.append((adjusted_score, text, metadata))
 
         scored.sort(key=lambda item: item[0], reverse=True)
         top_items = scored[:limit]
