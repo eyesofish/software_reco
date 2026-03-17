@@ -47,9 +47,11 @@ htmlcov/
 
 # Local vector DB / runtime data
 **/chroma_db/
+fastapi_demo/chroma_db_parent_child_v2/
 **/.runtime/
 fastapi_demo/ingest_docs/
 fastapi_demo/evaluation/previews/
+fastapi_demo/evaluation/reports/
 steps/step1.md
 steps/step2.md
 fastapi_demo/software_recommend_system/Rules.txt
