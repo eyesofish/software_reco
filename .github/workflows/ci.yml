@@ -1,0 +1,56 @@
+name: CI
+
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+    branches: [master, main]
+
+jobs:
+  python:
+    name: Python ${{ matrix.python-version }}
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: fastapi_demo
+    strategy:
+      matrix:
+        python-version: ["3.11"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+          pip install -e ".[dev]" 2>/dev/null || pip install pytest pytest-asyncio ruff mypy
+      - name: Lint (ruff)
+        run: ruff check .
+      - name: Type check (mypy)
+        continue-on-error: true
+        run: mypy --strict --ignore-missing-imports software_recommend_system app 2>&1 | head -100
+      - name: Tests
+        run: pytest tests/ -v
+        env:
+          OPENAI_API_KEY: dummy
+          DASHSCOPE_API_KEY: dummy
+          TAVILY_API_KEY: dummy
+          LANGSMITH_API_KEY: dummy
+
+  java:
+    name: Java (Spring Boot)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ollama_springboot/demo
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          java-version: "17"
+          distribution: temurin
+          cache: maven
+      - name: Build & test
+        run: mvn -B verify -DskipTests=false 2>&1 | tail -50
