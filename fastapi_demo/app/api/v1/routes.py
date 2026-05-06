@@ -1,7 +1,6 @@
 ﻿import logging
 import json
 import ast
-import os
 import re
 import time
 import asyncio
@@ -60,8 +59,8 @@ INVALID_NAME_VALUES = {
 CONFIRM_SHORT_QUERY_PATTERN = re.compile(
     r"(?i)^\s*(?:\u786e\u8ba4|\u7ee7\u7eed|\u7ee7\u7eed\u5427|\u597d\u7684|\u597d|ok|okay|yes|y|go on|continue)\s*[.!?\u3002\uff01\uff1f]*\s*$"
 )
-SESSION_STATE_FILE = Path(os.getenv("SESSION_STATE_FILE", ".runtime/fastapi_session_state.json"))
-SESSION_MAX_MESSAGES = int(os.getenv("SESSION_MAX_MESSAGES", "30"))
+SESSION_STATE_FILE = Path(agent_settings.SESSION_STATE_FILE)
+SESSION_MAX_MESSAGES = agent_settings.SESSION_MAX_MESSAGES
 _SESSION_LOCK = RLock()
 
 

@@ -1,5 +1,6 @@
 package com.example.controller;
 
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.RestController;
 import org.springframework.web.servlet.mvc.method.annotation.StreamingResponseBody;
@@ -13,21 +14,18 @@ import java.nio.charset.StandardCharsets;
 @RestController
 public class StreamController {
 
+    @Value("${proxy.upstream.url:http://localhost:8000/api/chat/stream}")
+    private String upstreamUrl;
+
     @GetMapping("/proxy/chat/stream")
     public ResponseEntity<StreamingResponseBody> streamProxy() {
-        /*
-         * 批评：大多数人在这里使用 RestTemplate，那是错误的。
-         * 它会缓冲整个响应。
-         * 修复：手动读取上游流并逐块 flush 到下游。
-         */
         StreamingResponseBody stream = outputStream -> {
             HttpURLConnection conn = null;
             try {
-                URL url = new URL("http://localhost:8000/api/chat/stream");
+                URL url = new URL(upstreamUrl);
                 conn = (HttpURLConnection) url.openConnection();
                 conn.setRequestMethod("GET");
-                
-                // 关键：手动按小块转发并在每块后 flush，避免 servlet 聚合缓冲。
+
                 try (InputStream upstream = conn.getInputStream()) {
                     byte[] buffer = new byte[256];
                     int bytesRead;
