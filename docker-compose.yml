@@ -1,0 +1,41 @@
+services:
+  chromadb:
+    image: chromadb/chroma:latest
+    ports:
+      - "18001:8000"
+    volumes:
+      - chroma_data:/chroma/chroma
+    environment:
+      - IS_PERSISTENT=TRUE
+      - ANONYMIZED_TELEMETRY=FALSE
+
+  fastapi:
+    build: ./fastapi_demo
+    ports:
+      - "8000:8000"
+    env_file:
+      - ./fastapi_demo/.env
+    depends_on:
+      - chromadb
+    restart: unless-stopped
+
+  spring-boot:
+    build: ./ollama_springboot/demo
+    ports:
+      - "8080:8080"
+    environment:
+      - PROXY_UPSTREAM_URL=http://fastapi:8000/api/chat/stream
+      - SPRING_DATASOURCE_URL=jdbc:h2:mem:software_reco;MODE=PostgreSQL
+    depends_on:
+      - fastapi
+    restart: unless-stopped
+
+  frontend:
+    build: ./react_frontend
+    ports:
+      - "3000:80"
+    depends_on:
+      - spring-boot
+
+volumes:
+  chroma_data:
