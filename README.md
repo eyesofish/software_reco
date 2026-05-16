@@ -151,6 +151,42 @@ yarn
 yarn start
 ```
 
+## Security & Operations
+
+### API key authentication (FastAPI)
+
+All `/api/v1/*` endpoints require an `X-API-Key` header when `API_KEY` is set
+in `fastapi_demo/.env`. Leave `API_KEY=""` for dev (no auth). `/initialize-db`
+is gated behind `ADMIN_API_KEY` (falls back to `API_KEY` if unset).
+
+Generate keys:
+
+```powershell
+python -c "import secrets; print(secrets.token_urlsafe(32))"
+```
+
+### Rate limiting
+
+A default `30/minute` per-IP limit is applied to every FastAPI route via
+`slowapi`. Tune via `RATE_LIMIT_RECOMMEND` in `fastapi_demo/.env`.
+
+### Secret-scan pre-commit hook
+
+The repo ships a `.pre-commit-config.yaml` with `gitleaks` and standard
+pre-commit hygiene hooks. Enable once:
+
+```bash
+pip install pre-commit
+pre-commit install
+```
+
+### Rotating leaked keys
+
+If an API key is committed (or shared in chat / screenshots), treat it as
+compromised: rotate it in the provider dashboard (DashScope, Tavily, OpenAI)
+**before** removing it from the file. Removal from disk does not retroactively
+secure the key.
+
 ## Important API Endpoints
 
 ### FastAPI
@@ -161,7 +197,7 @@ yarn start
 - `POST /api/v1/recommend/confirm/stream`
 - `GET /api/v1/session-state/{session_id}`
 - `PUT /api/v1/session-state/{session_id}`
-- `POST /api/v1/initialize-db`
+- `POST /api/v1/initialize-db` (admin only)
 
 ### Spring Boot
 
