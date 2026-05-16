@@ -1,16 +1,14 @@
 import logging
-import json
-import ast
-import re
 import time
-import asyncio
-from typing import Any, AsyncIterator, Dict, List, Optional
+from collections.abc import AsyncIterator
+from typing import Any
 from uuid import uuid4
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
 from langgraph.types import Command
 
+from app.api.v1.auth import require_admin_api_key, require_api_key
 from app.api.v1.models import (
     RecommendationConfirmRequest,
     RecommendationRequest,
@@ -18,620 +16,57 @@ from app.api.v1.models import (
     SessionStateResponse,
     SessionStateUpdateRequest,
 )
-from software_recommend_system.rag_agent import create_rag_with_routing_agent
-from software_recommend_system.observability import traceable
+from software_recommend_system.state import AgentState
+from software_recommend_system.utils import initialize_vector_store
+
+from .handlers._agent import AGENT
+from .handlers.normalizers import (
+    _build_human_confirmation_ack,
+    _extract_eval_payload,
+    _extract_interrupt_payload,
+    _extract_skill_planner_payload,
+    _get_value,
+    _is_asking_user_name,
+    _is_confirmation_short_query,
+    _iter_awaiting_confirmation_sse,
+    _normalize_candidates,
+    _normalize_hitl_payload,
+    _normalize_pending_sub_questions,
+)
+from .handlers.recommend_orchestrator import (
+    await_recommend_task as _await_recommend_task,
+)
+from .handlers.recommend_orchestrator import (
+    create_recommend_task as _create_recommend_task,
+)
+from .handlers.recommend_orchestrator import (
+    execute_recommend_turn as _execute_recommend_turn,
+)
+from .handlers.recommend_orchestrator import (
+    upsert_name_fact_from_query as _upsert_name_fact_from_query,
+)
 from .session_store import (
     _append_session_message_once,
     _append_session_messages,
     _get_or_create_session_state,
-    _layered_memory_enabled,
-    _memory_writeback_enabled,
     _merge_session_facts,
-    _normalize_candidate_name,
-    _normalize_session_facts,
     _normalize_session_messages,
-    _normalize_session_state,
     _safe_build_memory_context,
-    _safe_write_fact_to_memory,
     _safe_write_turn_memories,
-    _truncate_memory_text,
-    SESSION_MAX_MESSAGES,
-    SESSION_STATE_STORE,
 )
 from .stream_utils import (
+    _iter_custom_events,
+    _iter_update_nodes,
+    _merge_stream_updates,
     _sse,
     _to_stream_mode_chunk,
-    _iter_update_nodes,
-    _iter_custom_events,
-    _merge_stream_updates,
     run_agent_async,
     run_agent_stream_async,
 )
-from software_recommend_system.state import AgentState
-from software_recommend_system.config import settings as agent_settings
-from software_recommend_system.utils import initialize_vector_store
 
-router = APIRouter()
+router = APIRouter(dependencies=[Depends(require_api_key)])
+admin_router = APIRouter(dependencies=[Depends(require_admin_api_key)])
 logger = logging.getLogger(__name__)
-AGENT = create_rag_with_routing_agent()
-NAME_ZH_PATTERN = re.compile(
-    r"(?:(?:^|[锛?銆傦紒锛?\s])(?:\u6211\u53eb|\u8bb0\u4f4f\u6211\u53eb|\u8bb0\u4f4f\u6211\u7684\u540d\u5b57\u662f|\u6211\u7684\u540d\u5b57\u662f)\s*([\u4e00-\u9fffA-Za-z][\u4e00-\u9fffA-Za-z0-9_\-]{0,31}))"
-)
-NAME_IS_ZH_PATTERN = re.compile(
-    r"(?:(?:^|[锛?銆傦紒锛?\s])(?:\u6211\u662f)\s*([\u4e00-\u9fffA-Za-z][\u4e00-\u9fffA-Za-z0-9_\-]{0,31}))"
-)
-NAME_EN_PATTERN = re.compile(r"(?i)(?:my name is|i am|i'm)\s+([A-Za-z][A-Za-z\-' ]{0,40})")
-USER_NAME_QUESTION_PATTERNS = (
-    re.compile(r"\u6211\u53eb(\u4ec0\u4e48|\u5565|\u8c01)"),
-    re.compile(r"\u6211\u7684\u540d\u5b57(\u662f)?(\u4ec0\u4e48|\u5565|\u8c01)"),
-    re.compile(r"\u6211\u662f\u8c01"),
-    re.compile(r"(?i)what is my name"),
-    re.compile(r"(?i)who am i"),
-)
-CONFIRM_SHORT_QUERY_PATTERN = re.compile(
-    r"(?i)^\s*(?:\u786e\u8ba4|\u7ee7\u7eed|\u7ee7\u7eed\u5427|\u597d\u7684|\u597d|ok|okay|yes|y|go on|continue)\s*[.!?\u3002\uff01\uff1f]*\s*$"
-)
-
-
-def _get_value(result: Any, key: str, default: Any = None) -> Any:
-    if isinstance(result, dict):
-        return result.get(key, default)
-    return getattr(result, key, default)
-
-
-def _normalize_candidates(raw: Any) -> List[Dict[str, Any]]:
-    if not isinstance(raw, list):
-        return []
-    normalized: List[Dict[str, Any]] = []
-    for item in raw:
-        if isinstance(item, dict):
-            normalized.append(item)
-            continue
-        dumped = None
-        if hasattr(item, "model_dump"):
-            try:
-                dumped = item.model_dump()
-            except Exception:
-                dumped = None
-        elif hasattr(item, "dict"):
-            try:
-                dumped = item.dict()
-            except Exception:
-                dumped = None
-        if isinstance(dumped, dict):
-            normalized.append(dumped)
-    return normalized
-
-
-def _normalize_retrieved_doc_ids(raw: Any) -> List[str]:
-    normalized: List[str] = []
-    seen = set()
-    if not isinstance(raw, (list, tuple, set)):
-        return normalized
-    for value in raw:
-        doc_id = str(value or "").strip()
-        if not doc_id or doc_id in seen:
-            continue
-        seen.add(doc_id)
-        normalized.append(doc_id)
-    return normalized
-
-
-def _normalize_retrieval_records(raw: Any) -> List[Dict[str, Any]]:
-    if not isinstance(raw, list):
-        return []
-    normalized: List[Dict[str, Any]] = []
-    for item in raw:
-        if not isinstance(item, dict):
-            continue
-        subquery_id = str(item.get("subquery_id", "")).strip()
-        subquery = str(item.get("subquery", "")).strip()
-        retrieved_doc_ids = _normalize_retrieved_doc_ids(item.get("retrieved_doc_ids", []))
-        retrieved_contexts_raw = item.get("retrieved_contexts", [])
-        retrieved_contexts = []
-        if isinstance(retrieved_contexts_raw, list):
-            for context in retrieved_contexts_raw[:8]:
-                text = str(context or "").strip()
-                if text:
-                    retrieved_contexts.append(text)
-        channel_counts_raw = item.get("channel_counts", {})
-        channel_counts: Dict[str, int] = {}
-        if isinstance(channel_counts_raw, dict):
-            for key, value in channel_counts_raw.items():
-                channel = str(key or "").strip().lower()
-                if not channel:
-                    continue
-                try:
-                    count = int(value)
-                except (TypeError, ValueError):
-                    continue
-                if count > 0:
-                    channel_counts[channel] = count
-        channels_used = sorted(channel_counts.keys())
-        selected_skill = str(item.get("selected_skill", "")).strip()
-        skill_used = str(item.get("skill_used", "")).strip() or selected_skill
-        rerank_mode = str(item.get("rerank_mode", "")).strip()
-        normalized.append(
-            {
-                "subquery_id": subquery_id,
-                "subquery": subquery,
-                "retrieved_doc_ids": retrieved_doc_ids,
-                "retrieved_contexts": retrieved_contexts,
-                "channel_counts": channel_counts,
-                "channels_used": channels_used,
-                "selected_skill": selected_skill,
-                "skill_used": skill_used,
-                "rerank_mode": rerank_mode,
-            }
-        )
-    return normalized
-
-
-def _normalize_plan_steps(raw: Any) -> List[Dict[str, Any]]:
-    if not isinstance(raw, list):
-        return []
-    normalized: List[Dict[str, Any]] = []
-    for index, item in enumerate(raw, start=1):
-        if isinstance(item, dict):
-            step_id = str(item.get("step_id", "") or f"step_{index}").strip() or f"step_{index}"
-            objective = str(item.get("objective", "") or "").strip()
-            action = str(item.get("action", "retrieve") or "retrieve").strip() or "retrieve"
-            query = str(item.get("query", "") or "").strip()
-            retrieval_profile = str(item.get("retrieval_profile", "balanced") or "balanced").strip() or "balanced"
-            required = bool(item.get("required", True))
-        else:
-            step_id = f"step_{index}"
-            objective = str(item or "").strip()
-            action = "retrieve"
-            query = objective
-            retrieval_profile = "balanced"
-            required = True
-        if not objective and not query:
-            continue
-        normalized.append(
-            {
-                "step_id": step_id,
-                "objective": objective or query,
-                "action": action,
-                "query": query or objective,
-                "retrieval_profile": retrieval_profile,
-                "required": required,
-            }
-        )
-    return normalized
-
-
-def _extract_skill_planner_payload(result: Any) -> Dict[str, Any]:
-    selected_skill = str(_get_value(result, "selected_skill", "") or "").strip() or None
-    plan_steps = _normalize_plan_steps(_get_value(result, "plan_steps", []))
-    return {
-        "selected_skill": selected_skill,
-        "plan_steps": plan_steps,
-    }
-
-
-def _normalize_hitl_payload(raw: Any) -> Optional[Dict[str, Any]]:
-    if not isinstance(raw, dict) or not raw:
-        return None
-    payload = raw
-    policy = str(payload.get("policy", "human") or "human").strip() or "human"
-    decision = str(payload.get("decision", "confirm") or "confirm").strip() or "confirm"
-    edited_subqueries = _normalize_pending_sub_questions(payload.get("edited_subqueries", []))
-    return {
-        "policy": policy,
-        "decision": decision,
-        "edited_subqueries": edited_subqueries,
-    }
-
-
-def _extract_eval_payload(
-    result: Any,
-    *,
-    hitl_fallback: Optional[Dict[str, Any]] = None,
-) -> Dict[str, Any]:
-    retrieval_records = _normalize_retrieval_records(_get_value(result, "retrieval_records", []))
-    retrieved_doc_ids = _normalize_retrieved_doc_ids(_get_value(result, "retrieved_doc_ids", []))
-
-    hitl = _normalize_hitl_payload(_get_value(result, "hitl", None))
-    if hitl is None:
-        hitl = _normalize_hitl_payload(hitl_fallback)
-
-    return {
-        "retrieval_records": retrieval_records,
-        "retrieved_doc_ids": retrieved_doc_ids,
-        "hitl": hitl,
-    }
-
-
-def _extract_interrupt_payload(result: Any) -> Optional[Dict[str, Any]]:
-    interrupts = None
-    if isinstance(result, dict):
-        interrupts = result.get("__interrupt__")
-    elif hasattr(result, "__interrupt__"):
-        interrupts = getattr(result, "__interrupt__", None)
-    if not interrupts:
-        return None
-    first = interrupts[0]
-    payload = getattr(first, "value", first)
-    if isinstance(payload, dict):
-        return payload
-    return {"type": "human_confirmation", "message": str(payload)}
-
-
-def _normalize_pending_sub_questions(raw: Any) -> List[str]:
-    normalized: List[str] = []
-    seen = set()
-
-    def append_unique(value: str) -> None:
-        text = str(value or "").strip()
-        if not text or text in seen:
-            return
-        seen.add(text)
-        normalized.append(text)
-
-    def try_parse_structured_text(text: str) -> Optional[Any]:
-        stripped = text.strip()
-        if not stripped or stripped[0] not in {"[", "{"}:
-            return None
-        try:
-            return json.loads(stripped)
-        except Exception:
-            pass
-        try:
-            return ast.literal_eval(stripped)
-        except Exception:
-            return None
-
-    def collect(value: Any) -> None:
-        if value is None:
-            return
-
-        if isinstance(value, str):
-            text = value.strip()
-            if not text:
-                return
-            parsed = try_parse_structured_text(text)
-            if parsed is not None:
-                collect(parsed)
-                return
-            append_unique(text)
-            return
-
-        if isinstance(value, dict):
-            preferred: List[Any] = []
-            for key in ("sub_questions", "pending_sub_questions"):
-                if key in value:
-                    preferred.append(value.get(key))
-            if preferred:
-                for item in preferred:
-                    collect(item)
-                return
-            for nested in value.values():
-                collect(nested)
-            return
-
-        if isinstance(value, (list, tuple, set)):
-            for item in value:
-                collect(item)
-            return
-
-        text = str(value).strip()
-        if text:
-            append_unique(text)
-
-    collect(raw)
-    return normalized
-
-
-def _build_human_confirmation_ack(sub_questions: List[str]) -> str:
-    normalized = _normalize_pending_sub_questions(sub_questions)
-    if not normalized:
-        raise ValueError("pending_sub_questions must not be empty for human confirmation ACK")
-
-    preview = "\n".join(
-        f"{idx + 1}. {question}" for idx, question in enumerate(normalized[:3])
-    )
-    suffix = "\n..." if len(normalized) > 3 else ""
-    return (
-        "已收到请求，当前已生成子问题，正在等待确认后继续执行。\n"
-        "Status: waiting for confirmation.\n"
-        "请调用 /api/v1/recommend/confirm，并使用 action=confirm 或 action=edit。\n"
-        f"待确认子问题预览:\n{preview}{suffix}"
-    )
-
-
-async def _iter_awaiting_confirmation_sse(
-    session_id: str,
-    sub_questions: List[str],
-    *,
-    delay_seconds: float = 0.12,
-) -> AsyncIterator[str]:
-    """Emit awaiting_confirmation incrementally so sub-questions render progressively."""
-    normalized = _normalize_pending_sub_questions(sub_questions)
-    if not normalized:
-        return
-
-    for idx in range(1, len(normalized) + 1):
-        yield _sse(
-            "awaiting_confirmation",
-            {
-                "session_id": session_id,
-                "sub_questions": normalized[:idx],
-            },
-        )
-        if idx < len(normalized) and delay_seconds > 0:
-            await asyncio.sleep(delay_seconds)
-
-
-def _extract_name_fact(query: str) -> Optional[str]:
-    if not query or _is_asking_user_name(query):
-        return None
-
-    zh = NAME_ZH_PATTERN.search(query)
-    if zh:
-        normalized = _normalize_candidate_name(zh.group(1))
-        if normalized:
-            return normalized
-
-    zh_is = NAME_IS_ZH_PATTERN.search(query)
-    if zh_is:
-        normalized = _normalize_candidate_name(zh_is.group(1))
-        if normalized:
-            return normalized
-
-    en = NAME_EN_PATTERN.search(query)
-    if en:
-        normalized = _normalize_candidate_name(en.group(1))
-        if normalized:
-            return normalized
-
-    return None
-
-
-def _normalize_candidate_name(raw: str) -> Optional[str]:
-    candidate = (raw or "").strip()
-    candidate = candidate.strip(" \t\r\n,.!?;:，。！？；：“”\"'()[]（）【】")
-    if not candidate:
-        return None
-
-    lowered = candidate.lower()
-    if candidate in INVALID_NAME_VALUES or lowered in INVALID_NAME_VALUES:
-        return None
-    if candidate.endswith(("\u5417", "\u5462", "\u4e48", "\u561b")):
-        return None
-    return candidate
-
-
-def _is_asking_user_name(query: str) -> bool:
-    if not query:
-        return False
-    normalized = query.strip()
-    for pattern in USER_NAME_QUESTION_PATTERNS:
-        if pattern.search(normalized):
-            return True
-
-    lowered = normalized.lower()
-    return ("what's my name" in lowered) or ("whats my name" in lowered)
-
-
-def _is_confirmation_short_query(query: str) -> bool:
-    normalized = (query or "").strip()
-    if not normalized:
-        return False
-    return CONFIRM_SHORT_QUERY_PATTERN.search(normalized) is not None
-
-
-@traceable(name="api_recommend_turn")
-async def _execute_recommend_turn(
-    *,
-    session_id: str,
-    request_query: str,
-    graph_input: Any,
-    config: Dict[str, Any],
-    fallback_answer: Optional[str] = None,
-    fallback_mode: str = "direct",
-    interrupt_source: str = "recommend",
-) -> RecommendationResponse:
-    try:
-        result = await run_agent_async(AGENT, graph_input, config=config)
-        hitl_policy = str(_get_value(graph_input, "hitl_policy", "human") or "human").strip()
-        if hitl_policy not in {"human", "auto_confirm", "oracle_edit"}:
-            hitl_policy = "human"
-        eval_payload = _extract_eval_payload(
-            result,
-            hitl_fallback={
-                "policy": hitl_policy,
-                "decision": "not_applicable",
-                "edited_subqueries": [],
-            },
-        )
-        skill_planner_payload = _extract_skill_planner_payload(result)
-        interrupt_payload = _extract_interrupt_payload(result)
-        if interrupt_payload and interrupt_payload.get("type") == "human_confirmation":
-            pending_sub_questions = _normalize_pending_sub_questions(
-                interrupt_payload.get("sub_questions", [])
-            )
-            if not pending_sub_questions:
-                logger.error(
-                    "HITL_ACK_ABORT session_id=%s reason=empty_sub_questions payload=%s source=%s",
-                    session_id,
-                    interrupt_payload,
-                    interrupt_source,
-                )
-                raise RuntimeError(
-                    "Interrupted for human confirmation but no sub-questions were produced."
-                )
-            ack_message = _build_human_confirmation_ack(pending_sub_questions)
-            logger.warning(
-                "HITL_ACK_RETURN session_id=%s pending_count=%d source=%s",
-                session_id,
-                len(pending_sub_questions),
-                interrupt_source,
-            )
-            _append_session_message_once(session_id, "assistant", ack_message)
-            return RecommendationResponse(
-                status="awaiting_human_confirmation",
-                final_answer=ack_message,
-                candidates=[],
-                mode="rag",
-                iteration_count=0,
-                coverage=0.0,
-                session_id=session_id,
-                awaiting_human_confirmation=True,
-                pending_sub_questions=pending_sub_questions,
-                retrieval_records=eval_payload["retrieval_records"],
-                retrieved_doc_ids=eval_payload["retrieved_doc_ids"],
-                selected_skill=skill_planner_payload["selected_skill"],
-                plan_steps=skill_planner_payload["plan_steps"],
-                hitl=eval_payload["hitl"]
-                or _normalize_hitl_payload(
-                    {
-                        "policy": hitl_policy,
-                        "decision": "awaiting_confirmation",
-                        "edited_subqueries": [],
-                    }
-                ),
-            )
-
-        final_answer = _get_value(result, "final_answer", "")
-        if final_answer:
-            _append_session_message_once(session_id, "assistant", final_answer)
-            response = RecommendationResponse(
-                status="success",
-                final_answer=final_answer,
-                candidates=_normalize_candidates(_get_value(result, "candidates", [])),
-                mode=_get_value(result, "mode", ""),
-                iteration_count=_get_value(result, "iteration_count", 0),
-                coverage=_get_value(result, "coverage", 0.0),
-                session_id=session_id,
-                awaiting_human_confirmation=False,
-                retrieval_records=eval_payload["retrieval_records"],
-                retrieved_doc_ids=eval_payload["retrieved_doc_ids"],
-                selected_skill=skill_planner_payload["selected_skill"],
-                plan_steps=skill_planner_payload["plan_steps"],
-                hitl=eval_payload["hitl"],
-            )
-            _safe_write_turn_memories(
-                session_id=session_id,
-                request_query=request_query,
-                final_answer=response.final_answer,
-                selected_skill=response.selected_skill,
-                retrieved_doc_ids=list(response.retrieved_doc_ids or []),
-            )
-            return response
-
-        if fallback_answer:
-            _append_session_message_once(session_id, "assistant", fallback_answer)
-            fallback_eval_payload = _extract_eval_payload(
-                result,
-                hitl_fallback={
-                    "policy": hitl_policy,
-                    "decision": "confirm",
-                    "edited_subqueries": [],
-                },
-            )
-            response = RecommendationResponse(
-                status="success",
-                final_answer=fallback_answer,
-                candidates=[],
-                mode=fallback_mode,
-                iteration_count=0,
-                coverage=1.0,
-                session_id=session_id,
-                awaiting_human_confirmation=False,
-                retrieval_records=fallback_eval_payload["retrieval_records"],
-                retrieved_doc_ids=fallback_eval_payload["retrieved_doc_ids"],
-                selected_skill=skill_planner_payload["selected_skill"],
-                plan_steps=skill_planner_payload["plan_steps"],
-                hitl=fallback_eval_payload["hitl"],
-            )
-            _safe_write_turn_memories(
-                session_id=session_id,
-                request_query=request_query,
-                final_answer=response.final_answer,
-                selected_skill=response.selected_skill,
-                retrieved_doc_ids=list(response.retrieved_doc_ids or []),
-            )
-            return response
-
-        response = RecommendationResponse(
-            status="success",
-            final_answer=final_answer,
-            candidates=_normalize_candidates(_get_value(result, "candidates", [])),
-            mode=_get_value(result, "mode", ""),
-            iteration_count=_get_value(result, "iteration_count", 0),
-            coverage=_get_value(result, "coverage", 0.0),
-            session_id=session_id,
-            awaiting_human_confirmation=False,
-            retrieval_records=eval_payload["retrieval_records"],
-            retrieved_doc_ids=eval_payload["retrieved_doc_ids"],
-            selected_skill=skill_planner_payload["selected_skill"],
-            plan_steps=skill_planner_payload["plan_steps"],
-            hitl=eval_payload["hitl"],
-        )
-        _safe_write_turn_memories(
-            session_id=session_id,
-            request_query=request_query,
-            final_answer=response.final_answer,
-            selected_skill=response.selected_skill,
-            retrieved_doc_ids=list(response.retrieved_doc_ids or []),
-        )
-        return response
-    except Exception:
-        logger.exception(
-            "RECOMMEND_TURN_FAILED session_id=%s source=%s query=%r",
-            session_id,
-            interrupt_source,
-            request_query,
-        )
-        _append_session_message_once(
-            session_id,
-            "system",
-            "Request failed while processing this turn.",
-        )
-        raise
-
-
-def _log_recommend_task_outcome(task: asyncio.Task, session_id: str, source: str) -> None:
-    if task.cancelled():
-        logger.warning("RECOMMEND_TASK_CANCELLED session_id=%s source=%s", session_id, source)
-        return
-    exc = task.exception()
-    if exc:
-        logger.error(
-            "RECOMMEND_TASK_FAILED session_id=%s source=%s error=%s",
-            session_id,
-            source,
-            exc,
-            exc_info=(type(exc), exc, exc.__traceback__),
-        )
-
-
-def _create_recommend_task(coro: Any, session_id: str, source: str) -> asyncio.Task:
-    task = asyncio.create_task(coro)
-    task.add_done_callback(
-        lambda done_task: _log_recommend_task_outcome(done_task, session_id, source)
-    )
-    return task
-
-
-async def _await_recommend_task(
-    task: asyncio.Task,
-    session_id: str,
-    source: str,
-) -> RecommendationResponse:
-    try:
-        return await asyncio.shield(task)
-    except asyncio.CancelledError:
-        logger.warning("CLIENT_DISCONNECTED_CONTINUE session_id=%s source=%s", session_id, source)
-        raise
-
-
-def _upsert_name_fact_from_query(session_id: str, query: str) -> Dict[str, Any]:
-    name = _extract_name_fact(query)
-    if not name:
-        return _get_or_create_session_state(session_id)
-    return _merge_session_facts(session_id, {"user_name": name})
 
 
 @router.post("/recommend", response_model=RecommendationResponse)
@@ -874,8 +309,8 @@ async def stream_software_recommendation(request_data: RecommendationRequest):
             )
             config = {"configurable": {"thread_id": session_id}}
 
-            merged_result: Dict[str, Any] = {}
-            token_parts: List[str] = []
+            merged_result: dict[str, Any] = {}
+            token_parts: list[str] = []
             awaiting_emitted = False
 
             async for stream_item in run_agent_stream_async(
@@ -889,14 +324,14 @@ async def stream_software_recommendation(request_data: RecommendationRequest):
                 if mode == "updates":
                     _merge_stream_updates(merged_result, chunk)
                     for node_name, payload in _iter_update_nodes(chunk):
-                        node_payload: Dict[str, Any] = {
+                        node_payload: dict[str, Any] = {
                             "node": node_name,
                             "status": "end",
                         }
                         if isinstance(payload, dict):
                             keys = [
                                 str(key)
-                                for key in payload.keys()
+                                for key in payload
                                 if not str(key).startswith("__")
                             ]
                             if keys:
@@ -1059,8 +494,8 @@ async def confirm_software_recommendation_stream(request_data: RecommendationCon
                 "comment": request_data.comment or "",
             }
 
-            merged_result: Dict[str, Any] = {}
-            token_parts: List[str] = []
+            merged_result: dict[str, Any] = {}
+            token_parts: list[str] = []
             awaiting_emitted = False
 
             async for stream_item in run_agent_stream_async(
@@ -1074,14 +509,14 @@ async def confirm_software_recommendation_stream(request_data: RecommendationCon
                 if mode == "updates":
                     _merge_stream_updates(merged_result, chunk)
                     for node_name, payload in _iter_update_nodes(chunk):
-                        node_payload: Dict[str, Any] = {
+                        node_payload: dict[str, Any] = {
                             "node": node_name,
                             "status": "end",
                         }
                         if isinstance(payload, dict):
                             keys = [
                                 str(key)
-                                for key in payload.keys()
+                                for key in payload
                                 if not str(key).startswith("__")
                             ]
                             if keys:
@@ -1435,7 +870,7 @@ async def upsert_session_state(session_id: str, request_data: SessionStateUpdate
     )
 
 
-@router.post("/initialize-db")
+@admin_router.post("/initialize-db")
 async def initialize_database():
     """Initialize the vector store with sample documents."""
     try:
@@ -1487,3 +922,5 @@ async def initialize_database():
             detail=f"Error initializing database: {exc}",
         ) from exc
 
+
+router.include_router(admin_router)
