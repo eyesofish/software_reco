@@ -29,7 +29,9 @@
    - 召回：向量检索 + Tavily 合并。
    - 去格式化：统一为 `Document`，补齐 `metadata.doc_id/retrieval_source/score`。
    - 若开关开启：调用 `rerank_documents(query=subq, docs=merged_docs, top_n=4)`，按分数降序返回。
-   - `rerank_documents` 线性打分：`0.6*retrieval_score + 0.3*keyword_overlap + 0.1*source_prior`，并回写 `doc.score` 与 `metadata.score`。
+   - 当前 `rerank_documents` 优先走 `cross_encoder_hybrid`：使用 `BAAI/bge-reranker-base` 产出 `cross_encoder score`，再与线性特征分融合，当前公式是 `0.8 * cross_encoder + 0.2 * linear_score`。
+   - 线性部分不是只看 3 个特征，而是综合 `retrieval / overlap / source / freshness / skill / memory`，权重可配置。
+   - 若 Cross-Encoder 加载失败、预测失败或被显式关闭，则自动回退到纯线性 rerank，并回写 `doc.score` 与 `metadata.score`。
 
 2. 全局级（`nodes.py::retrieve_node`）
    - 收集：遍历每个 `sub_question` 调 `retrieve(...)`，累积到 `all_docs`；`retrieval_records` 仍按子问题记录。
@@ -52,11 +54,18 @@
 - top3 evidence (single aggregated item)
 - LLM answer
 
-#### 2.2.1 第二阶段（最推荐）：`vector top20 -> cross-encoder rerank -> top3`
+90 秒口语整合版（可直接对面试官说）：
+我这块 rerank 的设计，核心思路是先把“能召回的都召回上来”，再在进入大模型之前做一次更强的相关性筛选。当前实现其实是一个两段式 rerank。第一段发生在子问题级，因为一个用户问题会先被拆成 2 到 3 个 sub-question。每个 sub-question 会先做检索，当前是向量召回加少量 web 召回，拿到候选之后先统一成同一种 `Document` 结构，补齐 `doc_id`、`retrieval_source`、`score` 这些字段。如果开关 `RETRIEVAL_ENABLE_RERANK` 打开，就先对这一批候选做一次子问题级 rerank。当前实现不是纯线性分，而是优先用 `BAAI/bge-reranker-base` 做 Cross-Encoder 打分，再和线性特征分做一个 hybrid 融合；只有在模型加载失败或者关闭的时候，才回退到纯线性 rerank。
+
+第二段发生在全局级。也就是所有 sub-question 的结果汇总之后，我不会直接喂给大模型，而是先按 `doc_id` 去重，再用原始用户问题做一次全局 rerank，最后只保留 top3 作为最终 evidence。这样做的原因是，子问题级 rerank 解决的是“单个子问题下谁更相关”，全局级 rerank 解决的是“站在整个用户问题视角，哪些证据最值得进入最终回答”。所以最后大模型实际看到的证据上限是 3 个 chunk，这样能控制噪音和上下文长度。
+
+另外在 Workflow 里我还规划了后续优化路线，不是“第二阶段才上 bge”，而是基于当前已经存在的 cross-encoder hybrid，继续把召回池做宽，比如从更大的向量候选集里做强重排，形态上更接近 `vector top20 -> rerank -> top3`。这样 trade-off 很明确：相关性有机会继续提升，但延迟也会涨，所以我会重点看 `retrieval_recall`、`answer_correctness`、`latency p50/p95` 和 fallback rate，确保收益是真的，不是单纯把系统变慢了。
+
+#### 2.2.1 后续优化方向（宽召回 + 强重排）：`vector top20 -> rerank -> top3`
 
 适用目标：
-- 本阶段固定采用 `BAAI/bge-reranker-base` 作为 Cross-Encoder reranker。
-- 你要进一步提升相关性时，优先走这条方案，不再使用线性 rerank 作为默认路径。
+- 当前代码已经优先采用 `BAAI/bge-reranker-base` 作为 Cross-Encoder reranker，并在失败时回退到线性 rerank。
+- 后续这条方案的重点，不是“第一次引入 bge”，而是把候选池做宽，再让当前 rerank 机制在更大的候选集上发挥作用。
 
 建议改法（落地顺序）：
 1. `config.py` 新增参数：
@@ -70,11 +79,11 @@
 3. `retrieve()` 调整为“宽召回 + 强重排”：
    - 向量召回：`similarity_search(query, k=RETRIEVAL_VECTOR_TOP_K)`（top20）
    - Web 召回：保留低权重（`TAVILY_MAX_RESULTS=2`）
-   - 合并后先按 `doc_id` 去重，再走 Cross-Encoder 重排
+   - 合并后先按 `doc_id` 去重，再走当前的 rerank 机制重排（优先 Cross-Encoder hybrid，失败时回退 linear）
    - 只返回 `top3`
 4. `nodes.py::retrieve_node` 继续做全局合并与单聚合 evidence，保证最终 LLM 看到的证据上限仍是 3 条。
-5. 加 fallback：
-   - 仅在模型加载失败/超时时，自动回退到现有 `rerank_documents(...)`，用于兜底，不作为默认路径。
+5. 保留 fallback：
+   - Cross-Encoder 加载失败/超时/预测失败时，自动回退到现有线性分支，作为兜底。
 
 推荐伪代码：
 
@@ -84,17 +93,15 @@ vector_docs = similarity_search(query=query, k=settings.RETRIEVAL_VECTOR_TOP_K) 
 web_docs = _tavily_search(query=query)  # <=2
 merged_docs = dedup_by_doc_id(_normalize_documents(vector_docs, "vector") + _normalize_documents(web_docs, "web"))
 
-if settings.RETRIEVAL_RERANK_BACKEND == "cross_encoder":
-    ranked_docs = cross_encoder_rerank(query=query, docs=merged_docs, top_n=settings.RETRIEVAL_FINAL_TOP_N)  # 3
-else:
-    ranked_docs = rerank_documents(query=query, docs=merged_docs, top_n=settings.RETRIEVAL_FINAL_TOP_N)  # 3
+ranked_docs = rerank_documents(query=query, docs=merged_docs, top_n=settings.RETRIEVAL_FINAL_TOP_N)  # 3
+# 内部优先 cross_encoder_hybrid，失败时回退 linear
 
 return ranked_docs
 ```
 
 升级后 pipeline（推荐形态）：
 - vector search top20
-- cross-encoder rerank (`bge-reranker-base`)
+- rerank（优先 `bge-reranker-base` cross-encoder hybrid，失败回退 linear）
 - top3
 - LLM answer
 

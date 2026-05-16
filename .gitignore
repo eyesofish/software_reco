@@ -6,6 +6,8 @@ Thumbs.db
 Desktop.ini
 .vscode/
 .idea/
+.arc/
+.claude/
 *.iml
 *.ipr
 *.iws
@@ -90,6 +92,8 @@ pnpm-debug.log*
 # ========================
 *.md
 *.txt
+!.claude/**/*.md
+!CLAUDE.md
 langsmith_tracing_evaluation_minimal_changes.md
 langsmith_tracing_evaluation_minimal_changes.md
 启动教程.md
