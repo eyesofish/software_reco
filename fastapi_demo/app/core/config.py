@@ -14,6 +14,15 @@ class Settings(BaseSettings):
     DEBUG: bool = False
     ALLOWED_ORIGINS: str = "http://localhost,http://localhost:3000"
 
+    # ---- auth ----
+    # If empty, /api/v1/* endpoints accept any caller (dev mode).
+    # In production, set both to non-empty random strings (>=32 chars).
+    API_KEY: str = ""
+    ADMIN_API_KEY: str = ""
+
+    # ---- rate limiting ----
+    RATE_LIMIT_RECOMMEND: str = "30/minute"
+
     # ---- LLM ----
     LLM_MODEL: str = "qwen-flash"
     OPENAI_API_KEY: str = ""
