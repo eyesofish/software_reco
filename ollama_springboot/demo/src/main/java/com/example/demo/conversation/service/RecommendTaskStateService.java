@@ -7,9 +7,11 @@ import com.example.demo.conversation.entity.RecommendTaskEntity;
 import com.example.demo.conversation.entity.RecommendTaskStatus;
 import com.example.demo.conversation.repository.RecommendTaskRepository;
 import com.example.demo.dto.ConversationCreateResponse;
+import com.example.demo.dto.ImageAttachment;
 import com.example.demo.dto.RecommendRequest;
 import com.example.demo.dto.RecommendResponse;
 import com.example.demo.dto.RecommendTaskStateResponse;
+import com.example.demo.util.MultimodalSupport;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import jakarta.annotation.PreDestroy;
@@ -96,6 +98,25 @@ public class RecommendTaskStateService {
             Integer maxIterations,
             String modelName
     ) {
+        return createRecommendTask(
+                conversationId,
+                query,
+                timeout,
+                maxIterations,
+                modelName,
+                List.of()
+        );
+    }
+
+    @Transactional
+    public RecommendTaskCreateOutcome createRecommendTask(
+            String conversationId,
+            String query,
+            Integer timeout,
+            Integer maxIterations,
+            String modelName,
+            List<ImageAttachment> images
+    ) {
         String normalizedQuery = trimToNull(query);
         if (normalizedQuery == null) {
             throw new IllegalArgumentException("query is required");
@@ -112,7 +133,8 @@ public class RecommendTaskStateService {
                             normalizedQuery,
                             timeout == null ? DEFAULT_TIMEOUT_SECONDS : timeout,
                             maxIterations == null ? DEFAULT_MAX_ITERATIONS : maxIterations,
-                            conversation.getId()
+                            conversation.getId(),
+                            images
                     )
             );
         } catch (Exception ex) {
@@ -164,7 +186,10 @@ public class RecommendTaskStateService {
                 firstNonBlank(assistantMessage, ""),
                 fastapiSessionId,
                 awaiting,
-                subQuestions
+                subQuestions,
+                fastapiResponse == null
+                        ? List.of()
+                        : MultimodalSupport.normalizeRetrievedImages(fastapiResponse.getRetrievedImages())
         );
     }
 
@@ -997,7 +1022,8 @@ public class RecommendTaskStateService {
             String assistantMessage,
             String fastapiSessionId,
             boolean awaitingHumanConfirmation,
-            List<String> pendingSubQuestions
+            List<String> pendingSubQuestions,
+            List<Map<String, Object>> retrievedImages
     ) {
     }
 

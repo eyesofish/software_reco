@@ -5,9 +5,10 @@ import json
 import logging
 import re
 import time
+from collections.abc import Iterable, Sequence
 from pathlib import Path
 from threading import RLock
-from typing import Any, Iterable, Sequence
+from typing import Any
 
 from .config import settings
 from .memory_schema import MemoryItem
@@ -228,7 +229,10 @@ def _write_memory_item(
         raise ValueError(f"unsupported memory level: {level}")
 
     normalized_salience = max(0.0, min(1.0, _safe_float(salience, 0.0)))
-    min_semantic_salience = max(0.0, min(1.0, _safe_float(getattr(settings, "MEMORY_SEMANTIC_MIN_SALIENCE", 0.45), 0.45)))
+    min_semantic_salience = max(
+        0.0,
+        min(1.0, _safe_float(getattr(settings, "MEMORY_SEMANTIC_MIN_SALIENCE", 0.45), 0.45)),
+    )
     if level_key == "semantic" and normalized_salience < min_semantic_salience:
         return None
 
@@ -311,7 +315,12 @@ def write_fact(session_id: str, key: str, value: str) -> None:
         _persist_locked()
 
 
-def write_episode(session_id: str, content: str, tags: list[str] | None = None, salience: float = 0.4) -> MemoryItem | None:
+def write_episode(
+    session_id: str,
+    content: str,
+    tags: list[str] | None = None,
+    salience: float = 0.4,
+) -> MemoryItem | None:
     return _write_memory_item(
         session_id=session_id,
         level="episodic",

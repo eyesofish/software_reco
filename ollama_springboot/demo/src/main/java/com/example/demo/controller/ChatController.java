@@ -10,6 +10,8 @@ import com.example.demo.dto.OllamaChatRequest;
 import com.example.demo.dto.OllamaChatResponse;
 import com.example.demo.dto.RecommendRequest;
 import com.example.demo.dto.RecommendTaskStateResponse;
+import com.example.demo.dto.ImageAttachment;
+import com.example.demo.util.MultimodalSupport;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.http.HttpStatus;
@@ -85,8 +87,10 @@ public class ChatController {
         logIncomingMessages(request);
         String requestConversationId = firstNonBlank(request.getConversationId(), request.getSessionId());
 
-        String query = extractLastUserMessage(request.getMessages());
-        if (query == null || query.isBlank()) {
+        List<ImageAttachment> images = normalizeImages(request.getImages());
+        String rawQuery = extractLastUserMessage(request.getMessages());
+        String query = MultimodalSupport.queryOrDefault(rawQuery, images);
+        if (query.isBlank()) {
             return buildResponse(
                     request,
                     "Please enter a message.",
@@ -101,7 +105,12 @@ public class ChatController {
                 request.getModel()
         );
 
-        ConversationMessageEntity userMessage = conversationService.appendMessage(conversation, "user", query);
+        String persistedUserMessage = MultimodalSupport.summarizeUserMessage(query, images);
+        ConversationMessageEntity userMessage = conversationService.appendMessage(
+                conversation,
+                "user",
+                persistedUserMessage
+        );
 
         Map<String, String> extractedFacts = extractFactsForSessionUpdate(query);
         for (Map.Entry<String, String> fact : extractedFacts.entrySet()) {
@@ -117,13 +126,16 @@ public class ChatController {
         Map<String, String> facts = conversationService.getFacts(conversation.getId());
         String knownName = facts.get("user_name");
 
-        if (isAskingUserName(query) && knownName != null && !knownName.isBlank()) {
+        if (!MultimodalSupport.hasAttachments(images)
+                && isAskingUserName(query)
+                && knownName != null
+                && !knownName.isBlank()) {
             String memoryAnswer = "\u4f60\u53eb" + knownName + "\u3002";
             conversationService.appendMessage(conversation, "assistant", memoryAnswer);
             return buildResponse(request, memoryAnswer, conversation.getId(), conversation.getId());
         }
 
-        if (isConfirmOnlyInput(query)) {
+        if (!MultimodalSupport.hasAttachments(images) && isConfirmOnlyInput(query)) {
             String blockedMessage = "Detected confirmation text. Please use the UI confirm button instead of sending a new question.";
             conversationService.appendMessage(conversation, "assistant", blockedMessage);
             return buildResponse(
@@ -154,7 +166,8 @@ public class ChatController {
                 enrichedQuery,
                 60,
                 3,
-                request.getModel()
+                request.getModel(),
+                images
         );
         RecommendTaskStateResponse taskState = taskOutcome.taskState();
         String status = firstNonBlank(taskState.getStatus(), "FAILED");
@@ -177,7 +190,8 @@ public class ChatController {
                 sessionId,
                 status,
                 awaiting,
-                pendingSubQuestions
+                pendingSubQuestions,
+                taskOutcome.retrievedImages()
         );
     }
 
@@ -186,9 +200,11 @@ public class ChatController {
         logIncomingMessages(request);
 
         String requestConversationId = firstNonBlank(request.getConversationId(), request.getSessionId());
-        String query = extractLastUserMessage(request.getMessages());
-        if (query == null || query.isBlank()) {
-            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "user message is required");
+        List<ImageAttachment> images = normalizeImages(request.getImages());
+        String rawQuery = extractLastUserMessage(request.getMessages());
+        String query = MultimodalSupport.queryOrDefault(rawQuery, images);
+        if (query.isBlank()) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "user message or image is required");
         }
 
         ConversationEntity conversation = conversationService.ensureConversation(
@@ -197,7 +213,12 @@ public class ChatController {
                 request.getModel()
         );
 
-        ConversationMessageEntity userMessage = conversationService.appendMessage(conversation, "user", query);
+        String persistedUserMessage = MultimodalSupport.summarizeUserMessage(query, images);
+        ConversationMessageEntity userMessage = conversationService.appendMessage(
+                conversation,
+                "user",
+                persistedUserMessage
+        );
         Map<String, String> extractedFacts = extractFactsForSessionUpdate(query);
         for (Map.Entry<String, String> fact : extractedFacts.entrySet()) {
             conversationService.upsertFact(
@@ -223,7 +244,10 @@ public class ChatController {
         );
         sendSseEvent(emitter, "meta", bootstrap);
 
-        if (isAskingUserName(query) && knownName != null && !knownName.isBlank()) {
+        if (!MultimodalSupport.hasAttachments(images)
+                && isAskingUserName(query)
+                && knownName != null
+                && !knownName.isBlank()) {
             String memoryAnswer = "你叫" + knownName + "。";
             conversationService.appendMessage(conversation, "assistant", memoryAnswer);
             Map<String, Object> finalPayload = normalizeStreamPayload(
@@ -241,7 +265,7 @@ public class ChatController {
             return emitter;
         }
 
-        if (isConfirmOnlyInput(query)) {
+        if (!MultimodalSupport.hasAttachments(images) && isConfirmOnlyInput(query)) {
             String blockedMessage = "Detected confirmation text. Please use the UI confirm button instead of sending a new question.";
             conversationService.appendMessage(conversation, "assistant", blockedMessage);
             Map<String, Object> errorPayload = normalizeStreamPayload(
@@ -276,7 +300,8 @@ public class ChatController {
                                 enrichedQuery,
                                 60,
                                 3,
-                                conversation.getId()
+                                conversation.getId(),
+                                images
                         ),
                         event -> {
                             Map<String, Object> payload = normalizeStreamPayload(
@@ -502,15 +527,24 @@ public class ChatController {
     private void logIncomingMessages(OllamaChatRequest request) {
         if (request.getMessages() == null) {
             logger.info("Chat request messages is null. model={}, stream={}", request.getModel(), request.getStream());
-            return;
+        } else {
+            for (int i = 0; i < request.getMessages().size(); i++) {
+                Message message = request.getMessages().get(i);
+                logger.info(
+                        "Chat message[{}]: role={}, content={}",
+                        i,
+                        message.getRole(),
+                        message.getContent()
+                );
+            }
         }
-        for (int i = 0; i < request.getMessages().size(); i++) {
-            Message message = request.getMessages().get(i);
+        if (MultimodalSupport.hasAttachments(request.getImages())) {
             logger.info(
-                    "Chat message[{}]: role={}, content={}",
-                    i,
-                    message.getRole(),
-                    message.getContent()
+                    "Chat request contains {} image attachment(s): {}",
+                    request.getImages().size(),
+                    request.getImages().stream()
+                            .map(image -> firstNonBlank(image.getName(), "image"))
+                            .toList()
             );
         }
     }
@@ -525,6 +559,14 @@ public class ChatController {
             }
         }
         return messages.get(messages.size() - 1).getContent();
+    }
+
+    private List<ImageAttachment> normalizeImages(List<ImageAttachment> images) {
+        try {
+            return MultimodalSupport.normalizeAttachments(images);
+        } catch (IllegalArgumentException exc) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, exc.getMessage(), exc);
+        }
     }
 
     private Optional<String> extractUserName(String query) {
@@ -885,6 +927,14 @@ public class ChatController {
                                         : source.get("retrievedDocIds")
                         )
                 );
+                normalized.put(
+                        "retrieved_images",
+                        MultimodalSupport.normalizeRetrievedImages(
+                                source.containsKey("retrieved_images")
+                                        ? source.get("retrieved_images")
+                                        : source.get("retrievedImages")
+                        )
+                );
             }
             case "error" -> normalized.put(
                     "message",
@@ -971,6 +1021,28 @@ public class ChatController {
             boolean awaitingHumanConfirmation,
             List<String> pendingSubQuestions
     ) {
+        return buildResponse(
+                model,
+                content,
+                conversationId,
+                sessionId,
+                status,
+                awaitingHumanConfirmation,
+                pendingSubQuestions,
+                List.of()
+        );
+    }
+
+    private OllamaChatResponse buildResponse(
+            String model,
+            String content,
+            String conversationId,
+            String sessionId,
+            String status,
+            boolean awaitingHumanConfirmation,
+            List<String> pendingSubQuestions,
+            List<Map<String, Object>> retrievedImages
+    ) {
         Message message = new Message();
         message.setRole("assistant");
         message.setContent(content);
@@ -984,6 +1056,7 @@ public class ChatController {
         response.setPendingSubQuestions(pendingSubQuestions == null ? List.of() : pendingSubQuestions);
         response.setConversationId(conversationId);
         response.setSessionId(sessionId);
+        response.setRetrievedImages(retrievedImages == null ? List.of() : retrievedImages);
         return response;
     }
 

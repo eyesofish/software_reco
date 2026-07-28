@@ -1,7 +1,7 @@
-from typing import Any, Dict, List
+from typing import Any
 
 
-def normalize_documents(raw_documents: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+def normalize_documents(raw_documents: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Normalize raw docs into a stable schema used by the ingest pipeline.
 
     Input item shape:
@@ -9,7 +9,7 @@ def normalize_documents(raw_documents: List[Dict[str, Any]]) -> List[Dict[str, A
     - content: str-like
     - metadata: optional dict
     """
-    normalized: List[Dict[str, Any]] = []
+    normalized: list[dict[str, Any]] = []
 
     for index, raw in enumerate(raw_documents or []):
         if not isinstance(raw, dict):

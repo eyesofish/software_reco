@@ -1,8 +1,7 @@
-from dataclasses import dataclass
-from typing import List
 import logging
 import threading
 import time
+from dataclasses import dataclass
 
 import openai
 
@@ -61,7 +60,7 @@ def _normalize_provider(value: object, default: str = _DASHSCOPE_PROVIDER) -> st
     return default
 
 
-def _provider_order() -> List[str]:
+def _provider_order() -> list[str]:
     primary = _normalize_provider(getattr(settings, "EMBEDDING_PROVIDER", _DASHSCOPE_PROVIDER))
     providers = [primary]
     fallback_enabled = _as_bool(getattr(settings, "EMBEDDING_ENABLE_FALLBACK", True), default=True)
@@ -192,7 +191,7 @@ def _get_local_sentence_model(model_name: str, trace_id: str) -> "SentenceTransf
     return model
 
 
-def _embed_texts_local(texts: List[str], model_name: str, trace_id: str) -> List[List[float]]:
+def _embed_texts_local(texts: list[str], model_name: str, trace_id: str) -> list[list[float]]:
     model = _get_local_sentence_model(model_name, trace_id=trace_id)
     started_at = time.perf_counter()
     log_event(
@@ -229,8 +228,8 @@ def _embed_texts_local(texts: List[str], model_name: str, trace_id: str) -> List
     return converted
 
 
-def _build_embedding_attempts(trace_id: str) -> List[_EmbeddingAttempt]:
-    attempts: List[_EmbeddingAttempt] = []
+def _build_embedding_attempts(trace_id: str) -> list[_EmbeddingAttempt]:
+    attempts: list[_EmbeddingAttempt] = []
     for provider in _provider_order():
         model_name = _resolve_embedding_model(provider)
         if not model_name:
@@ -264,7 +263,7 @@ def _get_openai_client(attempt: _EmbeddingAttempt) -> openai.OpenAI:
     ))
 
 
-def embed_texts(texts: List[str]) -> List[List[float]]:
+def embed_texts(texts: list[str]) -> list[list[float]]:
     """Embed texts with the configured embedding model."""
     trace_id = new_trace_id("embedding")
     clean_texts = [str(text).strip() for text in (texts or []) if str(text).strip()]

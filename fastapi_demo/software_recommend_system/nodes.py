@@ -1,41 +1,40 @@
-from typing import Dict, Any, List, Callable
-from .state import AgentState, CandidateSolution
-from .document_schema import Document, Metadata
-from .config import settings
-import os
-import time
-import re
-import json
 import ast
-from datetime import datetime
+import json
 import logging
+import os
+import re
+import time
+from typing import Any
+
 from langgraph.func import task
 from langgraph.types import interrupt
 
+from .config import settings
+from .document_schema import Document
 from .llm_utils import (
     _build_retrieval_record,
+    _build_retrieved_images,
     _extract_doc_id,
-    _extract_stream_delta_text,
     _get_field,
     _get_openai_client,
     _llm_invoke_done,
     _llm_invoke_failed,
     _llm_invoke_start,
     _merge_doc_ids,
+    _merge_retrieved_images,
     _prepare_messages_for_small_context,
     _rough_messages_tokens,
-    _safe_get_stream_writer,
     _set_field,
     _stream_chat_completion_text,
-    _truncate_text,
 )
-from .retriever import retrieve, rerank_documents
-from .tools import pre_drawing_tool, draw_image_tool
-from .logging_utils import elapsed_ms, error_fields, log_event, log_exception, new_trace_id, text_preview
-from .observability import traceable, wrap_openai
+from .logging_utils import elapsed_ms, error_fields, log_event, new_trace_id, text_preview
+from .observability import traceable
+from .planner import build_execution_plan
+from .retriever import rerank_documents, retrieve
 from .router import route_query
 from .skill_router import route_skill
-from .planner import build_execution_plan
+from .state import AgentState, CandidateSolution
+from .tools import draw_image_tool, pre_drawing_tool
 
 logger = logging.getLogger(__name__)
 
@@ -428,10 +427,7 @@ def _is_drawing_request(text: str) -> bool:
     if not text:
         return False
     text_lower = text.lower()
-    for keyword in DRAWING_KEYWORDS:
-        if keyword in text or keyword in text_lower:
-            return True
-    return False
+    return any(keyword in text or keyword in text_lower for keyword in DRAWING_KEYWORDS)
 
 KNOWN_FACTS_MARKER = "[Known User Facts]"
 SPRING_CONTEXT_QUERY_PATTERN = re.compile(
@@ -490,11 +486,11 @@ def _contains_tech_term(query_lower: str, term: str) -> bool:
         return re.search(boundary_pattern, query_lower) is not None
     return normalized_term in query_lower
 
-def _collect_tech_hits(query: str) -> List[str]:
+def _collect_tech_hits(query: str) -> list[str]:
     lowered = (query or "").lower()
     if not lowered:
         return []
-    hits: List[str] = []
+    hits: list[str] = []
     for term in ALL_TECH_TERMS:
         if _contains_tech_term(lowered, term):
             hits.append(term)
@@ -513,7 +509,7 @@ def _has_rag_intent(query: str) -> bool:
     return any(pattern.search(normalized) for pattern in RAG_INTENT_PATTERNS)
 
 
-def _heuristic_route_mode(query: str) -> tuple[str, List[str]]:
+def _heuristic_route_mode(query: str) -> tuple[str, list[str]]:
     if _is_drawing_request(query):
         return "direct", []
     if _is_chat_first_query(query) and not _has_rag_intent(query):
@@ -529,10 +525,10 @@ def _heuristic_route_mode(query: str) -> tuple[str, List[str]]:
         return "rag", tech_hits
     return "direct", tech_hits
 
-def entry_node(state: AgentState) -> Dict[str, Any]:
+def entry_node(state: AgentState) -> dict[str, Any]:
     """用户输入节点"""
     logger.info(f"接收用户查询: {state.user_query[:50]}...")
-    
+
     # 初始化时间戳
     messages = list(_get_field(state, "messages", []) or [])
     messages.append({"role": "user", "content": state.user_query})
@@ -543,7 +539,7 @@ def entry_node(state: AgentState) -> Dict[str, Any]:
     }
 
 @traceable(name="routing_decision")
-def routing_node(state: AgentState) -> Dict[str, Any]:
+def routing_node(state: AgentState) -> dict[str, Any]:
     """Routing node: decide between rag/direct/hitl."""
     user_query = _get_field(state, "user_query", "")
     routing_query = _extract_current_user_query(user_query)
@@ -551,7 +547,7 @@ def routing_node(state: AgentState) -> Dict[str, Any]:
     confidence = 0.0
     reason = "router_disabled_heuristic"
     fallback_used = False
-    tech_hits: List[str] = []
+    tech_hits: list[str] = []
 
     if settings.ROUTER_ENABLE:
         decision = route_query(
@@ -582,10 +578,10 @@ def routing_node(state: AgentState) -> Dict[str, Any]:
     return {"mode": mode}
 
 
-def _normalize_plan_steps(raw_steps: Any) -> List[Dict[str, Any]]:
+def _normalize_plan_steps(raw_steps: Any) -> list[dict[str, Any]]:
     if not isinstance(raw_steps, list):
         return []
-    normalized: List[Dict[str, Any]] = []
+    normalized: list[dict[str, Any]] = []
     for index, item in enumerate(raw_steps, start=1):
         if isinstance(item, dict):
             step_id = str(item.get("step_id", "") or f"step_{index}").strip() or f"step_{index}"
@@ -617,7 +613,7 @@ def _normalize_plan_steps(raw_steps: Any) -> List[Dict[str, Any]]:
 
 
 @traceable(name="skill_routing")
-def skill_routing_node(state: AgentState) -> Dict[str, Any]:
+def skill_routing_node(state: AgentState) -> dict[str, Any]:
     query = str(_get_field(state, "user_query", "") or "")
     normalized_query = str(_get_field(state, "normalized_query", "") or "")
     started_at = time.perf_counter()
@@ -645,7 +641,7 @@ def skill_routing_node(state: AgentState) -> Dict[str, Any]:
 
 
 @traceable(name="plan_generation")
-def planning_node(state: AgentState) -> Dict[str, Any]:
+def planning_node(state: AgentState) -> dict[str, Any]:
     if not bool(getattr(settings, "PLANNER_ENABLE", True)):
         return {
             "plan": {},
@@ -714,9 +710,9 @@ def normalize_query_with_llm(model: str, prompt: str, query: str):
         raise
     _llm_invoke_done("normalize_query", model, trace_id, started_at, response)
     return response
-    
+
 @traceable(name="query_normalization")
-def query_normalization_node(state: AgentState) -> Dict[str, Any]:
+def query_normalization_node(state: AgentState) -> dict[str, Any]:
     """查询规范化节点"""
     user_query = _extract_current_user_query(_get_field(state, "user_query", ""))
     logger.info(f"规范化查询: {user_query}")
@@ -726,7 +722,10 @@ def query_normalization_node(state: AgentState) -> Dict[str, Any]:
         'You are a software engineering query normalization assistant.',
         '',
         'Your task is:',
-        'Convert a user\'s natural-language question into one or more standardized, engineering-oriented, searchable queries.',
+        (
+            "Convert a user's natural-language question into one or more standardized, "
+            "engineering-oriented, searchable queries."
+        ),
         'Make them as close as possible to technical keywords in the following categories:',
         '- Software architecture / Distributed systems',
         '- Backend engineering / Middleware',
@@ -736,8 +735,14 @@ def query_normalization_node(state: AgentState) -> Dict[str, Any]:
         '- Common programming languages and frameworks',
         '',
         'Transformation rules:',
-        '1. Remove emotional, goal-oriented, or vague wording (e.g., "I want", "any expert recommendations", "best", "very strong").',
-        '2. Replace colloquial expressions with explicit technical concepts (e.g., "handle lots of users" -> "high concurrency").',
+        (
+            '1. Remove emotional, goal-oriented, or vague wording (e.g., "I want", '
+            '"any expert recommendations", "best", "very strong").'
+        ),
+        (
+            '2. Replace colloquial expressions with explicit technical concepts (e.g., "handle lots of users" -> '
+            '"high concurrency").'
+        ),
         '3. If multiple technical concerns exist, split them into multiple normalized sub-queries.',
         '4. Do not introduce new requirements not mentioned by the user.',
         '5. Do not provide solutions or recommendations.',
@@ -874,7 +879,7 @@ def retrieve_with_search(
     top_k: int,
     session_id: str = "",
     selected_skill: str = "",
-    memory_context: List[Dict[str, Any]] | None = None,
+    memory_context: list[dict[str, Any]] | None = None,
 ):
     return retrieve(
         query,
@@ -888,7 +893,7 @@ def retrieve_with_search(
 @task
 def candidate_generation_with_llm(
     model: str,
-    messages: List[Dict[str, str]],
+    messages: list[dict[str, str]],
     temperature: float,
 ):
     client = _get_openai_client()
@@ -902,7 +907,7 @@ def candidate_generation_with_llm(
 @task
 def chat_answer_with_llm(
     model: str,
-    messages: List[Dict[str, str]],
+    messages: list[dict[str, str]],
     temperature: float,
     max_tokens: int,
 ):
@@ -921,10 +926,9 @@ def draw_image_with_tool(structured_params: str):
 
 
 @traceable(name="task_decomposition")
-def sub_question_generation_node(state: AgentState) -> Dict[str, Any]:
+def sub_question_generation_node(state: AgentState) -> dict[str, Any]:
     """Sub-question generation node."""
     normalized_query = _get_field(state, "normalized_query", "")
-    constraints = _get_field(state, "constraints", {})
     selected_skill = str(_get_field(state, "selected_skill", "") or "").strip()
     plan_steps = _normalize_plan_steps(_get_field(state, "plan_steps", []) or [])
     planner_reason = str(_get_field(state, "planner_reason", "") or "").strip()
@@ -982,7 +986,7 @@ def sub_question_generation_node(state: AgentState) -> Dict[str, Any]:
             "human_confirmation_done": False,
         }
 
-    planner_hint_lines: List[str] = []
+    planner_hint_lines: list[str] = []
     if selected_skill:
         planner_hint_lines.append(f"Selected skill: {selected_skill}")
     if planner_reason:
@@ -998,7 +1002,10 @@ def sub_question_generation_node(state: AgentState) -> Dict[str, Any]:
                 f"Generate {min_sub_questions} to {max_sub_questions} concise, non-overlapping factual sub-questions.",
                 "Focus on direct answerability from product documentation and official troubleshooting guidance.",
                 "Do not ask for business strategy, recommendation framing, or generic requirement analysis.",
-                f"Return only a JSON array (preferred length {min_sub_questions}-{max_sub_questions}) or a JSON object containing the sub_questions field.",
+                (
+                    f"Return only a JSON array (preferred length {min_sub_questions}-{max_sub_questions}) "
+                    "or a JSON object containing the sub_questions field."
+                ),
                 "Do not output any other text.",
                 "",
                 "\n".join(planner_hint_lines) if planner_hint_lines else "",
@@ -1009,8 +1016,14 @@ def sub_question_generation_node(state: AgentState) -> Dict[str, Any]:
             [
                 "You are a requirements analysis assistant for a software recommendation system.",
                 f"Generate {min_sub_questions} to {max_sub_questions} concise and non-overlapping sub-questions.",
-                "Focus only on the most important dimensions: core problem/users, domain+stack constraints, and key non-functional/data requirements.",
-                f"Return only a JSON array (preferred length {min_sub_questions}-{max_sub_questions}) or a JSON object containing the sub_questions field.",
+                (
+                    "Focus only on the most important dimensions: core problem/users, "
+                    "domain+stack constraints, and key non-functional/data requirements."
+                ),
+                (
+                    f"Return only a JSON array (preferred length {min_sub_questions}-{max_sub_questions}) "
+                    "or a JSON object containing the sub_questions field."
+                ),
                 "Do not output any other text.",
                 "",
                 "\n".join(planner_hint_lines) if planner_hint_lines else "",
@@ -1051,10 +1064,7 @@ def sub_question_generation_node(state: AgentState) -> Dict[str, Any]:
         )
 
     if not sub_questions:
-        if planned_seed_questions:
-            sub_questions = list(planned_seed_questions)
-        else:
-            sub_questions = [normalized_query]
+        sub_questions = list(planned_seed_questions) if planned_seed_questions else [normalized_query]
         if " and " in normalized_query.lower():
             parts = re.split(r'\band\b', normalized_query, flags=re.IGNORECASE)
             if len(parts) > 1:
@@ -1085,8 +1095,8 @@ def sub_question_generation_node(state: AgentState) -> Dict[str, Any]:
     }
 
 
-def _normalize_sub_questions(raw: Any) -> List[str]:
-    cleaned: List[str] = []
+def _normalize_sub_questions(raw: Any) -> list[str]:
+    cleaned: list[str] = []
     seen = set()
 
     def append_unique(value: str) -> None:
@@ -1125,7 +1135,7 @@ def _normalize_sub_questions(raw: Any) -> List[str]:
             return
 
         if isinstance(value, dict):
-            preferred: List[Any] = []
+            preferred: list[Any] = []
             for key in ("sub_questions", "pending_sub_questions"):
                 if key in value:
                     preferred.append(value.get(key))
@@ -1151,12 +1161,12 @@ def _normalize_sub_questions(raw: Any) -> List[str]:
 
 
 def _enforce_sub_question_count(
-    sub_questions: List[str],
+    sub_questions: list[str],
     normalized_query: str,
     *,
     min_count: int,
     max_count: int,
-) -> List[str]:
+) -> list[str]:
     result = _normalize_sub_questions(sub_questions)
 
     if not result and str(normalized_query or "").strip():
@@ -1196,7 +1206,7 @@ def _enforce_sub_question_count(
 
 
 @traceable(name="hitl_confirmation")
-def human_confirmation_node(state: AgentState) -> Dict[str, Any]:
+def human_confirmation_node(state: AgentState) -> dict[str, Any]:
     """
     Human-in-the-loop 阻塞节点：
     1) 首次到达时通过 interrupt 暂停；
@@ -1318,7 +1328,7 @@ def human_confirmation_node(state: AgentState) -> Dict[str, Any]:
 
 
 @traceable(name="retrieve_multi_subquery")
-def retrieve_node(state: AgentState) -> Dict[str, Any]:
+def retrieve_node(state: AgentState) -> dict[str, Any]:
     """Retrieve node: global merge -> dedup -> rerank -> top3 evidence."""
     BASE_MAX_EVIDENCE = 3
     retrieved_doc_ids_full_limit = max(1, int(getattr(settings, "RETRIEVED_DOC_IDS_FULL_LIMIT", 20)))
@@ -1339,7 +1349,7 @@ def retrieve_node(state: AgentState) -> Dict[str, Any]:
             for item in sub_questions
             if str(item or "").strip()
         )
-    all_docs: List[Document] = []
+    all_docs: list[Document] = []
 
     log_event(
         logger,
@@ -1415,7 +1425,7 @@ def retrieve_node(state: AgentState) -> Dict[str, Any]:
         )
 
     seen_doc_ids: set[str] = set()
-    unique_docs: List[Document] = []
+    unique_docs: list[Document] = []
     for doc_index, doc in enumerate(all_docs, start=1):
         metadata = _get_field(doc, "metadata", {}) or {}
         doc_id = str(_get_field(metadata, "doc_id", "") or "").strip()
@@ -1439,11 +1449,12 @@ def retrieve_node(state: AgentState) -> Dict[str, Any]:
         session_id=session_id,
     )
     final_docs = ranked_docs[:max_evidence]
+    retrieved_images = _build_retrieved_images(final_docs)
     quality_score = min(0.9, 0.5 + (len(final_docs) * 0.1))
 
-    retrieved_doc_ids: List[str] = []
-    retrieved_doc_ids_full: List[str] = []
-    memory_doc_ids: List[str] = []
+    retrieved_doc_ids: list[str] = []
+    retrieved_doc_ids_full: list[str] = []
+    memory_doc_ids: list[str] = []
     for doc_index, doc in enumerate(ranked_docs, start=1):
         doc_id = _extract_doc_id(doc, fallback_prefix="ranked", index=doc_index)
         if doc_id not in retrieved_doc_ids_full:
@@ -1451,7 +1462,7 @@ def retrieve_node(state: AgentState) -> Dict[str, Any]:
         if len(retrieved_doc_ids_full) >= retrieved_doc_ids_full_limit:
             break
 
-    evidence: List[Dict[str, Any]] = []
+    evidence: list[dict[str, Any]] = []
     for doc_index, doc in enumerate(final_docs, start=1):
         doc_id = _extract_doc_id(doc, fallback_prefix="global", index=doc_index)
         if doc_id not in retrieved_doc_ids:
@@ -1459,9 +1470,8 @@ def retrieve_node(state: AgentState) -> Dict[str, Any]:
         metadata = _get_field(doc, "metadata", {}) or {}
         retrieval_source = str(_get_field(metadata, "retrieval_source", "") or "").strip().lower()
         channel = str(_get_field(metadata, "channel", "") or "").strip().lower()
-        if retrieval_source == "memory" or channel == "memory":
-            if doc_id not in memory_doc_ids:
-                memory_doc_ids.append(doc_id)
+        if (retrieval_source == "memory" or channel == "memory") and doc_id not in memory_doc_ids:
+            memory_doc_ids.append(doc_id)
         search_result = {
             "content": doc.content,
             "score": doc.score,
@@ -1469,6 +1479,9 @@ def retrieve_node(state: AgentState) -> Dict[str, Any]:
             "source": str(_get_field(metadata, "source", "") or ""),
             "retrieval_source": retrieval_source,
             "channel": channel,
+            "modality": str(_get_field(metadata, "modality", "") or ""),
+            "asset_path": str(_get_field(metadata, "asset_path", "") or ""),
+            "asset_url": str(_get_field(metadata, "asset_url", "") or ""),
         }
         evidence.append(
             {
@@ -1502,11 +1515,12 @@ def retrieve_node(state: AgentState) -> Dict[str, Any]:
         "retrieval_records": retrieval_records,
         "retrieved_doc_ids": retrieved_doc_ids,
         "retrieved_doc_ids_full": retrieved_doc_ids_full,
+        "retrieved_images": retrieved_images,
         "memory_doc_ids": memory_doc_ids,
     }
 
 
-def evidence_collection_node(state: AgentState) -> Dict[str, Any]:
+def evidence_collection_node(state: AgentState) -> dict[str, Any]:
     """Evidence collection node: persist retrieved evidence and advance iteration."""
     evidence = _get_field(state, "evidence", [])
     iteration_count = _get_field(state, "iteration_count", 0)
@@ -1521,15 +1535,15 @@ def evidence_collection_node(state: AgentState) -> Dict[str, Any]:
         "iteration_count": iteration_count + 1
     }
 
-def evidence_evaluation_node(state: AgentState) -> Dict[str, Any]:
+def evidence_evaluation_node(state: AgentState) -> dict[str, Any]:
     """证据评估节点"""
     evidence = _get_field(state, "evidence", [])
 
     logger.info(f"评估 {len(evidence)} 个证据项")
-    
+
     # 在实际应用中，这里会使用 LLM 来评估证据的质量
     # 简化实现：根据文档数量和分数评估
-    
+
     for item in evidence:
         # 重新计算质量分数，结合相关性、时效性和权威性
         docs = _get_field(item, "documents", [])
@@ -1537,12 +1551,12 @@ def evidence_evaluation_node(state: AgentState) -> Dict[str, Any]:
             avg_score = sum(doc.score for doc in docs) / len(docs) if docs else 0
             # 简化的质量分数计算，实际应用中会更复杂
             _set_field(item, "quality_score", min(1.0, avg_score + 0.1))
-    
+
     return {
         "evidence": evidence
     }
 
-def candidate_generation_node(state: AgentState) -> Dict[str, Any]:
+def candidate_generation_node(state: AgentState) -> dict[str, Any]:
     """Generate candidate solutions from evidence and normalize to CandidateSolution."""
     evidence = list(_get_field(state, "evidence", []) or [])
     raw_candidates = list(_get_field(state, "candidates", []) or [])
@@ -1578,7 +1592,7 @@ def candidate_generation_node(state: AgentState) -> Dict[str, Any]:
             relevance_score=score,
         )
 
-    candidates: List[CandidateSolution] = []
+    candidates: list[CandidateSolution] = []
     for item in raw_candidates:
         parsed = _to_candidate_solution(item if isinstance(item, dict) else _get_field(item, "__dict__", {}))
         if parsed is not None:
@@ -1614,7 +1628,7 @@ def candidate_generation_node(state: AgentState) -> Dict[str, Any]:
             }
         )
 
-    llm_candidates: List[CandidateSolution] = []
+    llm_candidates: list[CandidateSolution] = []
     should_skip_llm = selected_skill == "quick_fact_qa"
     if not should_skip_llm:
         try:
@@ -1629,7 +1643,8 @@ def candidate_generation_node(state: AgentState) -> Dict[str, Any]:
                     {
                         "role": "system",
                         "content": (
-                            "You are a software recommendation assistant. Generate candidate solutions based on evidence. "
+                            "You are a software recommendation assistant. "
+                            "Generate candidate solutions based on evidence. "
                             "Return JSON array or object{candidates:[...]}. Each candidate includes: "
                             "solution, rationale, pros, cons, relevance_score(0-1)."
                         ),
@@ -1702,7 +1717,7 @@ def candidate_generation_node(state: AgentState) -> Dict[str, Any]:
             )
 
     # Deduplicate by solution while keeping best score.
-    best_by_solution: Dict[str, CandidateSolution] = {}
+    best_by_solution: dict[str, CandidateSolution] = {}
     for item in candidates:
         key = item.solution.strip()
         if not key:
@@ -1719,7 +1734,7 @@ def candidate_generation_node(state: AgentState) -> Dict[str, Any]:
 
     return {"candidates": normalized_candidates}
 
-def coverage_check_node(state: AgentState) -> Dict[str, Any]:
+def coverage_check_node(state: AgentState) -> dict[str, Any]:
     """覆盖率检查节点"""
     sub_questions = _get_field(state, "sub_questions", [])
     evidence = _get_field(state, "evidence", [])
@@ -1727,32 +1742,32 @@ def coverage_check_node(state: AgentState) -> Dict[str, Any]:
     coverage_threshold = _get_field(state, "coverage_threshold", 0.8)
     max_iterations = _get_field(state, "max_iterations", 3)
     iteration_count = _get_field(state, "iteration_count", 0)
-    
+
     logger.info(f"检查覆盖率: {len(evidence)}/{len(sub_questions)}")
-    
+
     # 计算覆盖率：已解答的子问题数量 / 总子问题数量
     total_questions = len(sub_questions)
     covered_questions = len([item for item in evidence if _get_field(item, "documents", [])])
     covered_questions = min(covered_questions, total_questions)
 
     coverage = covered_questions / total_questions if total_questions > 0 else 0
-    
+
     # 检查是否需要继续细化
     needs_refinement = (
-        coverage < coverage_threshold and 
+        coverage < coverage_threshold and
         iteration_count < max_iterations and
         len(candidates) == 0  # 如果没有生成任何候选方案，也需要继续
     )
-    
+
     logger.info(f"覆盖率: {coverage:.2f}, 阈值: {coverage_threshold}, 需要细化: {needs_refinement}")
-    
+
     return {
         "coverage": coverage,
         "needs_refinement": needs_refinement
     }
 
 @traceable(name="final_generation_rag")
-def answer_generation_node(state: AgentState) -> Dict[str, Any]:
+def answer_generation_node(state: AgentState) -> dict[str, Any]:
     """Answer generation node (RAG mode)."""
     user_query = str(_get_field(state, "user_query", "") or "")
     candidates = list(_get_field(state, "candidates", []) or [])
@@ -1768,13 +1783,13 @@ def answer_generation_node(state: AgentState) -> Dict[str, Any]:
     )
 
     def _qa_evidence_context(
-        evidence_items: List[Dict[str, Any]],
-        records: List[Dict[str, Any]],
+        evidence_items: list[dict[str, Any]],
+        records: list[dict[str, Any]],
         *,
         max_docs: int = 8,
         max_chars: int = 520,
     ) -> str:
-        blocks: List[str] = []
+        blocks: list[str] = []
         seen_keys: set[str] = set()
 
         def _append_block(header: str, content: str) -> None:
@@ -1880,11 +1895,12 @@ def answer_generation_node(state: AgentState) -> Dict[str, Any]:
         "retrieval_records": list(_get_field(state, "retrieval_records", []) or []),
         "retrieved_doc_ids": list(_get_field(state, "retrieved_doc_ids", []) or []),
         "retrieved_doc_ids_full": list(_get_field(state, "retrieved_doc_ids_full", []) or []),
+        "retrieved_images": list(_get_field(state, "retrieved_images", []) or []),
         "hitl": dict(_get_field(state, "hitl", {}) or {}),
     }
 
 @traceable(name="final_generation_chat")
-def chat_answer_generation_node(state: AgentState) -> Dict[str, Any]:
+def chat_answer_generation_node(state: AgentState) -> dict[str, Any]:
     """Answer generation node for direct/chat branch (retrieval optional)."""
     user_query = _get_field(state, "user_query", "")
     retrieval_query = _extract_current_user_query(user_query) or user_query
@@ -1900,7 +1916,8 @@ def chat_answer_generation_node(state: AgentState) -> Dict[str, Any]:
     retrieval_records = list(_get_field(state, "retrieval_records", []) or [])
     retrieved_doc_ids = list(_get_field(state, "retrieved_doc_ids", []) or [])
     retrieved_doc_ids_full = list(_get_field(state, "retrieved_doc_ids_full", []) or [])
-    retrieved_docs: List[Document] = []
+    retrieved_images = list(_get_field(state, "retrieved_images", []) or [])
+    retrieved_docs: list[Document] = []
     if mode != "direct":
         retrieval_trace_id = new_trace_id("search")
         log_event(
@@ -1964,6 +1981,10 @@ def chat_answer_generation_node(state: AgentState) -> Dict[str, Any]:
             retrieved_doc_ids_full,
             chat_record.get("retrieved_doc_ids", []),
         )
+        retrieved_images = _merge_retrieved_images(
+            retrieved_images,
+            chat_record.get("retrieved_images", []),
+        )
     else:
         log_event(
             logger,
@@ -1975,8 +1996,8 @@ def chat_answer_generation_node(state: AgentState) -> Dict[str, Any]:
             reason="mode_direct",
         )
 
-    def _format_retrieved_context(docs: List[Document]) -> str:
-        lines: List[str] = []
+    def _format_retrieved_context(docs: list[Document]) -> str:
+        lines: list[str] = []
         for idx, doc in enumerate(docs[:4], start=1):
             content = str(_get_field(doc, "content", "")).strip().replace("\n", " ")
             if len(content) > 400:
@@ -2049,16 +2070,17 @@ def chat_answer_generation_node(state: AgentState) -> Dict[str, Any]:
         "retrieval_records": retrieval_records,
         "retrieved_doc_ids": retrieved_doc_ids,
         "retrieved_doc_ids_full": retrieved_doc_ids_full,
+        "retrieved_images": retrieved_images,
         "hitl": dict(_get_field(state, "hitl", {}) or {}),
     }
 
-def pre_drawing_node(state: AgentState) -> Dict[str, Any]:
+def pre_drawing_node(state: AgentState) -> dict[str, Any]:
     """画图前处理节点"""
     user_query = _get_field(state, "user_query", "")
     structured_params = pre_drawing_tool(user_query)
     return {"drawing_params": structured_params}
 
-def draw_image_node(state: AgentState) -> Dict[str, Any]:
+def draw_image_node(state: AgentState) -> dict[str, Any]:
     """画图执行节点"""
     structured_params = _get_field(state, "drawing_params", "")
     image_url_future = draw_image_with_tool(structured_params)

@@ -1,5 +1,5 @@
-from typing import Any, Callable
-
+from collections.abc import Callable
+from typing import Any
 
 try:  # pragma: no cover - optional runtime dependency
     from langsmith import traceable as _langsmith_traceable

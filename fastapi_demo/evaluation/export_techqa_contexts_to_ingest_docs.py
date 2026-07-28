@@ -8,7 +8,6 @@ import json
 import re
 from collections import Counter
 from pathlib import Path
-from typing import Dict
 
 from datasets import Dataset, DatasetDict, load_dataset
 from dotenv import load_dotenv
@@ -50,7 +49,7 @@ def _resolve_split(dataset_dict: DatasetDict, requested_split: str) -> str:
     return fallback
 
 
-def _resolve_conflict_name(base_name: str, text_hash: str, existing: Dict[str, str]) -> str:
+def _resolve_conflict_name(base_name: str, text_hash: str, existing: dict[str, str]) -> str:
     path = Path(base_name)
     stem = path.stem or "context"
     suffix = path.suffix or ".txt"
@@ -109,9 +108,9 @@ def main() -> None:
     )
 
     stats = Counter()
-    text_hash_by_name: Dict[str, str] = {}
-    text_by_name: Dict[str, str] = {}
-    first_source_by_name: Dict[str, str] = {}
+    text_hash_by_name: dict[str, str] = {}
+    text_by_name: dict[str, str] = {}
+    first_source_by_name: dict[str, str] = {}
 
     for row_index, row in enumerate(split_ds):
         source_id = str(row.get("id") or f"{split_name}_{row_index:06d}")
@@ -181,7 +180,7 @@ def main() -> None:
                 "source_id": first_source_by_name[name],
                 "text_hash_sha1": text_hash_by_name[name],
             }
-            for name in list(sorted(text_by_name.keys()))[:20]
+            for name in sorted(text_by_name.keys())[:20]
         ],
     }
     manifest_path = output_dir / "_techqa_context_export_manifest.json"
@@ -190,7 +189,7 @@ def main() -> None:
     print(f"[Output] output_dir={output_dir}")
     print(f"[Output] manifest={manifest_path}")
     print(f"[Stats] {json.dumps(manifest['stats'], ensure_ascii=False)}")
-    print("[Preview] first_files=", list(sorted(text_by_name.keys()))[:5])
+    print("[Preview] first_files=", sorted(text_by_name.keys())[:5])
 
 
 if __name__ == "__main__":

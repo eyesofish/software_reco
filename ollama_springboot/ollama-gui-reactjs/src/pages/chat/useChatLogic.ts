@@ -11,7 +11,9 @@ import {
 } from '~/constants/chat'
 import {
   ChatStreamEvent,
+  ImageAttachment,
   Message,
+  RetrievedImage,
 } from '~/entities/messages'
 import createAssistantMessage from '~/services/createAssistantMessage'
 import createUserMessage from '~/services/createUserMessage'
@@ -23,6 +25,7 @@ import { addMessage, updateMessageContent } from '~/stores/chats/actions'
 import { useConfig } from '~/stores/config'
 import {
   createConversationRequester,
+  resolveApiBase,
   streamChatConfirmRequester,
   streamChatRequester
 } from '~/services/requester'
@@ -67,9 +70,13 @@ interface UseChatLogicResult {
   finalResult : string,
   loading : boolean,
   error : string|undefined,
+  pendingImages : ImageAttachment[],
+  apiBaseUrl : string,
   handleDeleteChat : (chatId : number) => void,
   requestHandler : () => void,
-  handleConfirmClicked : () => Promise<void>
+  handleConfirmClicked : () => Promise<void>,
+  handleImagesSelected : (images : ImageAttachment[]) => void,
+  handleImageRemoved : (index : number) => void
 }
 
 const DEFAULT_VIEW_STATE : ChatState = {
@@ -262,6 +269,7 @@ export default function useChatLogic () : UseChatLogicResult {
   const { autoSaveChats, modelUrl, modelName } = useConfig('config')
 
   const [chatState, setChatState] = useState<ChatState>(DEFAULT_VIEW_STATE)
+  const [pendingImages, setPendingImages] = useState<ImageAttachment[]>([])
 
   const rowContainerRef = useRef<HTMLDivElement>(null)
   const textAreaRef = useRef<HTMLTextAreaElement>(null)
@@ -354,7 +362,13 @@ export default function useChatLogic () : UseChatLogicResult {
     writeConversationIdsStorage(mapping)
   }, [])
 
-  const appendAssistantMessage = useCallback((chatId : number, content : string, conversationId ?: string, taskId ?: string) => {
+  const appendAssistantMessage = useCallback((
+    chatId : number,
+    content : string,
+    conversationId ?: string,
+    taskId ?: string,
+    retrievedImages : RetrievedImage[] = []
+  ) => {
     const text = normalizeText(content)
     if (!text) return
 
@@ -366,8 +380,16 @@ export default function useChatLogic () : UseChatLogicResult {
 
     disChats(addMessage({
       index: chatId,
-      message: createAssistantMessage(text, conversationId, taskId)
+      message: createAssistantMessage(text, conversationId, taskId, retrievedImages)
     }))
+  }, [])
+
+  const handleImagesSelected = useCallback((images : ImageAttachment[]) => {
+    setPendingImages((current) => [...current, ...images].slice(0, 4))
+  }, [])
+
+  const handleImageRemoved = useCallback((index : number) => {
+    setPendingImages((current) => current.filter((_, imageIndex) => imageIndex !== index))
   }, [])
 
   const handleDeleteChat = useCallback((chatId : number) => {
@@ -380,6 +402,7 @@ export default function useChatLogic () : UseChatLogicResult {
     if (currentChatIdRef.current !== chatId) return
 
     stopActiveStream()
+    setPendingImages([])
     activeConversationIdRef.current = undefined
     setChatState({
       ...DEFAULT_VIEW_STATE,
@@ -422,6 +445,7 @@ export default function useChatLogic () : UseChatLogicResult {
     let streamedTaskId : string|undefined = taskId
     let streamedConversationId = conversationId
     let streamedText = ''
+    let streamedRetrievedImages : RetrievedImage[] = []
     let streamMessageTime : number|undefined
     let streamReachedTerminal = false
 
@@ -442,7 +466,8 @@ export default function useChatLogic () : UseChatLogicResult {
         time: streamMessageTime,
         content: streamedText,
         conversationId: streamedConversationId,
-        sessionId: streamedTaskId
+        sessionId: streamedTaskId,
+        retrievedImages: streamedRetrievedImages
       }))
     }
 
@@ -515,12 +540,19 @@ export default function useChatLogic () : UseChatLogicResult {
           if (event.type === 'final') {
             streamReachedTerminal = true
             const finalAnswer = normalizeText(event.final_answer) || streamedText
+            streamedRetrievedImages = event.retrieved_images
             if (finalAnswer) {
               streamedText = finalAnswer
               if (streamMessageTime !== undefined) {
                 syncStreamAssistant()
               } else {
-                appendAssistantMessage(chatId, finalAnswer, streamedConversationId, streamedTaskId)
+                appendAssistantMessage(
+                  chatId,
+                  finalAnswer,
+                  streamedConversationId,
+                  streamedTaskId,
+                  streamedRetrievedImages
+                )
               }
             }
 
@@ -556,7 +588,13 @@ export default function useChatLogic () : UseChatLogicResult {
         if (streamMessageTime !== undefined) {
           syncStreamAssistant()
         } else {
-          appendAssistantMessage(chatId, streamedText, streamedConversationId, streamedTaskId)
+          appendAssistantMessage(
+            chatId,
+            streamedText,
+            streamedConversationId,
+            streamedTaskId,
+            streamedRetrievedImages
+          )
         }
         setSnapshotPatch(streamedConversationId, {
           activeTaskId: streamedTaskId,
@@ -606,9 +644,10 @@ export default function useChatLogic () : UseChatLogicResult {
     if (chatState.taskStatus === 'CONFIRMING') return
 
     const text = normalizeText(textAreaRef.current?.value)
-    if (!text) return
+    const images = [...pendingImages]
+    if (!text && images.length === 0) return
 
-    if (CONFIRM_ONLY_PATTERN.test(text)) {
+    if (images.length === 0 && CONFIRM_ONLY_PATTERN.test(text)) {
       if (textAreaRef.current) {
         textAreaRef.current.value = ''
         textAreaRef.current.focus()
@@ -650,16 +689,26 @@ export default function useChatLogic () : UseChatLogicResult {
       }
 
       const taskConversationId = conversationId
+      const displayText = text || 'Analyze the attached image.'
+      const displayContent = images.length > 0
+        ? `${displayText}\n\n[Attached images: ${images.map((image) => image.name).join(', ')}]`
+        : displayText
 
       disChats(addMessage({
         index: chatId,
-        message: createUserMessage(text, taskConversationId)
+        message: createUserMessage(
+          displayContent,
+          taskConversationId,
+          taskConversationId,
+          images
+        )
       }))
 
       if (textAreaRef.current) {
         textAreaRef.current.value = ''
         textAreaRef.current.focus()
       }
+      setPendingImages([])
 
       setSnapshotPatch(taskConversationId, {
         activeTaskId: taskConversationId,
@@ -678,6 +727,7 @@ export default function useChatLogic () : UseChatLogicResult {
       let streamedTaskId : string|undefined = taskConversationId
       let streamedConversationId = taskConversationId
       let streamedText = ''
+      let streamedRetrievedImages : RetrievedImage[] = []
       let streamMessageTime : number|undefined
       let streamReachedTerminal = false
 
@@ -698,7 +748,8 @@ export default function useChatLogic () : UseChatLogicResult {
           time: streamMessageTime,
           content: streamedText,
           conversationId: streamedConversationId,
-          sessionId: streamedTaskId
+          sessionId: streamedTaskId,
+          retrievedImages: streamedRetrievedImages
         }))
       }
 
@@ -710,7 +761,8 @@ export default function useChatLogic () : UseChatLogicResult {
             stream: true,
             conversation_id: taskConversationId,
             session_id: taskConversationId,
-            messages: [{ role: 'user', content: text }]
+            messages: [{ role: 'user', content: text }],
+            images
           },
           (event : ChatStreamEvent) => {
             if (!isStreamActive(streamRunId)) {
@@ -769,12 +821,19 @@ export default function useChatLogic () : UseChatLogicResult {
             if (event.type === 'final') {
               streamReachedTerminal = true
               const finalAnswer = normalizeText(event.final_answer) || streamedText
+              streamedRetrievedImages = event.retrieved_images
               if (finalAnswer) {
                 streamedText = finalAnswer
                 if (streamMessageTime !== undefined) {
                   syncStreamAssistant()
                 } else {
-                  appendAssistantMessage(chatId, finalAnswer, streamedConversationId, streamedTaskId)
+                  appendAssistantMessage(
+                    chatId,
+                    finalAnswer,
+                    streamedConversationId,
+                    streamedTaskId,
+                    streamedRetrievedImages
+                  )
                 }
               }
               setSnapshotPatch(streamedConversationId, {
@@ -809,7 +868,13 @@ export default function useChatLogic () : UseChatLogicResult {
           if (streamMessageTime !== undefined) {
             syncStreamAssistant()
           } else {
-            appendAssistantMessage(chatId, streamedText, streamedConversationId, streamedTaskId)
+            appendAssistantMessage(
+              chatId,
+              streamedText,
+              streamedConversationId,
+              streamedTaskId,
+              streamedRetrievedImages
+            )
           }
           setSnapshotPatch(streamedConversationId, {
             activeTaskId: streamedTaskId,
@@ -843,6 +908,7 @@ export default function useChatLogic () : UseChatLogicResult {
     chatState.taskStatus,
     modelName,
     modelUrl,
+    pendingImages,
     beginStream,
     isStreamActive,
     setConversationIdForChat,
@@ -880,11 +946,18 @@ export default function useChatLogic () : UseChatLogicResult {
     if (!autoSaveChats) return
     renderCountRef.current += 1
     if (renderCountRef.current < 3) return
-    Store.set('chats', chats)
+    Store.set(
+      'chats',
+      chats.map((chatMessages) => chatMessages.map((message) => ({
+        ...message,
+        images: undefined
+      })))
+    )
   }, [autoSaveChats, chats])
 
   useEffect(() => {
     stopActiveStream()
+    setPendingImages([])
   }, [chat, stopActiveStream])
 
   useEffect(() => {
@@ -956,8 +1029,12 @@ export default function useChatLogic () : UseChatLogicResult {
     finalResult: chatState.finalResult,
     loading: chatState.loading,
     error: chatState.error,
+    pendingImages,
+    apiBaseUrl: resolveApiBase(modelUrl),
     handleDeleteChat,
     requestHandler,
-    handleConfirmClicked
+    handleConfirmClicked,
+    handleImagesSelected,
+    handleImageRemoved
   }
 }

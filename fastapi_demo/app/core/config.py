@@ -64,6 +64,14 @@ class Settings(BaseSettings):
     INGEST_PATH: str = "./ingest_docs"
     IMAGE_MODEL: str = "qwen-image-edit"
     IMAGE_SIZE: str = "1024x1024"
+    VISION_MODEL: str = "qwen-vl-max"
+    VISION_BASE_URL: str = ""
+    VISION_API_KEY: str = ""
+    VISION_TIMEOUT_SECONDS: float = 30.0
+    VISION_CAPTION_MAX_TOKENS: int = 500
+    MULTIMODAL_MAX_IMAGES: int = 4
+    MULTIMODAL_MAX_IMAGE_BYTES: int = 5 * 1024 * 1024
+    MULTIMODAL_MAX_TOTAL_IMAGE_BYTES: int = 12 * 1024 * 1024
 
     # ---- retrieval ----
     TOP_K: int = 4

@@ -1,12 +1,18 @@
-# software_reco
+# software_reco — Multimodal RAG
 
-Multi-service software recommendation system built around a FastAPI RAG agent, a Spring Boot orchestration layer, and a React chat UI. The repository is structured for local experimentation with streaming responses, human-in-the-loop confirmation, layered memory, document ingestion, and evaluation tooling.
+Multi-service software recommendation system built around a FastAPI multimodal RAG
+agent, a Spring Boot orchestration layer, and a React chat UI. It supports text,
+screenshots, diagrams, and image-backed knowledge while preserving the existing
+streaming, human-in-the-loop, memory, and evaluation flows.
 
 ## What This Repo Does
 
 - Accepts software selection or implementation questions from a chat UI or API.
+- Accepts up to four PNG/JPEG/WebP attachments, including image-only questions.
+- Uses a configurable vision model to extract visible text and technical facts before retrieval.
 - Routes requests through a recommendation workflow with skill routing and planning.
 - Retrieves evidence from local vector search, keyword search, web search, and memory.
+- Ingests image knowledge assets into Chroma through caption-then-text embedding and returns the original images as citations.
 - Supports human confirmation before continuing with generated sub-questions.
 - Streams intermediate and final responses over Server-Sent Events.
 - Persists conversations, messages, and extracted facts on the Spring side.
@@ -32,7 +38,8 @@ Multi-service software recommendation system built around a FastAPI RAG agent, a
 - Spring Boot runs on `http://127.0.0.1:8080`
 - FastAPI runs on `http://127.0.0.1:8000`
 - Spring Boot calls FastAPI for recommendation execution and session-state sync.
-- FastAPI auto-ingests files from `fastapi_demo/ingest_docs` when the Chroma vector store is empty.
+- FastAPI incrementally ingests new text, PDF, and image files from `fastapi_demo/ingest_docs`.
+- Uploaded image bytes are processed in memory; Spring persists only a text summary of attachment names, and the React autosave omits raw base64 data.
 
 ## Notable Features
 
@@ -50,6 +57,7 @@ Multi-service software recommendation system built around a FastAPI RAG agent, a
 - Java 21
 - Node.js with `npm` or `yarn`
 - An OpenAI-compatible or DashScope-compatible LLM/embedding setup for the FastAPI service
+- An OpenAI-compatible vision model endpoint that accepts `image_url` message parts
 
 Optional but useful:
 
@@ -98,10 +106,14 @@ Important settings used by the FastAPI side include:
 - `OPENAI_API_KEY` or `DASHSCOPE_API_KEY`
 - `OPENAI_BASE_URL`
 - `LLM_MODEL`
+- `VISION_MODEL`, `VISION_BASE_URL`, and optionally `VISION_API_KEY`
 - `TAVILY_API_KEY`
 - `CHROMA_DB_PATH`
 - `INGEST_PATH`
 - `ENABLE_PARENT_CHILD_CHUNKING`
+
+The default vision model is `qwen-vl-max`. `VISION_API_KEY` falls back to
+`DASHSCOPE_API_KEY`, then `OPENAI_API_KEY`.
 
 ### 2. Start FastAPI
 
@@ -198,6 +210,25 @@ secure the key.
 - `GET /api/v1/session-state/{session_id}`
 - `PUT /api/v1/session-state/{session_id}`
 - `POST /api/v1/initialize-db` (admin only)
+- `GET /api/v1/assets/{path}` for retrieved image evidence
+
+`/recommend` and `/recommend/stream` accept an optional `images` array:
+
+```json
+{
+  "query": "What does this architecture diagram imply?",
+  "images": [
+    {
+      "name": "architecture.png",
+      "media_type": "image/png",
+      "data_url": "data:image/png;base64,..."
+    }
+  ]
+}
+```
+
+Successful responses may include `retrieved_images` with `doc_id`, `filename`,
+`media_type`, `url`, `caption`, and `score`.
 
 ### Spring Boot
 
@@ -217,7 +248,16 @@ FastAPI tests are under `fastapi_demo/tests/`. They cover areas such as routing,
 Run the test suite with the standard library test runner:
 
 ```powershell
-python -m unittest discover -s fastapi_demo\tests -p "test_*.py"
+cd fastapi_demo
+python -m pytest
+```
+
+Cross-stack checks:
+
+```bash
+cd ollama_springboot/demo && sh mvnw test
+cd ollama_springboot/ollama-gui-reactjs && npm test -- --watchAll=false --runInBand
+cd ollama_springboot/ollama-gui-reactjs && npm run build
 ```
 
 Evaluation utilities live in `fastapi_demo/evaluation/`, including:

@@ -4,7 +4,7 @@ import json
 import logging
 import re
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 import openai
 
@@ -57,7 +57,7 @@ def _is_factoid_like_query(query: str) -> bool:
     return any(text.startswith(prefix) for prefix in zh_prefixes)
 
 
-def _parse_json_object(raw_text: str) -> Dict[str, Any]:
+def _parse_json_object(raw_text: str) -> dict[str, Any]:
     text = str(raw_text or "").strip()
     if not text:
         raise ValueError("empty_skill_router_response")
@@ -66,7 +66,7 @@ def _parse_json_object(raw_text: str) -> Dict[str, Any]:
     except json.JSONDecodeError:
         match = re.search(r"\{.*\}", text, flags=re.DOTALL)
         if not match:
-            raise ValueError("skill_router_non_json_response")
+            raise ValueError("skill_router_non_json_response") from None
         parsed = json.loads(match.group(0))
     if not isinstance(parsed, dict):
         raise ValueError("skill_router_response_not_object")
@@ -94,10 +94,10 @@ class SkillRoutingResult:
     selected_skill: str
     confidence: float
     reason: str
-    candidates: List[Dict[str, Any]]
+    candidates: list[dict[str, Any]]
     fallback_used: bool
 
-    def as_dict(self) -> Dict[str, Any]:
+    def as_dict(self) -> dict[str, Any]:
         return {
             "selected_skill": self.selected_skill,
             "confidence": self.confidence,
@@ -126,7 +126,7 @@ def _get_router_client() -> openai.OpenAI:
     )
 
 
-def _rule_score_skill(query: str, skill: SkillSpec) -> Dict[str, Any]:
+def _rule_score_skill(query: str, skill: SkillSpec) -> dict[str, Any]:
     query_text = _normalize_text(query).lower()
     query_tokens = _tokenize(query_text)
 
@@ -190,7 +190,9 @@ def _rule_route(
     candidates.sort(key=lambda item: float(item.get("score", 0.0)), reverse=True)
 
     threshold = max(0.0, min(1.0, float(getattr(settings, "SKILL_ROUTER_RULE_THRESHOLD", 0.25))))
-    fallback_skill = _normalize_text(getattr(settings, "SKILL_ROUTER_FALLBACK_SKILL", DEFAULT_SKILL_ID)) or DEFAULT_SKILL_ID
+    fallback_skill = (
+        _normalize_text(getattr(settings, "SKILL_ROUTER_FALLBACK_SKILL", DEFAULT_SKILL_ID)) or DEFAULT_SKILL_ID
+    )
 
     if candidates and float(candidates[0].get("score", 0.0)) >= threshold:
         top = candidates[0]
@@ -228,8 +230,8 @@ def _rule_route(
 def _build_llm_messages(
     user_query: str,
     normalized_query: str,
-    rule_candidates: List[Dict[str, Any]],
-) -> List[Dict[str, str]]:
+    rule_candidates: list[dict[str, Any]],
+) -> list[dict[str, str]]:
     allowed = [skill.skill_id for skill in list_skills(include_default=True)]
     payload = {
         "user_query": _normalize_text(user_query),
@@ -255,12 +257,14 @@ def _build_llm_messages(
 def _llm_route(
     user_query: str,
     normalized_query: str,
-    rule_candidates: List[Dict[str, Any]],
+    rule_candidates: list[dict[str, Any]],
     *,
-    client: Optional[Any] = None,
-) -> Optional[SkillRoutingResult]:
+    client: Any | None = None,
+) -> SkillRoutingResult | None:
     active_client = client or _get_router_client()
-    model = _normalize_text(getattr(settings, "SKILL_ROUTER_MODEL", "")) or _normalize_text(getattr(settings, "ROUTER_MODEL", ""))
+    model = _normalize_text(getattr(settings, "SKILL_ROUTER_MODEL", "")) or _normalize_text(
+        getattr(settings, "ROUTER_MODEL", "")
+    )
     confidence_threshold = max(
         0.0,
         min(1.0, float(getattr(settings, "SKILL_ROUTER_CONFIDENCE_THRESHOLD", 0.55))),
@@ -278,8 +282,14 @@ def _llm_route(
             response_format={"type": "json_object"},
         )
         first_choice = (getattr(response, "choices", None) or [{}])[0]
-        message = first_choice.get("message", {}) if isinstance(first_choice, dict) else getattr(first_choice, "message", {})
-        content = _extract_text_content(message.get("content", "") if isinstance(message, dict) else getattr(message, "content", ""))
+        message = (
+            first_choice.get("message", {})
+            if isinstance(first_choice, dict)
+            else getattr(first_choice, "message", {})
+        )
+        content = _extract_text_content(
+            message.get("content", "") if isinstance(message, dict) else getattr(message, "content", "")
+        )
         parsed = _parse_json_object(content)
     except Exception as exc:
         logger.warning("skill router llm invocation failed: %s", exc)
@@ -321,10 +331,12 @@ def route_skill(
     user_query: str,
     *,
     normalized_query: str = "",
-    client: Optional[Any] = None,
+    client: Any | None = None,
 ) -> SkillRoutingResult:
     if not bool(getattr(settings, "SKILL_ROUTER_ENABLE", True)):
-        fallback_skill = _normalize_text(getattr(settings, "SKILL_ROUTER_FALLBACK_SKILL", DEFAULT_SKILL_ID)) or DEFAULT_SKILL_ID
+        fallback_skill = (
+            _normalize_text(getattr(settings, "SKILL_ROUTER_FALLBACK_SKILL", DEFAULT_SKILL_ID)) or DEFAULT_SKILL_ID
+        )
         selected = get_skill(fallback_skill).skill_id
         return SkillRoutingResult(
             selected_skill=selected,

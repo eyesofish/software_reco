@@ -7,6 +7,7 @@ import java.util.List;
 public class OllamaChatRequest {
     private String model;
     private List<Message> messages;
+    private List<ImageAttachment> images;
     private Boolean stream;
     @JsonProperty("conversation_id")
     private String conversationId;
@@ -17,6 +18,8 @@ public class OllamaChatRequest {
     public void setModel(String model) { this.model = model; }
     public List<Message> getMessages() { return messages; }
     public void setMessages(List<Message> messages) { this.messages = messages; }
+    public List<ImageAttachment> getImages() { return images; }
+    public void setImages(List<ImageAttachment> images) { this.images = images; }
     public Boolean getStream() { return stream; }
     public void setStream(Boolean stream) { this.stream = stream; }
     public String getConversationId() { return conversationId; }

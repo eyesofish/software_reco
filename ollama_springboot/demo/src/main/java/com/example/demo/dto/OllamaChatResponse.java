@@ -3,6 +3,7 @@ package com.example.demo.dto;
 import com.fasterxml.jackson.annotation.JsonProperty;
 
 import java.util.List;
+import java.util.Map;
 
 public class OllamaChatResponse {
     private String model;
@@ -17,6 +18,8 @@ public class OllamaChatResponse {
     private String conversationId;
     @JsonProperty("session_id")
     private String sessionId;
+    @JsonProperty("retrieved_images")
+    private List<Map<String, Object>> retrievedImages;
 
     public String getModel() { return model; }
     public void setModel(String model) { this.model = model; }
@@ -34,4 +37,6 @@ public class OllamaChatResponse {
     public void setConversationId(String conversationId) { this.conversationId = conversationId; }
     public String getSessionId() { return sessionId; }
     public void setSessionId(String sessionId) { this.sessionId = sessionId; }
+    public List<Map<String, Object>> getRetrievedImages() { return retrievedImages; }
+    public void setRetrievedImages(List<Map<String, Object>> retrievedImages) { this.retrievedImages = retrievedImages; }
 }

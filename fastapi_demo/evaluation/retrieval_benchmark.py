@@ -2,7 +2,8 @@
 
 Usage examples:
   python -m evaluation.retrieval_benchmark --dataset rag_retrieval_eval_b0_100 --method vector_only
-  python -m evaluation.retrieval_benchmark --dataset rag_retrieval_eval_b1_100 --method hybrid_rerank --output-json evaluation/reports/raw.json
+  python -m evaluation.retrieval_benchmark --dataset rag_retrieval_eval_b1_100 --method hybrid_rerank \
+    --output-json evaluation/reports/raw.json
 """
 
 from __future__ import annotations
@@ -12,11 +13,11 @@ import csv
 import json
 import math
 import os
+from collections.abc import Iterable, Sequence
 from pathlib import Path
-from typing import Any, Iterable, Sequence
+from typing import Any
 
 from dotenv import load_dotenv
-
 
 DEFAULT_TOP_K = 10
 

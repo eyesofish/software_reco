@@ -1,5 +1,21 @@
 ## Ollama LLM Graphical User Interface
 
+## Software Reco multimodal mode
+
+This fork is the active UI for `software_reco`. The chat composer supports up to
+four PNG/JPEG/WebP attachments, image-only questions, local previews, and retrieved
+image evidence cards. Requests are sent to the Spring endpoint configured by
+`REACT_APP_CHAT_API_URL` (default: `http://localhost:8080/api/chat`).
+
+Raw base64 image data is kept only in the live chat state and is omitted from
+localStorage autosave. Build and test with:
+
+```bash
+npm install
+npm test -- --watchAll=false --runInBand
+npm run build
+```
+
 > 👨‍💻 Developed by Matheus Ramalho de Oliveira  
 🏗️ Brazilian Software Engineer  
 ✉️ kastorcode@gmail.com  

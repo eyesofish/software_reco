@@ -54,7 +54,10 @@ app.include_router(v1_router, prefix="/api/v1")
 @app.exception_handler(RequestValidationError)
 async def validation_exception_handler(request: Request, exc: RequestValidationError):
     body = await request.body()
-    body_text = body.decode("utf-8", errors="replace")
+    if b"data:image/" in body:
+        body_text = f"<{len(body)} bytes; image data redacted>"
+    else:
+        body_text = body.decode("utf-8", errors="replace")[:2000]
     logger.warning(
         "validation error: method=%s path=%s content_type=%s body=%r errors=%s",
         request.method,

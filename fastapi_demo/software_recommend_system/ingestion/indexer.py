@@ -1,4 +1,5 @@
-from typing import Any, Dict, List, Sequence
+from collections.abc import Sequence
+from typing import Any
 
 import chromadb
 
@@ -23,14 +24,14 @@ def get_parent_collection(collection_name: str = DEFAULT_PARENT_COLLECTION_NAME)
 def index_embeddings(
     chunk_ids: Sequence[str],
     chunk_texts: Sequence[str],
-    metadatas: Sequence[Dict[str, Any]],
+    metadatas: Sequence[dict[str, Any]],
     embeddings: Sequence[Sequence[float]],
     collection_name: str = DEFAULT_COLLECTION_NAME,
 ) -> int:
     """Write chunk records into Chroma and return indexed count."""
     ids = [str(item) for item in chunk_ids]
     docs = [str(item) for item in chunk_texts]
-    metas: List[Dict[str, Any]] = [dict(item or {}) for item in metadatas]
+    metas: list[dict[str, Any]] = [dict(item or {}) for item in metadatas]
     vectors = [list(vector) for vector in embeddings]
 
     if not ids:
@@ -57,13 +58,13 @@ def index_embeddings(
 def index_parent_documents(
     parent_ids: Sequence[str],
     parent_texts: Sequence[str],
-    metadatas: Sequence[Dict[str, Any]],
+    metadatas: Sequence[dict[str, Any]],
     collection_name: str = DEFAULT_PARENT_COLLECTION_NAME,
 ) -> int:
     """Write parent chunk records into Chroma and return indexed count."""
     ids = [str(item) for item in parent_ids]
     docs = [str(item) for item in parent_texts]
-    metas: List[Dict[str, Any]] = [dict(item or {}) for item in metadatas]
+    metas: list[dict[str, Any]] = [dict(item or {}) for item in metadatas]
 
     if not ids:
         return 0
@@ -81,7 +82,7 @@ def index_parent_documents(
     return expected_len
 
 
-def _flatten_chroma_values(values: Any) -> List[Any]:
+def _flatten_chroma_values(values: Any) -> list[Any]:
     if isinstance(values, list):
         if values and isinstance(values[0], list):
             return list(values[0])
@@ -92,7 +93,7 @@ def _flatten_chroma_values(values: Any) -> List[Any]:
 def get_parent_documents_by_ids(
     parent_ids: Sequence[str],
     collection_name: str = DEFAULT_PARENT_COLLECTION_NAME,
-) -> Dict[str, Dict[str, Any]]:
+) -> dict[str, dict[str, Any]]:
     """Fetch parent chunk content and metadata by parent IDs."""
     ids = [str(item).strip() for item in parent_ids if str(item).strip()]
     if not ids:
@@ -108,7 +109,7 @@ def get_parent_documents_by_ids(
     documents = _flatten_chroma_values((raw or {}).get("documents"))
     metadatas = _flatten_chroma_values((raw or {}).get("metadatas"))
 
-    output: Dict[str, Dict[str, Any]] = {}
+    output: dict[str, dict[str, Any]] = {}
     for index, parent_id in enumerate(result_ids):
         parent_key = str(parent_id)
         output[parent_key] = {

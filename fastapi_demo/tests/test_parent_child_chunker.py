@@ -36,7 +36,7 @@ class ParentChildChunkerTests(unittest.TestCase):
             self.assertLess(metadata["parent_start"], metadata["parent_end"])
             parent_bounds[parent_id] = (metadata["parent_start"], metadata["parent_end"])
 
-        parent_child_counts = {parent_id: 0 for parent_id in parent_bounds}
+        parent_child_counts = dict.fromkeys(parent_bounds, 0)
         for child_chunk in child_chunks:
             child_id = child_chunk["id"]
             metadata = child_chunk["metadata"]

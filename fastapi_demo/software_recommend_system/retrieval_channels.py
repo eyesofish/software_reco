@@ -1,7 +1,8 @@
 import logging
 import re
 import time
-from typing import Any, Iterable, List
+from collections.abc import Iterable
+from typing import Any
 
 import chromadb
 from rank_bm25 import BM25Okapi
@@ -80,12 +81,12 @@ def _collection_get_documents(scan_limit: int) -> dict[str, Any]:
         return _read(collection)
 
 
-def recall_vector(query: str, top_k: int, trace_id: str | None = None) -> List[Document]:
+def recall_vector(query: str, top_k: int, trace_id: str | None = None) -> list[Document]:
     limit = max(1, int(top_k))
     return similarity_search(query=query, k=limit, trace_id=trace_id)[:limit]
 
 
-def recall_web(query: str, top_k: int, trace_id: str | None = None) -> List[Document]:
+def recall_web(query: str, top_k: int, trace_id: str | None = None) -> list[Document]:
     limit = max(1, int(top_k))
     return _tavily_search(query=query, trace_id=trace_id)[:limit]
 
@@ -98,7 +99,7 @@ def _keyword_corpus_tokens(text: str, metadata: dict[str, Any]) -> list[str]:
     return tokens
 
 
-def recall_keyword(query: str, top_k: int, trace_id: str | None = None) -> List[Document]:
+def recall_keyword(query: str, top_k: int, trace_id: str | None = None) -> list[Document]:
     global _KEYWORD_RECALL_UNAVAILABLE_UNTIL
     limit = max(1, int(top_k))
     scan_limit = max(limit, int(getattr(settings, "RECALL_KEYWORD_SCAN_LIMIT", 2000)))
@@ -149,7 +150,7 @@ def recall_keyword(query: str, top_k: int, trace_id: str | None = None) -> List[
             bm25 = BM25Okapi([tokens for _, _, tokens, _ in corpus_rows])
             scores = bm25.get_scores(query_tokens)
             matched_rows: list[tuple[float, str, dict[str, Any]]] = []
-            for score, (text, metadata, _, text_token_set) in zip(scores, corpus_rows):
+            for score, (text, metadata, _, text_token_set) in zip(scores, corpus_rows, strict=True):
                 if not (query_token_set & text_token_set):
                     continue
                 matched_rows.append((float(score), text, metadata))
@@ -169,7 +170,7 @@ def recall_keyword(query: str, top_k: int, trace_id: str | None = None) -> List[
         scored.sort(key=lambda item: item[0], reverse=True)
         top_items = scored[:limit]
 
-        output: List[Document] = []
+        output: list[Document] = []
         for index, (score, content, metadata) in enumerate(top_items, start=1):
             output.append(
                 Document(
@@ -225,7 +226,7 @@ def recall_memory(
     session_id: str | None,
     top_k: int,
     memory_context: list[dict[str, Any]] | None = None,
-) -> List[Document]:
+) -> list[Document]:
     limit = max(1, int(top_k))
     if not memory_context:
         return []

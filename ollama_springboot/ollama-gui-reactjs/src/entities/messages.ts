@@ -1,9 +1,26 @@
+export interface ImageAttachment {
+  name : string,
+  media_type : 'image/jpeg' | 'image/png' | 'image/webp',
+  data_url : string
+}
+
+export interface RetrievedImage {
+  doc_id : string,
+  filename : string,
+  media_type : string,
+  url : string,
+  caption : string,
+  score : number
+}
+
 export interface Message {
   role : 'assistant' | 'user' | 'system',
   content : string,
   time : number,
   conversationId ?: string,
-  sessionId ?: string
+  sessionId ?: string,
+  images ?: ImageAttachment[],
+  retrievedImages ?: RetrievedImage[]
 }
 
 export type Messages = Message[]
@@ -118,7 +135,8 @@ export interface RecommendTaskCreateRequest {
   conversation_id ?: string,
   session_id ?: string,
   timeout ?: number,
-  max_iterations ?: number
+  max_iterations ?: number,
+  images ?: ImageAttachment[]
 }
 
 export interface RecommendTaskConfirmRequest {
@@ -174,7 +192,8 @@ export interface ChatStreamFinalEvent extends ChatStreamBaseEvent {
   type : 'final',
   status : string,
   final_answer : string,
-  retrieved_doc_ids : string[]
+  retrieved_doc_ids : string[],
+  retrieved_images : RetrievedImage[]
 }
 
 export interface ChatStreamErrorEvent extends ChatStreamBaseEvent {

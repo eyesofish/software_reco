@@ -1,7 +1,6 @@
 import re
 from dataclasses import dataclass
-from typing import Any, Dict, List
-
+from typing import Any
 
 # Sentence boundary punctuation (Chinese + English).
 # Quotes are treated as sentence closers when they appear after punctuation.
@@ -36,9 +35,9 @@ def _trim_window(content: str, start: int, end: int) -> _TextSpan:
     return _TextSpan(text=content[start:end], start=start, end=end)
 
 
-def _split_into_sentence_spans(content: str) -> List[_TextSpan]:
+def _split_into_sentence_spans(content: str) -> list[_TextSpan]:
     """Split text into sentence-like spans using punctuation boundaries."""
-    spans: List[_TextSpan] = []
+    spans: list[_TextSpan] = []
     for match in _SENTENCE_BOUNDARY_PATTERN.finditer(content):
         span = _trim_window(content, *match.span())
         if span.text:
@@ -51,9 +50,9 @@ def _split_span_by_fixed_length(
     span: _TextSpan,
     chunk_size: int,
     chunk_overlap: int,
-) -> List[_TextSpan]:
+) -> list[_TextSpan]:
     """Fallback splitter for oversized single sentences."""
-    pieces: List[_TextSpan] = []
+    pieces: list[_TextSpan] = []
     step = max(1, chunk_size - chunk_overlap)
 
     for offset in range(0, len(span.text), step):
@@ -68,10 +67,10 @@ def _split_span_by_fixed_length(
     return pieces
 
 
-def _prepare_spans(content: str, chunk_size: int, chunk_overlap: int) -> List[_TextSpan]:
+def _prepare_spans(content: str, chunk_size: int, chunk_overlap: int) -> list[_TextSpan]:
     """Sentence-first segmentation; oversized sentences fallback to fixed-length pieces."""
     sentence_spans = _split_into_sentence_spans(content)
-    prepared: List[_TextSpan] = []
+    prepared: list[_TextSpan] = []
 
     for span in sentence_spans:
         if len(span.text) <= chunk_size:
@@ -90,7 +89,7 @@ def _prepare_spans(content: str, chunk_size: int, chunk_overlap: int) -> List[_T
 
 
 def _next_cursor_with_overlap(
-    spans: List[_TextSpan],
+    spans: list[_TextSpan],
     start_idx: int,
     end_idx: int,
     chunk_overlap: int,
@@ -116,12 +115,12 @@ def _next_cursor_with_overlap(
 
 def _build_chunks(
     content: str,
-    spans: List[_TextSpan],
+    spans: list[_TextSpan],
     chunk_size: int,
     chunk_overlap: int,
-) -> List[_TextSpan]:
+) -> list[_TextSpan]:
     """Group sentence spans into chunks under chunk_size, with sentence overlap."""
-    chunks: List[_TextSpan] = []
+    chunks: list[_TextSpan] = []
     cursor = 0
     total = len(spans)
 
@@ -167,7 +166,7 @@ def _chunk_content_spans(
     content: str,
     chunk_size: int,
     chunk_overlap: int,
-) -> List[_TextSpan]:
+) -> list[_TextSpan]:
     spans = _prepare_spans(
         content=content,
         chunk_size=chunk_size,
@@ -184,10 +183,10 @@ def _chunk_content_spans(
 
 
 def chunk_documents(
-    documents: List[Dict[str, Any]],
+    documents: list[dict[str, Any]],
     chunk_size: int,
     chunk_overlap: int,
-) -> List[Dict[str, Any]]:
+) -> list[dict[str, Any]]:
     """Split normalized docs into semantic-aware overlapping chunks.
 
     Algorithm:
@@ -198,7 +197,7 @@ def chunk_documents(
     """
     _validate_chunk_params(chunk_size, chunk_overlap)
 
-    chunks: List[Dict[str, Any]] = []
+    chunks: list[dict[str, Any]] = []
 
     for doc in documents or []:
         if not isinstance(doc, dict):
@@ -243,18 +242,18 @@ def chunk_documents(
 
 
 def chunk_documents_parent_child(
-    documents: List[Dict[str, Any]],
+    documents: list[dict[str, Any]],
     parent_chunk_size: int,
     parent_chunk_overlap: int,
     child_chunk_size: int,
     child_chunk_overlap: int,
-) -> tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """Split docs into parent chunks and child chunks with parent linkage metadata."""
     _validate_chunk_params(parent_chunk_size, parent_chunk_overlap)
     _validate_chunk_params(child_chunk_size, child_chunk_overlap)
 
-    parent_chunks: List[Dict[str, Any]] = []
-    child_chunks: List[Dict[str, Any]] = []
+    parent_chunks: list[dict[str, Any]] = []
+    child_chunks: list[dict[str, Any]] = []
 
     for doc in documents or []:
         if not isinstance(doc, dict):

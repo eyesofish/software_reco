@@ -19,8 +19,12 @@ class VectorRecallRetryTests(unittest.TestCase):
         client.list_collections.return_value = [type("Col", (), {"name": "software_recommendations"})()]
         client.get_collection.return_value = collection
 
-        with patch("software_recommend_system.tools.chromadb.PersistentClient", side_effect=[tenant_error, client]) as mocked_client, patch(
-            "software_recommend_system.tools.embed_texts", return_value=[[0.01, 0.02]]
+        with (
+            patch(
+                "software_recommend_system.tools.chromadb.PersistentClient",
+                side_effect=[tenant_error, client],
+            ) as mocked_client,
+            patch("software_recommend_system.tools.embed_texts", return_value=[[0.01, 0.02]]),
         ):
             docs = similarity_search("test query", k=1, trace_id="test-vector")
 

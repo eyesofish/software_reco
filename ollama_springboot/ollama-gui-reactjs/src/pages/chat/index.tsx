@@ -23,9 +23,13 @@ export default function Chat () {
     subQuestions,
     loading,
     error,
+    pendingImages,
+    apiBaseUrl,
     handleDeleteChat,
     requestHandler,
-    handleConfirmClicked
+    handleConfirmClicked,
+    handleImagesSelected,
+    handleImageRemoved
   } = useChatLogic()
 
   const isConfirming = taskStatus === 'CONFIRMING'
@@ -37,7 +41,7 @@ export default function Chat () {
         <Menu onDeleteChat={handleDeleteChat} scrollRef={rowContainerRef} />
         <ColumnContainer style={{ padding: 8, paddingRight: 0 }}>
           { (loading || showConfirming) && <Loading src={LOADING} /> }
-          { hasTalk ? <MessageList messages={messages} /> : <About /> }
+          { hasTalk ? <MessageList apiBaseUrl={apiBaseUrl} messages={messages} /> : <About /> }
 
           {showConfirming && (
             <div className='hitlPanel'>
@@ -59,6 +63,9 @@ export default function Chat () {
           />
           <ChatInput
             language={language}
+            images={pendingImages}
+            onImageRemoved={handleImageRemoved}
+            onImagesSelected={handleImagesSelected}
             onSend={requestHandler}
             textAreaRef={textAreaRef}
           />

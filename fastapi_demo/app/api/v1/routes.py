@@ -1,11 +1,13 @@
+import asyncio
 import logging
 import time
 from collections.abc import AsyncIterator
+from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
 from fastapi import APIRouter, Depends, HTTPException
-from fastapi.responses import StreamingResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from langgraph.types import Command
 
 from app.api.v1.auth import require_admin_api_key, require_api_key
@@ -15,6 +17,15 @@ from app.api.v1.models import (
     RecommendationResponse,
     SessionStateResponse,
     SessionStateUpdateRequest,
+)
+from app.core.config import settings
+from software_recommend_system.multimodal import (
+    IMAGE_MEDIA_TYPE_BY_SUFFIX,
+    MultimodalInputError,
+    VisionProcessingError,
+    build_multimodal_query,
+    build_persisted_user_message,
+    describe_image_attachments,
 )
 from software_recommend_system.state import AgentState
 from software_recommend_system.utils import initialize_vector_store
@@ -69,26 +80,64 @@ admin_router = APIRouter(dependencies=[Depends(require_admin_api_key)])
 logger = logging.getLogger(__name__)
 
 
+async def _prepare_multimodal_request(
+    request_data: RecommendationRequest,
+) -> tuple[str, str, list[dict[str, str]]]:
+    query = request_data.query.strip()
+    image_descriptions = await asyncio.to_thread(
+        describe_image_attachments,
+        list(request_data.images or []),
+        user_query=query,
+    )
+    effective_query = build_multimodal_query(query, image_descriptions)
+    persisted_message = build_persisted_user_message(query, image_descriptions)
+    return effective_query, persisted_message, image_descriptions
+
+
+def _resolve_ingested_asset(asset_path: str) -> tuple[Path, str]:
+    root = Path(settings.INGEST_PATH).expanduser().resolve()
+    candidate = (root / asset_path).resolve()
+    try:
+        candidate.relative_to(root)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail="Asset not found") from exc
+
+    media_type = IMAGE_MEDIA_TYPE_BY_SUFFIX.get(candidate.suffix.lower())
+    if not media_type or not candidate.is_file():
+        raise HTTPException(status_code=404, detail="Asset not found")
+    return candidate, media_type
+
+
+@router.get("/assets/{asset_path:path}")
+async def get_ingested_asset(asset_path: str):
+    file_path, media_type = _resolve_ingested_asset(asset_path)
+    return FileResponse(file_path, media_type=media_type)
+
+
 @router.post("/recommend", response_model=RecommendationResponse)
 async def get_software_recommendation(request_data: RecommendationRequest):
     try:
+        effective_query, persisted_user_message, image_descriptions = (
+            await _prepare_multimodal_request(request_data)
+        )
         session_id = request_data.session_id or uuid4().hex
         session_state = _upsert_name_fact_from_query(session_id, request_data.query)
         known_name = (session_state.get("facts") or {}).get("user_name")
         session_messages = _normalize_session_messages(session_state.get("messages", []))
 
         logger.info(
-            "recommend request: session_id=%s timeout=%s max_iterations=%s query=%r",
+            "recommend request: session_id=%s timeout=%s max_iterations=%s images=%s query=%r",
             session_id,
             request_data.timeout,
             request_data.max_iterations,
+            len(image_descriptions),
             request_data.query,
         )
 
         # Persist user message before workflow execution so disconnected clients can recover.
-        _append_session_messages(session_id, [{"role": "user", "content": request_data.query}])
+        _append_session_messages(session_id, [{"role": "user", "content": persisted_user_message}])
 
-        if known_name and _is_asking_user_name(request_data.query):
+        if not image_descriptions and known_name and _is_asking_user_name(request_data.query):
             memory_answer = f"你叫{known_name}。"
             _append_session_message_once(session_id, "assistant", memory_answer)
             _safe_write_turn_memories(
@@ -109,6 +158,7 @@ async def get_software_recommendation(request_data: RecommendationRequest):
                 awaiting_human_confirmation=False,
                 retrieval_records=[],
                 retrieved_doc_ids=[],
+                retrieved_images=[],
                 hitl=_normalize_hitl_payload(
                     {
                         "policy": request_data.hitl_policy or "human",
@@ -118,7 +168,7 @@ async def get_software_recommendation(request_data: RecommendationRequest):
                 ),
             )
 
-        if _is_confirmation_short_query(request_data.query):
+        if not image_descriptions and _is_confirmation_short_query(request_data.query):
             logger.warning(
                 "HITL_CONFIRM_SHORTCUT session_id=%s query=%r",
                 session_id,
@@ -145,20 +195,19 @@ async def get_software_recommendation(request_data: RecommendationRequest):
             )
             return await _await_recommend_task(task, session_id, "confirm_shortcut")
 
-        effective_query = request_data.query
         if known_name:
             effective_query = (
-                f"{request_data.query}\n\n"
+                f"{effective_query}\n\n"
                 "[Known User Facts]\n"
                 f"user_name: {known_name}\n"
                 "If user asks identity-related questions, trust this fact."
             )
 
         memory_seed_messages = list(session_messages)
-        memory_seed_messages.append({"role": "user", "content": request_data.query})
+        memory_seed_messages.append({"role": "user", "content": persisted_user_message})
         memory_context = _safe_build_memory_context(
             session_id=session_id,
-            query=request_data.query,
+            query=effective_query,
             messages=memory_seed_messages,
             facts=dict(session_state.get("facts", {}) or {}),
         )
@@ -166,6 +215,7 @@ async def get_software_recommendation(request_data: RecommendationRequest):
         state = AgentState(
             user_query=effective_query,
             messages=session_messages,
+            input_images=image_descriptions,
             memory_context=memory_context,
             timeout_budget=request_data.timeout,
             max_iterations=request_data.max_iterations,
@@ -179,7 +229,7 @@ async def get_software_recommendation(request_data: RecommendationRequest):
         task = _create_recommend_task(
             _execute_recommend_turn(
                 session_id=session_id,
-                request_query=request_data.query,
+                request_query=persisted_user_message,
                 graph_input=state,
                 config=config,
                 interrupt_source="recommend",
@@ -188,6 +238,10 @@ async def get_software_recommendation(request_data: RecommendationRequest):
             source="recommend",
         )
         return await _await_recommend_task(task, session_id, "recommend")
+    except MultimodalInputError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except VisionProcessingError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
     except Exception as exc:
         raise HTTPException(
             status_code=500,
@@ -200,20 +254,27 @@ async def stream_software_recommendation(request_data: RecommendationRequest):
     async def event_gen() -> AsyncIterator[str]:
         session_id = request_data.session_id or uuid4().hex
         try:
+            effective_query, persisted_user_message, image_descriptions = (
+                await _prepare_multimodal_request(request_data)
+            )
             session_state = _upsert_name_fact_from_query(session_id, request_data.query)
             known_name = (session_state.get("facts") or {}).get("user_name")
             session_messages = _normalize_session_messages(session_state.get("messages", []))
 
             logger.info(
-                "recommend stream request: session_id=%s timeout=%s max_iterations=%s query=%r",
+                "recommend stream request: session_id=%s timeout=%s max_iterations=%s images=%s query=%r",
                 session_id,
                 request_data.timeout,
                 request_data.max_iterations,
+                len(image_descriptions),
                 request_data.query,
             )
 
             # Persist user message before workflow execution so disconnected clients can recover.
-            _append_session_messages(session_id, [{"role": "user", "content": request_data.query}])
+            _append_session_messages(
+                session_id,
+                [{"role": "user", "content": persisted_user_message}],
+            )
 
             yield _sse(
                 "meta",
@@ -223,7 +284,7 @@ async def stream_software_recommendation(request_data: RecommendationRequest):
                 },
             )
 
-            if known_name and _is_asking_user_name(request_data.query):
+            if not image_descriptions and known_name and _is_asking_user_name(request_data.query):
                 memory_answer = f"你叫{known_name}。"
                 _append_session_message_once(session_id, "assistant", memory_answer)
                 _safe_write_turn_memories(
@@ -240,11 +301,12 @@ async def stream_software_recommendation(request_data: RecommendationRequest):
                         "session_id": session_id,
                         "final_answer": memory_answer,
                         "retrieved_doc_ids": [],
+                        "retrieved_images": [],
                     },
                 )
                 return
 
-            if _is_confirmation_short_query(request_data.query):
+            if not image_descriptions and _is_confirmation_short_query(request_data.query):
                 config = {"configurable": {"thread_id": session_id}}
                 resume_payload = {
                     "action": "confirm",
@@ -274,24 +336,27 @@ async def stream_software_recommendation(request_data: RecommendationRequest):
                             "session_id": session_id,
                             "final_answer": response.final_answer,
                             "retrieved_doc_ids": response.retrieved_doc_ids or [],
+                            "retrieved_images": [
+                                item.model_dump()
+                                for item in (response.retrieved_images or [])
+                            ],
                         },
                     )
                 return
 
-            effective_query = request_data.query
             if known_name:
                 effective_query = (
-                    f"{request_data.query}\n\n"
+                    f"{effective_query}\n\n"
                     "[Known User Facts]\n"
                     f"user_name: {known_name}\n"
                     "If user asks identity-related questions, trust this fact."
                 )
 
             memory_seed_messages = list(session_messages)
-            memory_seed_messages.append({"role": "user", "content": request_data.query})
+            memory_seed_messages.append({"role": "user", "content": persisted_user_message})
             memory_context = _safe_build_memory_context(
                 session_id=session_id,
-                query=request_data.query,
+                query=effective_query,
                 messages=memory_seed_messages,
                 facts=dict(session_state.get("facts", {}) or {}),
             )
@@ -299,6 +364,7 @@ async def stream_software_recommendation(request_data: RecommendationRequest):
             state = AgentState(
                 user_query=effective_query,
                 messages=session_messages,
+                input_images=image_descriptions,
                 memory_context=memory_context,
                 timeout_budget=request_data.timeout,
                 max_iterations=request_data.max_iterations,
@@ -419,7 +485,7 @@ async def stream_software_recommendation(request_data: RecommendationRequest):
             if final_answer:
                 _safe_write_turn_memories(
                     session_id=session_id,
-                    request_query=request_data.query,
+                    request_query=persisted_user_message,
                     final_answer=final_answer,
                     selected_skill=skill_planner_payload["selected_skill"],
                     retrieved_doc_ids=list(eval_payload["retrieved_doc_ids"] or []),
@@ -432,8 +498,22 @@ async def stream_software_recommendation(request_data: RecommendationRequest):
                     "session_id": session_id,
                     "final_answer": final_answer,
                     "retrieved_doc_ids": eval_payload["retrieved_doc_ids"],
+                    "retrieved_images": eval_payload["retrieved_images"],
                     "selected_skill": skill_planner_payload["selected_skill"],
                     "hitl": eval_payload["hitl"],
+                },
+            )
+        except (MultimodalInputError, VisionProcessingError) as exc:
+            logger.warning(
+                "RECOMMEND_STREAM_MULTIMODAL_FAILED session_id=%s error=%s",
+                session_id,
+                exc,
+            )
+            yield _sse(
+                "error",
+                {
+                    "session_id": session_id,
+                    "message": str(exc),
                 },
             )
         except Exception as exc:
@@ -654,6 +734,7 @@ async def confirm_software_recommendation_stream(request_data: RecommendationCon
                     "session_id": session_id,
                     "final_answer": final_answer,
                     "retrieved_doc_ids": eval_payload["retrieved_doc_ids"],
+                    "retrieved_images": eval_payload["retrieved_images"],
                     "selected_skill": skill_planner_payload["selected_skill"],
                     "hitl": eval_payload["hitl"],
                 },
@@ -786,6 +867,7 @@ async def confirm_software_recommendation(request_data: RecommendationConfirmReq
                 pending_sub_questions=pending_sub_questions,
                 retrieval_records=eval_payload["retrieval_records"],
                 retrieved_doc_ids=eval_payload["retrieved_doc_ids"],
+                retrieved_images=eval_payload["retrieved_images"],
                 selected_skill=skill_planner_payload["selected_skill"],
                 plan_steps=skill_planner_payload["plan_steps"],
                 hitl=eval_payload["hitl"]
@@ -821,6 +903,7 @@ async def confirm_software_recommendation(request_data: RecommendationConfirmReq
             awaiting_human_confirmation=False,
             retrieval_records=eval_payload["retrieval_records"],
             retrieved_doc_ids=eval_payload["retrieved_doc_ids"],
+            retrieved_images=eval_payload["retrieved_images"],
             selected_skill=skill_planner_payload["selected_skill"],
             plan_steps=skill_planner_payload["plan_steps"],
             hitl=eval_payload["hitl"],

@@ -51,7 +51,8 @@ htmlcov/
 **/chroma_db/
 fastapi_demo/chroma_db_parent_child_v2/
 **/.runtime/
-fastapi_demo/ingest_docs/
+fastapi_demo/ingest_docs/*
+!fastapi_demo/ingest_docs/.gitkeep
 fastapi_demo/evaluation/previews/
 fastapi_demo/evaluation/reports/
 steps/step1.md

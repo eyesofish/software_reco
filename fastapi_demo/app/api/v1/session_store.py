@@ -3,7 +3,7 @@ import logging
 import time
 from pathlib import Path
 from threading import RLock
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 from software_recommend_system.config import settings as agent_settings
 from software_recommend_system.memory_retriever import build_memory_context
@@ -47,9 +47,9 @@ def _safe_build_memory_context(
     *,
     session_id: str,
     query: str,
-    messages: List[Dict[str, str]],
-    facts: Dict[str, str],
-) -> List[Dict[str, Any]]:
+    messages: list[dict[str, str]],
+    facts: dict[str, str],
+) -> list[dict[str, Any]]:
     if not _layered_memory_enabled():
         return []
     try:
@@ -82,8 +82,8 @@ def _safe_write_turn_memories(
     session_id: str,
     request_query: str,
     final_answer: str,
-    selected_skill: Optional[str],
-    retrieved_doc_ids: List[str],
+    selected_skill: str | None,
+    retrieved_doc_ids: list[str],
 ) -> None:
     if not _memory_writeback_enabled():
         return
@@ -134,10 +134,10 @@ def _safe_write_turn_memories(
         logger.exception("MEMORY_TURN_WRITEBACK_FAILED session_id=%s", session_id)
 
 
-def _normalize_session_facts(raw: Any) -> Dict[str, str]:
+def _normalize_session_facts(raw: Any) -> dict[str, str]:
     if not isinstance(raw, dict):
         return {}
-    normalized: Dict[str, str] = {}
+    normalized: dict[str, str] = {}
     for key, value in raw.items():
         fact_key = str(key or "").strip()
         fact_value = str(value or "").strip()
@@ -146,11 +146,11 @@ def _normalize_session_facts(raw: Any) -> Dict[str, str]:
     return normalized
 
 
-def _normalize_session_messages(raw: Any) -> List[Dict[str, str]]:
+def _normalize_session_messages(raw: Any) -> list[dict[str, str]]:
     if not isinstance(raw, list):
         return []
 
-    normalized: List[Dict[str, str]] = []
+    normalized: list[dict[str, str]] = []
     for item in raw:
         if not isinstance(item, dict):
             continue
@@ -169,7 +169,7 @@ def _normalize_updated_at(raw: Any) -> float:
         return time.time()
 
 
-def _normalize_session_state(raw: Any) -> Dict[str, Any]:
+def _normalize_session_state(raw: Any) -> dict[str, Any]:
     state = raw if isinstance(raw, dict) else {}
     return {
         "facts": _normalize_session_facts(state.get("facts", {})),
@@ -178,7 +178,7 @@ def _normalize_session_state(raw: Any) -> Dict[str, Any]:
     }
 
 
-def _normalize_candidate_name(raw: str) -> Optional[str]:
+def _normalize_candidate_name(raw: str) -> str | None:
     candidate = (raw or "").strip()
     candidate = candidate.strip(" \t\r\n,.!?;:，。！？；：" "\"\'()[]（）【】")
     if not candidate:
@@ -200,7 +200,7 @@ def _persist_session_state_store_locked() -> None:
     )
 
 
-def _load_session_state_store() -> Dict[str, Dict[str, Any]]:
+def _load_session_state_store() -> dict[str, dict[str, Any]]:
     if not SESSION_STATE_FILE.exists():
         return {}
 
@@ -215,7 +215,7 @@ def _load_session_state_store() -> Dict[str, Dict[str, Any]]:
         logger.warning("invalid session state payload, expected dict at root")
         return {}
 
-    normalized: Dict[str, Dict[str, Any]] = {}
+    normalized: dict[str, dict[str, Any]] = {}
     for session_id, state in raw.items():
         sid = str(session_id or "").strip()
         if not sid:
@@ -225,10 +225,10 @@ def _load_session_state_store() -> Dict[str, Dict[str, Any]]:
     return normalized
 
 
-SESSION_STATE_STORE: Dict[str, Dict[str, Any]] = _load_session_state_store()
+SESSION_STATE_STORE: dict[str, dict[str, Any]] = _load_session_state_store()
 
 
-def _get_or_create_session_state(session_id: str) -> Dict[str, Any]:
+def _get_or_create_session_state(session_id: str) -> dict[str, Any]:
     sid = (session_id or "").strip()
     if not sid:
         raise ValueError("session_id is required")
@@ -246,10 +246,10 @@ def _get_or_create_session_state(session_id: str) -> Dict[str, Any]:
         return created
 
 
-def _merge_session_facts(session_id: str, facts: Dict[str, str]) -> Dict[str, Any]:
+def _merge_session_facts(session_id: str, facts: dict[str, str]) -> dict[str, Any]:
     with _SESSION_LOCK:
         state = _get_or_create_session_state(session_id)
-        current_facts: Dict[str, str] = state.setdefault("facts", {})
+        current_facts: dict[str, str] = state.setdefault("facts", {})
         for key, value in (facts or {}).items():
             fact_key = (key or "").strip()
             fact_value = (value or "").strip()
@@ -266,7 +266,7 @@ def _merge_session_facts(session_id: str, facts: Dict[str, str]) -> Dict[str, An
         return state
 
 
-def _append_session_messages(session_id: str, messages: List[Dict[str, str]]) -> Dict[str, Any]:
+def _append_session_messages(session_id: str, messages: list[dict[str, str]]) -> dict[str, Any]:
     updates = _normalize_session_messages(messages)
     if not updates:
         return _get_or_create_session_state(session_id)
@@ -281,7 +281,7 @@ def _append_session_messages(session_id: str, messages: List[Dict[str, str]]) ->
         return state
 
 
-def _append_session_message_once(session_id: str, role: str, content: str) -> Dict[str, Any]:
+def _append_session_message_once(session_id: str, role: str, content: str) -> dict[str, Any]:
     updates = _normalize_session_messages([{"role": role, "content": content}])
     if not updates:
         return _get_or_create_session_state(session_id)

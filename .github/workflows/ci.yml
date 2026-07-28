@@ -24,15 +24,15 @@ jobs:
           cache: pip
       - name: Install dependencies
         run: |
-          pip install -r requirements.txt
-          pip install -e ".[dev]" 2>/dev/null || pip install pytest pytest-asyncio ruff mypy
+          python -m pip install -r requirements.txt
+          python -m pip install -e ".[dev]"
       - name: Lint (ruff)
-        run: ruff check .
+        run: python -m ruff check .
       - name: Type check (mypy)
         continue-on-error: true
-        run: mypy --strict --ignore-missing-imports software_recommend_system app 2>&1 | head -100
+        run: python -m mypy --strict --ignore-missing-imports software_recommend_system app 2>&1 | head -100
       - name: Tests
-        run: pytest tests/ -v
+        run: python -m pytest tests/ -v
         env:
           OPENAI_API_KEY: dummy
           DASHSCOPE_API_KEY: dummy

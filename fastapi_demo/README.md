@@ -1,6 +1,8 @@
-# FastAPI Demo (Software Recommendation RAG)
+# FastAPI Demo (Multimodal Software Recommendation RAG)
 
-This directory contains a FastAPI wrapper around the `software_recommend_system` package.
+This directory contains the main multimodal RAG engine. Text questions and optional
+PNG/JPEG/WebP images are normalized into one searchable query, while knowledge-base
+images are captioned, embedded, and returned as cited visual evidence.
 
 ## Setup
 
@@ -20,6 +22,54 @@ Or:
 ```bash
 uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
 ```
+
+## Multimodal Configuration
+
+Configure an OpenAI-compatible vision endpoint:
+
+```env
+VISION_MODEL=qwen-vl-max
+VISION_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1
+VISION_API_KEY=
+MULTIMODAL_MAX_IMAGES=4
+MULTIMODAL_MAX_IMAGE_BYTES=5242880
+MULTIMODAL_MAX_TOTAL_IMAGE_BYTES=12582912
+```
+
+`VISION_API_KEY` falls back to `DASHSCOPE_API_KEY`, then `OPENAI_API_KEY`.
+The vision model must accept chat content containing `image_url` parts.
+
+The request contract is backward compatible:
+
+```json
+{
+  "query": "Explain the error in this screenshot",
+  "images": [
+    {
+      "name": "error.png",
+      "media_type": "image/png",
+      "data_url": "data:image/png;base64,..."
+    }
+  ]
+}
+```
+
+Image-only requests are supported. Raw image data is validated in memory and is not
+written to the FastAPI session store.
+
+## Image Knowledge Ingestion
+
+Put `.png`, `.jpg`, `.jpeg`, or `.webp` files under `INGEST_PATH` (default:
+`fastapi_demo/ingest_docs`). On startup, new files are incrementally processed:
+
+1. The vision model creates a retrieval-focused description with visible text and
+   technical relationships.
+2. The description enters the existing chunking and text-embedding pipeline.
+3. Chroma metadata retains the original asset path.
+4. Retrieval responses include `retrieved_images`, and `/api/v1/assets/...` serves
+   the cited file through the Spring proxy.
+
+Text, Markdown, and PDF ingestion continue to work unchanged.
 
 ## Parent-Child Chunking (Optional)
 
@@ -54,5 +104,5 @@ If you are migrating from an older local Chroma layout, it can be safer to use a
 ## Tests
 
 ```bash
-python -m pytest tests/test_parent_child_chunker.py tests/test_similarity_search_parent_child.py tests/test_vector_retry.py tests/test_retrieval_channels.py
+python -m pytest
 ```

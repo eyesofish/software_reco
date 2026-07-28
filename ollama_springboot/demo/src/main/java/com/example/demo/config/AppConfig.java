@@ -25,7 +25,10 @@ public class AppConfig {
                 .requestFactory(() -> new BufferingClientHttpRequestFactory(
                         new SimpleClientHttpRequestFactory()))
                 .additionalInterceptors((request, body, execution) -> {
-                    String bodyText = new String(body, StandardCharsets.UTF_8);
+                    String rawBody = new String(body, StandardCharsets.UTF_8);
+                    String bodyText = rawBody.contains("\"data_url\"")
+                            ? "<multimodal request body redacted; " + body.length + " bytes>"
+                            : rawBody;
                     logger.info(
                             "RestTemplate request method={}, uri={}, headers={}, body={}",
                             request.getMethod(),
@@ -40,6 +43,7 @@ public class AppConfig {
     @Bean
     public WebClient webClient(WebClient.Builder builder) {
         return builder
+                .codecs(configurer -> configurer.defaultCodecs().maxInMemorySize(16 * 1024 * 1024))
                 .filter((request, next) -> {
                     logger.info(
                             "WebClient request method={}, uri={}, headers={}",

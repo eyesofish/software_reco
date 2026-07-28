@@ -1,7 +1,5 @@
 ﻿from __future__ import annotations
 
-from typing import Dict, List, Optional
-
 from pydantic import BaseModel, Field
 
 
@@ -97,7 +95,7 @@ SKILLS: list[SkillSpec] = [
 ]
 
 
-def get_skill_map() -> Dict[str, SkillSpec]:
+def get_skill_map() -> dict[str, SkillSpec]:
     return {skill.skill_id: skill for skill in SKILLS}
 
 
@@ -109,13 +107,13 @@ def get_skill(skill_id: str, default_skill_id: str = DEFAULT_SKILL_ID) -> SkillS
     return skill_map.get(default_skill_id, SKILLS[-1])
 
 
-def list_skills(include_default: bool = True) -> List[SkillSpec]:
+def list_skills(include_default: bool = True) -> list[SkillSpec]:
     if include_default:
         return list(SKILLS)
     return [skill for skill in SKILLS if skill.skill_id != DEFAULT_SKILL_ID]
 
 
-def validate_skill_id(skill_id: str) -> Optional[str]:
+def validate_skill_id(skill_id: str) -> str | None:
     normalized = str(skill_id or "").strip()
     if not normalized:
         return None

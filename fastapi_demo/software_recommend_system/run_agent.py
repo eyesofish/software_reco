@@ -1,17 +1,18 @@
 import argparse
 import asyncio
-import time
 import logging
+import time
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import Any
+
 from dotenv import load_dotenv
 
 if __package__:
     from .rag_agent import create_rag_with_routing_agent  # 使用带路由的版本
     from .state import AgentState
-    from .utils import initialize_vector_store  # 使用新创建的utils模块
     from .tools import get_all_tools  # 引入新的工具系统
+    from .utils import initialize_vector_store  # 使用新创建的utils模块
 else:
     import os
     import sys
@@ -22,8 +23,8 @@ else:
 
     from software_recommend_system.rag_agent import create_rag_with_routing_agent
     from software_recommend_system.state import AgentState
-    from software_recommend_system.utils import initialize_vector_store
     from software_recommend_system.tools import get_all_tools
+    from software_recommend_system.utils import initialize_vector_store
 
 # 配置日志
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -104,11 +105,11 @@ def _update_state_from_result(state: AgentState, result: Any) -> AgentState:
 
 async def run_agent(agent, state: AgentState):
     # 加载环境变量
-    
+
     # 创建代理实例 - 使用带路由的版本
-    
+
     # 初始化状态
-    
+
     # 执行代理
     logger.info(f"Starting agent with query: {state.user_query}")
     logger.info(
@@ -123,21 +124,26 @@ async def run_agent(agent, state: AgentState):
         raise
     elapsed_ms = int((time.perf_counter() - started_at) * 1000)
     logger.info("AGENT_INVOKE_DONE mode=async_cli elapsed_ms=%d", elapsed_ms)
-    
+
     return result
 
 def main():
     args = parse_arguments()
-    
+
     if args.debug:
         logging.getLogger().setLevel(logging.DEBUG)
-    
+
     # 初始化向量数据库（如果需要）
     if args.init_db:
         logger.info("Initializing vector database with sample data...")
         sample_docs = [
             {
-                "content": "Redis is an in-memory data structure store, used as a distributed, in-memory key–value database, cache and message broker, with optional durability. Redis provides data structures such as strings, hashes, lists, sets, sorted sets with range queries, bitmaps, hyperloglogs, geospatial indexes, and streams.",
+                "content": (
+                    "Redis is an in-memory data structure store, used as a distributed, in-memory key–value "
+                    "database, cache and message broker, with optional durability. Redis provides data structures "
+                    "such as strings, hashes, lists, sets, sorted sets with range queries, bitmaps, hyperloglogs, "
+                    "geospatial indexes, and streams."
+                ),
                 "metadata": {
                     "source": "redis.io",
                     "published_date": "2023-01-15",
@@ -148,7 +154,11 @@ def main():
                 }
             },
             {
-                "content": "Memcached is a general-purpose distributed memory caching system. It is often used to speed up dynamic database-driven websites by caching data and objects in RAM to reduce the number of times an external data source must be read.",
+                "content": (
+                    "Memcached is a general-purpose distributed memory caching system. It is often used to speed "
+                    "up dynamic database-driven websites by caching data and objects in RAM to reduce the number "
+                    "of times an external data source must be read."
+                ),
                 "metadata": {
                     "source": "memcached.org",
                     "published_date": "2022-11-20",
@@ -159,7 +169,11 @@ def main():
                 }
             },
             {
-                "content": "Ehcache is an open-source, standards-based cache used to boost performance, offload your database and simplify scalability. Ehcache offers analysis and reporting, enabling you to monitor cache activity and performance.",
+                "content": (
+                    "Ehcache is an open-source, standards-based cache used to boost performance, offload your "
+                    "database and simplify scalability. Ehcache offers analysis and reporting, enabling you to "
+                    "monitor cache activity and performance."
+                ),
                 "metadata": {
                     "source": "ehcache.org",
                     "published_date": "2023-03-10",
@@ -170,7 +184,11 @@ def main():
                 }
             },
             {
-                "content": "Spring Boot is an open-source Java-based framework used to create stand-alone, production-grade Spring applications with minimum configurations. It simplifies the development process by providing default configurations.",
+                "content": (
+                    "Spring Boot is an open-source Java-based framework used to create stand-alone, "
+                    "production-grade Spring applications with minimum configurations. It simplifies the "
+                    "development process by providing default configurations."
+                ),
                 "metadata": {
                     "source": "spring.io",
                     "published_date": "2023-02-01",
@@ -181,7 +199,11 @@ def main():
                 }
             },
             {
-                "content": "Hibernate is an object-relational mapping tool for the Java programming language. It provides a framework for mapping an object-oriented domain model to a relational database and offers data query and retrieval facilities.",
+                "content": (
+                    "Hibernate is an object-relational mapping tool for the Java programming language. It provides "
+                    "a framework for mapping an object-oriented domain model to a relational database and offers "
+                    "data query and retrieval facilities."
+                ),
                 "metadata": {
                     "source": "hibernate.org",
                     "published_date": "2023-01-20",
@@ -192,14 +214,14 @@ def main():
                 }
             }
         ]
-        
+
         success = initialize_vector_store(sample_docs)
         if success:
             logger.info("Vector database initialized successfully")
         else:
             logger.error("Failed to initialize vector database")
             return
-    
+
     load_dotenv()
     agent = create_rag_with_routing_agent()
 

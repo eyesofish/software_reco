@@ -5,7 +5,7 @@ import logging
 import re
 import time
 from dataclasses import dataclass
-from typing import Any, Dict, Optional
+from typing import Any
 
 import openai
 
@@ -57,7 +57,7 @@ def _extract_text_content(raw_content: Any) -> str:
     return str(raw_content or "").strip()
 
 
-def _parse_json_object(raw_text: str) -> Dict[str, Any]:
+def _parse_json_object(raw_text: str) -> dict[str, Any]:
     text = str(raw_text or "").strip()
     if not text:
         raise ValueError("empty_router_response")
@@ -67,7 +67,7 @@ def _parse_json_object(raw_text: str) -> Dict[str, Any]:
     except json.JSONDecodeError:
         match = re.search(r"\{.*\}", text, flags=re.DOTALL)
         if not match:
-            raise ValueError("router_non_json_response")
+            raise ValueError("router_non_json_response") from None
         parsed = json.loads(match.group(0))
 
     if not isinstance(parsed, dict):
@@ -75,7 +75,7 @@ def _parse_json_object(raw_text: str) -> Dict[str, Any]:
     return parsed
 
 
-def _build_router_messages(user_query: str, context_hint: Optional[str]) -> list[Dict[str, str]]:
+def _build_router_messages(user_query: str, context_hint: str | None) -> list[dict[str, str]]:
     payload = {
         "user_query": str(user_query or ""),
         "context_hint": str(context_hint or ""),
@@ -99,7 +99,7 @@ def _build_router_messages(user_query: str, context_hint: Optional[str]) -> list
     ]
 
 
-def _build_router_prompt(user_query: str, context_hint: Optional[str]) -> str:
+def _build_router_prompt(user_query: str, context_hint: str | None) -> str:
     payload = {
         "user_query": str(user_query or ""),
         "context_hint": str(context_hint or ""),
@@ -165,11 +165,12 @@ def _close_router_circuit() -> None:
 def _is_transient_connection_error(exc: Exception) -> bool:
     error_name = type(exc).__name__.lower()
     message = str(exc or "").lower()
-    if "timeout" in error_name or "connection" in error_name:
-        return True
-    if "connection error" in message or "timed out" in message:
-        return True
-    return False
+    return (
+        "timeout" in error_name
+        or "connection" in error_name
+        or "connection error" in message
+        or "timed out" in message
+    )
 
 
 @dataclass(frozen=True)
@@ -179,7 +180,7 @@ class RoutingDecision:
     reason: str
     fallback_used: bool
 
-    def as_dict(self) -> Dict[str, Any]:
+    def as_dict(self) -> dict[str, Any]:
         return {
             "mode": self.mode,
             "confidence": self.confidence,
@@ -191,8 +192,8 @@ class RoutingDecision:
 def route_query(
     user_query: str,
     *,
-    context_hint: Optional[str] = None,
-    client: Optional[Any] = None,
+    context_hint: str | None = None,
+    client: Any | None = None,
 ) -> RoutingDecision:
     fallback_mode = _normalize_mode(settings.ROUTER_FALLBACK_MODE, default="rag")
     threshold = _clamp_confidence(settings.ROUTER_CONFIDENCE_THRESHOLD)

@@ -1,16 +1,16 @@
-﻿from typing import Any, Dict, List
-import logging
+﻿import logging
+from typing import Any
 
 from .config import settings
-from .ingestion.loader import normalize_documents
 from .ingestion.chunker import chunk_documents, chunk_documents_parent_child
 from .ingestion.embedder import embed_texts
 from .ingestion.indexer import index_embeddings, index_parent_documents
+from .ingestion.loader import normalize_documents
 
 logger = logging.getLogger(__name__)
 
 
-def initialize_vector_store(documents: List[Dict[str, Any]]) -> bool:
+def initialize_vector_store(documents: list[dict[str, Any]]) -> bool:
     """Ingest raw docs into Chroma through loader -> chunker -> embedder -> indexer."""
     try:
         normalized_documents = normalize_documents(documents)

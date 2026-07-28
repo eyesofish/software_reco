@@ -1,6 +1,5 @@
 import json
 import logging
-from typing import Optional
 from uuid import uuid4
 
 import httpx
@@ -31,9 +30,9 @@ LLM_URL = f"{LLM_BASE_URL}/chat/completions"
 
 
 class StreamRequest(BaseModel):
-    session_id: Optional[str] = Field(default=None, max_length=128)
-    messages: Optional[list[dict[str, str]]] = Field(default=None, max_length=100)
-    query: Optional[str] = Field(default=None, max_length=5000)
+    session_id: str | None = Field(default=None, max_length=128)
+    messages: list[dict[str, str]] | None = Field(default=None, max_length=100)
+    query: str | None = Field(default=None, max_length=5000)
 
 
 class ErrorDetail(BaseModel):
@@ -61,31 +60,33 @@ async def _stream_llm_sse(session_id: str, messages: list[dict[str, str]]):
         "messages": messages,
     }
     try:
-        async with httpx.AsyncClient(timeout=httpx.Timeout(60.0, connect=10.0)) as client:
-            async with client.stream("POST", LLM_URL, json=request_payload) as response:
-                response.raise_for_status()
-                async for line in response.aiter_lines():
-                    if not line or not line.startswith("data:"):
-                        continue
-                    data = line[len("data:"):].strip()
-                    if not data or data == "[DONE]":
-                        break
-                    try:
-                        chunk = json.loads(data)
-                    except json.JSONDecodeError:
-                        continue
-                    try:
-                        delta = chunk["choices"][0]["delta"]["content"]
-                    except (KeyError, IndexError, TypeError):
-                        continue
-                    if not isinstance(delta, str) or not delta:
-                        continue
-                    accumulated_parts.append(delta)
-                    yield _sse("token", {
-                        "type": "token",
-                        "session_id": session_id,
-                        "delta": delta,
-                    })
+        async with (
+            httpx.AsyncClient(timeout=httpx.Timeout(60.0, connect=10.0)) as client,
+            client.stream("POST", LLM_URL, json=request_payload) as response,
+        ):
+            response.raise_for_status()
+            async for line in response.aiter_lines():
+                if not line or not line.startswith("data:"):
+                    continue
+                data = line[len("data:"):].strip()
+                if not data or data == "[DONE]":
+                    break
+                try:
+                    chunk = json.loads(data)
+                except json.JSONDecodeError:
+                    continue
+                try:
+                    delta = chunk["choices"][0]["delta"]["content"]
+                except (KeyError, IndexError, TypeError):
+                    continue
+                if not isinstance(delta, str) or not delta:
+                    continue
+                accumulated_parts.append(delta)
+                yield _sse("token", {
+                    "type": "token",
+                    "session_id": session_id,
+                    "delta": delta,
+                })
     except httpx.HTTPStatusError as exc:
         logger.error("llm upstream error: %s %s", exc.response.status_code, exc.response.text[:500])
         yield _sse("error", {
@@ -93,7 +94,7 @@ async def _stream_llm_sse(session_id: str, messages: list[dict[str, str]]):
             "session_id": session_id,
             "message": f"LLM upstream returned {exc.response.status_code}",
         })
-    except Exception as exc:
+    except Exception:
         logger.exception("llm streaming failed: session_id=%s", session_id)
         yield _sse("error", {
             "type": "error",

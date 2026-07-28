@@ -62,6 +62,7 @@ def _build_success_response(
         awaiting_human_confirmation=False,
         retrieval_records=eval_payload["retrieval_records"],
         retrieved_doc_ids=eval_payload["retrieved_doc_ids"],
+        retrieved_images=eval_payload["retrieved_images"],
         selected_skill=skill_planner_payload["selected_skill"],
         plan_steps=skill_planner_payload["plan_steps"],
         hitl=eval_payload["hitl"],
@@ -128,6 +129,7 @@ async def execute_recommend_turn(
                 pending_sub_questions=pending_sub_questions,
                 retrieval_records=eval_payload["retrieval_records"],
                 retrieved_doc_ids=eval_payload["retrieved_doc_ids"],
+                retrieved_images=eval_payload["retrieved_images"],
                 selected_skill=skill_planner_payload["selected_skill"],
                 plan_steps=skill_planner_payload["plan_steps"],
                 hitl=eval_payload["hitl"]

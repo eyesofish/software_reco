@@ -1,7 +1,9 @@
 import logging
 import os
 import time
-from typing import Any, Callable, Dict, List
+from collections.abc import Callable
+from typing import Any
+from urllib.parse import quote
 
 import openai
 from langgraph.config import get_stream_writer
@@ -52,7 +54,7 @@ def _llm_invoke_failed(
     started_at: float | None = None,
     with_stack: bool = True,
 ) -> None:
-    fields: Dict[str, Any] = {
+    fields: dict[str, Any] = {
         "component": "llm",
         "trace_id": trace_id,
         "scene": scene,
@@ -87,7 +89,7 @@ def _truncate_text(text: str, max_chars: int) -> str:
     return value[-max_chars:]
 
 
-def _rough_messages_tokens(messages: List[Dict[str, str]]) -> int:
+def _rough_messages_tokens(messages: list[dict[str, str]]) -> int:
     total = 0
     for item in messages:
         total += 6
@@ -95,13 +97,13 @@ def _rough_messages_tokens(messages: List[Dict[str, str]]) -> int:
     return total + 2
 
 
-def _prepare_messages_for_small_context(messages: List[Dict[str, str]]) -> List[Dict[str, str]]:
+def _prepare_messages_for_small_context(messages: list[dict[str, str]]) -> list[dict[str, str]]:
     max_messages = max(2, int(os.getenv("CHAT_MAX_MESSAGES", "12")))
     max_input_tokens = max(256, int(os.getenv("CHAT_MAX_INPUT_TOKENS", "1700")))
     max_system_chars = max(256, int(os.getenv("CHAT_MAX_SYSTEM_CHARS", "1200")))
     max_message_chars = max(128, int(os.getenv("CHAT_MAX_MESSAGE_CHARS", "800")))
 
-    normalized: List[Dict[str, str]] = []
+    normalized: list[dict[str, str]] = []
     for raw in messages:
         role = str(_get_field(raw, "role", "user") or "user").strip() or "user"
         content = str(_get_field(raw, "content", "") or "")
@@ -130,8 +132,8 @@ def _prepare_messages_for_small_context(messages: List[Dict[str, str]]) -> List[
     return normalized
 
 
-def _merge_doc_ids(existing: List[str], extra: List[str]) -> List[str]:
-    merged: List[str] = []
+def _merge_doc_ids(existing: list[str], extra: list[str]) -> list[str]:
+    merged: list[str] = []
     seen = set()
     for value in list(existing or []) + list(extra or []):
         doc_id = str(value or "").strip()
@@ -139,6 +141,75 @@ def _merge_doc_ids(existing: List[str], extra: List[str]) -> List[str]:
             continue
         seen.add(doc_id)
         merged.append(doc_id)
+    return merged
+
+
+def _build_retrieved_images(docs: list[Document]) -> list[dict[str, Any]]:
+    images: list[dict[str, Any]] = []
+    seen = set()
+    for index, doc in enumerate(docs, start=1):
+        metadata = _get_field(doc, "metadata", {}) or {}
+        modality = str(_get_field(metadata, "modality", "") or "").strip().lower()
+        asset_path = str(_get_field(metadata, "asset_path", "") or "").strip()
+        if modality != "image" and not asset_path:
+            continue
+
+        doc_id = _extract_doc_id(doc, fallback_prefix="image", index=index)
+        filename = str(
+            _get_field(metadata, "filename", "")
+            or (asset_path.rsplit("/", 1)[-1] if asset_path else doc_id)
+        ).strip()
+        media_type = str(_get_field(metadata, "media_type", "") or "").strip()
+        url = str(
+            _get_field(metadata, "asset_url", "")
+            or _get_field(metadata, "url", "")
+            or ""
+        ).strip()
+        if not url and asset_path:
+            url = f"/api/v1/assets/{quote(asset_path, safe='/')}"
+        if not url:
+            continue
+
+        dedup_key = (doc_id, url)
+        if dedup_key in seen:
+            continue
+        seen.add(dedup_key)
+        caption = str(_get_field(doc, "content", "") or "").strip()
+        if len(caption) > 600:
+            caption = caption[:600] + "..."
+        try:
+            score = float(_get_field(doc, "score", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            score = 0.0
+        images.append(
+            {
+                "doc_id": doc_id,
+                "filename": filename,
+                "media_type": media_type,
+                "url": url,
+                "caption": caption,
+                "score": score,
+            }
+        )
+    return images
+
+
+def _merge_retrieved_images(
+    existing: list[dict[str, Any]],
+    extra: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    merged: list[dict[str, Any]] = []
+    seen = set()
+    for item in list(existing or []) + list(extra or []):
+        if not isinstance(item, dict):
+            continue
+        doc_id = str(item.get("doc_id", "") or "").strip()
+        url = str(item.get("url", "") or "").strip()
+        key = (doc_id, url)
+        if not url or key in seen:
+            continue
+        seen.add(key)
+        merged.append(dict(item))
     return merged
 
 
@@ -157,11 +228,11 @@ def _build_retrieval_record(
     *,
     subquery_id: str,
     subquery: str,
-    docs: List[Document],
-) -> Dict[str, Any]:
-    retrieved_doc_ids: List[str] = []
-    retrieved_contexts: List[str] = []
-    channel_counts: Dict[str, int] = {}
+    docs: list[Document],
+) -> dict[str, Any]:
+    retrieved_doc_ids: list[str] = []
+    retrieved_contexts: list[str] = []
+    channel_counts: dict[str, int] = {}
     for index, doc in enumerate(docs, start=1):
         doc_id = _extract_doc_id(doc, fallback_prefix=subquery_id, index=index)
         if doc_id not in retrieved_doc_ids:
@@ -184,6 +255,7 @@ def _build_retrieval_record(
         "subquery_id": subquery_id,
         "subquery": str(subquery or ""),
         "retrieved_doc_ids": retrieved_doc_ids,
+        "retrieved_images": _build_retrieved_images(docs),
         "retrieved_contexts": retrieved_contexts[:8],
         "channel_counts": channel_counts,
         "channels_used": sorted(channel_counts.keys()),
@@ -196,7 +268,7 @@ def _get_openai_client() -> openai.OpenAI:
     return wrap_openai(openai.OpenAI(api_key=api_key, base_url=base_url))
 
 
-def _safe_get_stream_writer() -> Callable[[Dict[str, Any]], None] | None:
+def _safe_get_stream_writer() -> Callable[[dict[str, Any]], None] | None:
     try:
         writer = get_stream_writer()
     except Exception:
@@ -218,7 +290,7 @@ def _extract_stream_delta_text(chunk: Any) -> str:
     if isinstance(content, str):
         return content
     if isinstance(content, list):
-        parts: List[str] = []
+        parts: list[str] = []
         for item in content:
             text = _get_field(item, "text", "") if isinstance(item, dict) else ""
             if not text and isinstance(item, dict):
@@ -233,7 +305,7 @@ def _stream_chat_completion_text(
     *,
     scene: str,
     model: str,
-    messages: List[Dict[str, str]],
+    messages: list[dict[str, str]],
     temperature: float,
     stream_node: str,
     max_tokens: int | None = None,
@@ -245,7 +317,7 @@ def _stream_chat_completion_text(
         model=model,
         request_hint=f"messages={len(messages)}",
     )
-    kwargs: Dict[str, Any] = {
+    kwargs: dict[str, Any] = {
         "model": model,
         "messages": messages,
         "temperature": temperature,
@@ -256,7 +328,7 @@ def _stream_chat_completion_text(
 
     try:
         stream = client.chat.completions.create(**kwargs)
-        parts: List[str] = []
+        parts: list[str] = []
         for chunk in stream:
             delta = _extract_stream_delta_text(chunk)
             if not delta:

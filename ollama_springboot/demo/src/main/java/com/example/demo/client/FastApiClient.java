@@ -2,6 +2,7 @@ package com.example.demo.client;
 
 import com.example.demo.dto.RecommendRequest;
 import com.example.demo.dto.RecommendResponse;
+import com.example.demo.util.MultimodalSupport;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -65,8 +66,8 @@ public class FastApiClient {
         HttpEntity<Map<String, Object>> entity = new HttpEntity<>(payload, headers);
 
         logger.info(
-                "FastAPI request url={}, payload={}, entity={}",
-                recommendUrl, payload, entity);
+                "FastAPI request url={}, payload={}",
+                recommendUrl, MultimodalSupport.redactImagePayload(payload));
 
         ResponseEntity<RecommendResponse> response = restTemplate.exchange(
                 recommendUrl,
@@ -83,7 +84,11 @@ public class FastApiClient {
     ) {
         Map<String, Object> payload = buildRecommendPayload(request);
 
-        logger.info("FastAPI stream request url={}, payload={}", recommendStreamUrl, payload);
+        logger.info(
+                "FastAPI stream request url={}, payload={}",
+                recommendStreamUrl,
+                MultimodalSupport.redactImagePayload(payload)
+        );
 
         Flux<ServerSentEvent<String>> events = webClient
                 .post()
@@ -209,6 +214,9 @@ public class FastApiClient {
         payload.put("max_iterations", request.getMaxIterations());
         if (request.getSessionId() != null && !request.getSessionId().isBlank()) {
             payload.put("session_id", request.getSessionId());
+        }
+        if (MultimodalSupport.hasAttachments(request.getImages())) {
+            payload.put("images", request.getImages());
         }
         return payload;
     }

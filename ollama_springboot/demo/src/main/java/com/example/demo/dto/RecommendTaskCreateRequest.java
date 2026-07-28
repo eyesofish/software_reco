@@ -2,6 +2,8 @@ package com.example.demo.dto;
 
 import com.fasterxml.jackson.annotation.JsonProperty;
 
+import java.util.List;
+
 public class RecommendTaskCreateRequest {
     private String query;
     @JsonProperty("conversation_id")
@@ -11,6 +13,7 @@ public class RecommendTaskCreateRequest {
     private Integer timeout;
     @JsonProperty("max_iterations")
     private Integer maxIterations;
+    private List<ImageAttachment> images;
 
     public String getQuery() {
         return query;
@@ -50,5 +53,13 @@ public class RecommendTaskCreateRequest {
 
     public void setMaxIterations(Integer maxIterations) {
         this.maxIterations = maxIterations;
+    }
+
+    public List<ImageAttachment> getImages() {
+        return images;
+    }
+
+    public void setImages(List<ImageAttachment> images) {
+        this.images = images;
     }
 }

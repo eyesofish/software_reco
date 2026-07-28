@@ -1,8 +1,8 @@
 import unittest
 from unittest.mock import Mock
 
-from software_recommend_system.config import settings
 from software_recommend_system import router as router_module
+from software_recommend_system.config import settings
 from software_recommend_system.router import route_query
 
 

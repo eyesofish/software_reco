@@ -1,4 +1,3 @@
-from .loader import normalize_documents
 from .chunker import chunk_documents, chunk_documents_parent_child
 from .embedder import embed_texts
 from .indexer import (
@@ -8,6 +7,7 @@ from .indexer import (
     index_embeddings,
     index_parent_documents,
 )
+from .loader import normalize_documents
 
 __all__ = [
     "normalize_documents",

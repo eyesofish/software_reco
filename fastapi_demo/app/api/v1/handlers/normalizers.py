@@ -88,6 +88,42 @@ def _normalize_retrieved_doc_ids(raw: Any) -> list[str]:
     return normalized
 
 
+def _normalize_retrieved_images(raw: Any) -> list[dict[str, Any]]:
+    if not isinstance(raw, list):
+        return []
+    normalized: list[dict[str, Any]] = []
+    seen = set()
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        doc_id = str(item.get("doc_id", "") or "").strip()
+        filename = str(item.get("filename", "") or doc_id).strip()
+        media_type = str(item.get("media_type", "") or "").strip().lower()
+        url = str(item.get("url", "") or "").strip()
+        caption = str(item.get("caption", "") or "").strip()
+        if not doc_id or not url:
+            continue
+        key = (doc_id, url)
+        if key in seen:
+            continue
+        seen.add(key)
+        try:
+            score = float(item.get("score", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            score = 0.0
+        normalized.append(
+            {
+                "doc_id": doc_id,
+                "filename": filename,
+                "media_type": media_type,
+                "url": url,
+                "caption": caption,
+                "score": score,
+            }
+        )
+    return normalized
+
+
 def _normalize_retrieval_records(raw: Any) -> list[dict[str, Any]]:
     if not isinstance(raw, list):
         return []
@@ -98,6 +134,7 @@ def _normalize_retrieval_records(raw: Any) -> list[dict[str, Any]]:
         subquery_id = str(item.get("subquery_id", "")).strip()
         subquery = str(item.get("subquery", "")).strip()
         retrieved_doc_ids = _normalize_retrieved_doc_ids(item.get("retrieved_doc_ids", []))
+        retrieved_images = _normalize_retrieved_images(item.get("retrieved_images", []))
         retrieved_contexts_raw = item.get("retrieved_contexts", [])
         retrieved_contexts = []
         if isinstance(retrieved_contexts_raw, list):
@@ -127,6 +164,7 @@ def _normalize_retrieval_records(raw: Any) -> list[dict[str, Any]]:
                 "subquery_id": subquery_id,
                 "subquery": subquery,
                 "retrieved_doc_ids": retrieved_doc_ids,
+                "retrieved_images": retrieved_images,
                 "retrieved_contexts": retrieved_contexts,
                 "channel_counts": channel_counts,
                 "channels_used": channels_used,
@@ -270,6 +308,7 @@ def _extract_eval_payload(
 ) -> dict[str, Any]:
     retrieval_records = _normalize_retrieval_records(_get_value(result, "retrieval_records", []))
     retrieved_doc_ids = _normalize_retrieved_doc_ids(_get_value(result, "retrieved_doc_ids", []))
+    retrieved_images = _normalize_retrieved_images(_get_value(result, "retrieved_images", []))
 
     hitl = _normalize_hitl_payload(_get_value(result, "hitl", None))
     if hitl is None:
@@ -278,6 +317,7 @@ def _extract_eval_payload(
     return {
         "retrieval_records": retrieval_records,
         "retrieved_doc_ids": retrieved_doc_ids,
+        "retrieved_images": retrieved_images,
         "hitl": hitl,
     }
 

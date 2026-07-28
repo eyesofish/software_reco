@@ -4,10 +4,12 @@ import com.example.demo.client.FastApiClient;
 import com.example.demo.conversation.service.RecommendTaskStateService;
 import com.example.demo.dto.ConversationCreateRequest;
 import com.example.demo.dto.ConversationCreateResponse;
+import com.example.demo.dto.ImageAttachment;
 import com.example.demo.dto.RecommendRequest;
 import com.example.demo.dto.RecommendTaskConfirmRequest;
 import com.example.demo.dto.RecommendTaskCreateRequest;
 import com.example.demo.dto.RecommendTaskStateResponse;
+import com.example.demo.util.MultimodalSupport;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.http.HttpStatus;
@@ -62,18 +64,24 @@ public class RecommendTaskController {
 
     @PostMapping("/recommend")
     public RecommendTaskStateResponse recommend(@RequestBody RecommendTaskCreateRequest request) {
-        if (request == null || request.getQuery() == null || request.getQuery().isBlank()) {
-            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "query is required");
+        if (request == null) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "request is required");
+        }
+        List<ImageAttachment> images = normalizeImages(request.getImages());
+        String query = MultimodalSupport.queryOrDefault(request.getQuery(), images);
+        if (query.isBlank()) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "query or image is required");
         }
 
         String conversationId = firstNonBlank(request.getConversationId(), request.getSessionId());
 
         RecommendTaskStateService.RecommendTaskCreateOutcome outcome = recommendTaskStateService.createRecommendTask(
                 conversationId,
-                request.getQuery(),
+                query,
                 request.getTimeout(),
                 request.getMaxIterations(),
-                null
+                null,
+                images
         );
 
         RecommendTaskStateResponse response = outcome.taskState();
@@ -89,14 +97,19 @@ public class RecommendTaskController {
 
     @PostMapping(value = "/recommend/stream", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
     public SseEmitter recommendStream(@RequestBody RecommendTaskCreateRequest request) {
-        if (request == null || request.getQuery() == null || request.getQuery().isBlank()) {
-            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "query is required");
+        if (request == null) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "request is required");
+        }
+        List<ImageAttachment> images = normalizeImages(request.getImages());
+        String query = MultimodalSupport.queryOrDefault(request.getQuery(), images);
+        if (query.isBlank()) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "query or image is required");
         }
 
         String conversationId = firstNonBlank(request.getConversationId(), request.getSessionId());
         RecommendTaskStateResponse taskState = recommendTaskStateService.createStreamingTask(
                 conversationId,
-                request.getQuery(),
+                query,
                 request.getTimeout(),
                 request.getMaxIterations(),
                 null
@@ -117,10 +130,11 @@ public class RecommendTaskController {
             try {
                 fastApiClient.streamRecommend(
                         new RecommendRequest(
-                                request.getQuery(),
+                                query,
                                 request.getTimeout() == null ? 60 : request.getTimeout(),
                                 request.getMaxIterations() == null ? 3 : request.getMaxIterations(),
-                                resolvedConversationId
+                                resolvedConversationId,
+                                images
                         ),
                         event -> {
                             Map<String, Object> payload = normalizeStreamPayload(
@@ -362,6 +376,14 @@ public class RecommendTaskController {
                                         : source.get("retrievedDocIds")
                         )
                 );
+                normalized.put(
+                        "retrieved_images",
+                        MultimodalSupport.normalizeRetrievedImages(
+                                source.containsKey("retrieved_images")
+                                        ? source.get("retrieved_images")
+                                        : source.get("retrievedImages")
+                        )
+                );
             }
             case "error" -> normalized.put(
                     "message",
@@ -389,6 +411,14 @@ public class RecommendTaskController {
             case "meta", "node", "token", "state", "awaiting_confirmation", "final", "error" -> normalized;
             default -> "state";
         };
+    }
+
+    private List<ImageAttachment> normalizeImages(List<ImageAttachment> images) {
+        try {
+            return MultimodalSupport.normalizeAttachments(images);
+        } catch (IllegalArgumentException exc) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, exc.getMessage(), exc);
+        }
     }
 
     private List<String> normalizeStringList(Object raw) {

@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import re
-from typing import Dict, List
 
 from pydantic import BaseModel, Field
 
@@ -215,7 +214,7 @@ def build_execution_plan(
     selected_skill: str,
     user_query: str,
     normalized_query: str = "",
-    constraints: Dict[str, str] | None = None,
+    constraints: dict[str, str] | None = None,
 ) -> ExecutionPlan:
     skill = get_skill(selected_skill or DEFAULT_SKILL_ID)
     base_query = _query_base(user_query=user_query, normalized_query=normalized_query)

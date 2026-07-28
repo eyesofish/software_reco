@@ -2,20 +2,21 @@ import asyncio
 import json
 import logging
 import time
-from typing import Any, AsyncIterator, Dict, List, Optional, Tuple
+from collections.abc import AsyncIterator
+from typing import Any
 
 from software_recommend_system.observability import traceable
 
 logger = logging.getLogger(__name__)
 
 
-def _sse(event: str, payload: Optional[Dict[str, Any]] = None) -> str:
+def _sse(event: str, payload: dict[str, Any] | None = None) -> str:
     body = dict(payload or {})
     body.setdefault("type", event)
     return f"event: {event}\ndata: {json.dumps(body, ensure_ascii=False, default=str)}\n\n"
 
 
-def _to_stream_mode_chunk(item: Any) -> Tuple[str, Any]:
+def _to_stream_mode_chunk(item: Any) -> tuple[str, Any]:
     if (
         isinstance(item, tuple)
         and len(item) == 2
@@ -25,10 +26,10 @@ def _to_stream_mode_chunk(item: Any) -> Tuple[str, Any]:
     return "updates", item
 
 
-def _iter_update_nodes(chunk: Any) -> List[Tuple[str, Any]]:
+def _iter_update_nodes(chunk: Any) -> list[tuple[str, Any]]:
     if not isinstance(chunk, dict):
         return []
-    entries: List[Tuple[str, Any]] = []
+    entries: list[tuple[str, Any]] = []
     for node_name, payload in chunk.items():
         node = str(node_name or "").strip()
         if not node or node.startswith("__"):
@@ -37,7 +38,7 @@ def _iter_update_nodes(chunk: Any) -> List[Tuple[str, Any]]:
     return entries
 
 
-def _iter_custom_events(chunk: Any) -> List[Dict[str, Any]]:
+def _iter_custom_events(chunk: Any) -> list[dict[str, Any]]:
     if isinstance(chunk, dict):
         return [chunk]
     if isinstance(chunk, (list, tuple)):
@@ -45,7 +46,7 @@ def _iter_custom_events(chunk: Any) -> List[Dict[str, Any]]:
     return []
 
 
-def _merge_stream_updates(result: Dict[str, Any], chunk: Any) -> None:
+def _merge_stream_updates(result: dict[str, Any], chunk: Any) -> None:
     if not isinstance(chunk, dict):
         return
     for node_name, payload in chunk.items():
@@ -70,8 +71,8 @@ def _is_sync_sqlite_checkpointer(checkpointer_type: str, checkpointer_module: st
 async def _stream_agent_sync_fallback(
     agent: Any,
     graph_input: Any,
-    config: Optional[Dict[str, Any]] = None,
-    stream_mode: Optional[List[str]] = None,
+    config: dict[str, Any] | None = None,
+    stream_mode: list[str] | None = None,
 ) -> AsyncIterator[Any]:
     loop = asyncio.get_running_loop()
     queue: asyncio.Queue[Any] = asyncio.Queue()
@@ -109,8 +110,8 @@ async def run_agent_stream_async(
     agent: Any,
     graph_input: Any,
     *,
-    config: Optional[Dict[str, Any]] = None,
-    stream_mode: Optional[List[str]] = None,
+    config: dict[str, Any] | None = None,
+    stream_mode: list[str] | None = None,
 ) -> AsyncIterator[Any]:
     checkpointer = getattr(agent, "checkpointer", None)
     checkpointer_type = type(checkpointer).__name__
@@ -195,7 +196,7 @@ async def run_agent_stream_async(
 
 
 @traceable(name="api_agent_invoke")
-async def run_agent_async(agent, graph_input: Any, config: Optional[Dict[str, Any]] = None):
+async def run_agent_async(agent, graph_input: Any, config: dict[str, Any] | None = None):
     """Run the agent asynchronously."""
     checkpointer = getattr(agent, "checkpointer", None)
     checkpointer_type = type(checkpointer).__name__

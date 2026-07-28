@@ -11,7 +11,7 @@ import argparse
 import json
 import os
 import time
-from typing import Any, Dict, Optional, Set
+from typing import Any
 from uuid import uuid4
 
 import openai
@@ -23,12 +23,11 @@ from langsmith.schemas import Example, Run
 from software_recommend_system.observability import traceable, wrap_openai
 from software_recommend_system.state import AgentState
 
-
 load_dotenv()
 
 JUDGE_MODEL = os.getenv("EVAL_JUDGE_MODEL") or os.getenv("LLM_MODEL", "qwen2.5-7b-instruct")
 AGENT = None
-JUDGE_CLIENT: Optional[openai.OpenAI] = None
+JUDGE_CLIENT: openai.OpenAI | None = None
 
 
 def _get_value(obj: Any, key: str, default: Any = None) -> Any:
@@ -37,7 +36,7 @@ def _get_value(obj: Any, key: str, default: Any = None) -> Any:
     return getattr(obj, key, default)
 
 
-def _as_set(value: Any) -> Set[str]:
+def _as_set(value: Any) -> set[str]:
     if not value:
         return set()
     if isinstance(value, (list, tuple, set)):
@@ -45,7 +44,7 @@ def _as_set(value: Any) -> Set[str]:
     return {str(value)}
 
 
-def _judge_client() -> Optional[openai.OpenAI]:
+def _judge_client() -> openai.OpenAI | None:
     global JUDGE_CLIENT
     if JUDGE_CLIENT is not None:
         return JUDGE_CLIENT
@@ -68,7 +67,7 @@ def _agent():
     return AGENT
 
 
-def _run_pipeline(question: str, hitl_policy: str, oracle_edits: Optional[list[str]] = None) -> Dict[str, Any]:
+def _run_pipeline(question: str, hitl_policy: str, oracle_edits: list[str] | None = None) -> dict[str, Any]:
     session_id = f"eval-{uuid4().hex}"
     state = AgentState(
         user_query=question,
@@ -92,13 +91,13 @@ def _run_pipeline(question: str, hitl_policy: str, oracle_edits: Optional[list[s
 
 
 @traceable(name="eval_target_auto_confirm")
-def run_pipeline_auto_confirm(inputs: Dict[str, Any]) -> Dict[str, Any]:
+def run_pipeline_auto_confirm(inputs: dict[str, Any]) -> dict[str, Any]:
     question = str(inputs.get("question", "")).strip()
     return _run_pipeline(question=question, hitl_policy="auto_confirm")
 
 
 @traceable(name="eval_target_oracle_edit")
-def run_pipeline_oracle_edit(inputs: Dict[str, Any]) -> Dict[str, Any]:
+def run_pipeline_oracle_edit(inputs: dict[str, Any]) -> dict[str, Any]:
     question = str(inputs.get("question", "")).strip()
     oracle_edits_raw = inputs.get("oracle_edits", [])
     oracle_edits = [str(v).strip() for v in (oracle_edits_raw or []) if str(v).strip()]

@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import re
 import time
-from typing import Any, Iterable
+from collections.abc import Iterable
+from typing import Any
 
 from .config import settings
 from .memory_schema import MemoryItem
@@ -77,7 +78,7 @@ def _fact_items(session_id: str, facts: dict[str, str], limit: int) -> list[Memo
         return []
     now_ts = time.time()
     output: list[MemoryItem] = []
-    for index, (key, value) in enumerate(facts.items(), start=1):
+    for key, value in facts.items():
         fact_key = str(key or "").strip()
         fact_value = str(value or "").strip()
         if not fact_key or not fact_value:

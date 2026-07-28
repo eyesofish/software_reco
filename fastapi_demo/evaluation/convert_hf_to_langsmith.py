@@ -16,14 +16,14 @@ import json
 import os
 import re
 from collections import Counter
+from collections.abc import Iterable
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from typing import Any
 from uuid import NAMESPACE_URL, uuid5
 
 from datasets import Dataset, DatasetDict, load_dataset
 from dotenv import load_dotenv
 from langsmith import Client
-
 
 DEFAULT_HF_DATASET = "nvidia/TechQA-RAG-Eval"
 DEFAULT_HF_SPLIT = "test"
@@ -39,7 +39,7 @@ def _stringify(value: Any) -> str:
     return str(value).strip()
 
 
-def _first_present_key(keys: Iterable[str], candidates: Iterable[str]) -> Optional[str]:
+def _first_present_key(keys: Iterable[str], candidates: Iterable[str]) -> str | None:
     key_set = set(keys)
     for candidate in candidates:
         if candidate in key_set:
@@ -77,9 +77,9 @@ def _bucket_assignment(
     return int(digest, 16) % bucket_count
 
 
-def _dedupe_keep_order(values: Iterable[str]) -> List[str]:
+def _dedupe_keep_order(values: Iterable[str]) -> list[str]:
     seen = set()
-    result: List[str] = []
+    result: list[str] = []
     for value in values:
         if value not in seen:
             result.append(value)
@@ -87,11 +87,11 @@ def _dedupe_keep_order(values: Iterable[str]) -> List[str]:
     return result
 
 
-def _extract_gold_doc_ids(contexts: Any) -> List[str]:
+def _extract_gold_doc_ids(contexts: Any) -> list[str]:
     if not isinstance(contexts, list):
         return []
 
-    doc_ids: List[str] = []
+    doc_ids: list[str] = []
     for idx, ctx in enumerate(contexts):
         if isinstance(ctx, dict):
             explicit_id = _pick_first_non_empty(
@@ -156,7 +156,7 @@ def _resolve_split(dataset_dict: DatasetDict, requested_split: str) -> str:
 
 def _inspect_dataset(dataset_dict: DatasetDict) -> None:
     print(f"HF dataset splits: {list(dataset_dict.keys())}")
-    for split_name in dataset_dict.keys():
+    for split_name in dataset_dict:
         split_ds: Dataset = dataset_dict[split_name]
         print(f"\n[HF inspect] split={split_name} rows={len(split_ds)}")
         print(f"[HF inspect] fields={list(split_ds.features.keys())}")
@@ -167,7 +167,7 @@ def _inspect_dataset(dataset_dict: DatasetDict) -> None:
         )
 
 
-def _select_field_names(split_ds: Dataset) -> Dict[str, Optional[str]]:
+def _select_field_names(split_ds: Dataset) -> dict[str, str | None]:
     keys = list(split_ds.features.keys())
     return {
         "id": _first_present_key(keys, ["id", "example_id", "uid", "question_id"]),
@@ -189,10 +189,10 @@ def _convert_rows(
     split_name: str,
     source_dataset: str,
     langsmith_dataset: str,
-    max_samples: Optional[int],
+    max_samples: int | None,
     bucket_count: int = 0,
     bucket_index: int = -1,
-) -> Tuple[List[Dict[str, Any]], Counter, List[Dict[str, Any]], Counter]:
+) -> tuple[list[dict[str, Any]], Counter, list[dict[str, Any]], Counter]:
     field_names = _select_field_names(split_ds)
     print(f"[Mapping] field_names={field_names}")
 
@@ -204,8 +204,8 @@ def _convert_rows(
     use_buckets = bucket_count > 0 and bucket_index >= 0
     skip_reasons: Counter = Counter()
     selection_stats: Counter = Counter()
-    converted_examples: List[Dict[str, Any]] = []
-    preview_rows: List[Dict[str, Any]] = []
+    converted_examples: list[dict[str, Any]] = []
+    preview_rows: list[dict[str, Any]] = []
 
     if use_buckets:
         row_indices = range(len(split_ds))
@@ -284,7 +284,7 @@ def _convert_rows(
 
 
 def _write_preview_jsonl(
-    examples: List[Dict[str, Any]],
+    examples: list[dict[str, Any]],
     *,
     source_dataset: str,
     split_name: str,
@@ -334,10 +334,10 @@ def _ensure_langsmith_dataset(
 def _upload_examples(
     client: Client,
     dataset_name: str,
-    examples: List[Dict[str, Any]],
+    examples: list[dict[str, Any]],
     *,
     batch_size: int = DEFAULT_BATCH_SIZE,
-) -> Tuple[int, int, Counter]:
+) -> tuple[int, int, Counter]:
     failure_reasons: Counter = Counter()
     created_count = 0
 
@@ -361,7 +361,7 @@ def _upload_examples(
     return created_count, skipped_existing, failure_reasons
 
 
-def _print_preview_samples(preview_rows: List[Dict[str, Any]], limit: int = 3) -> None:
+def _print_preview_samples(preview_rows: list[dict[str, Any]], limit: int = 3) -> None:
     print("\n[Preview] First converted samples:")
     for idx, row in enumerate(preview_rows[:limit], start=1):
         compact = {

@@ -1,3 +1,7 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
 [project]
 name = "software-reco"
 version = "0.1.0"
@@ -18,6 +22,14 @@ dev = [
     "ruff>=0.11",
     "mypy>=1.15",
 ]
+
+[tool.setuptools]
+py-modules = ["main"]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["app*", "evaluation*", "software_recommend_system*"]
+namespaces = true
 
 [tool.ruff]
 target-version = "py311"

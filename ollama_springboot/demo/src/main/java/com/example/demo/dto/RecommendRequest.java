@@ -2,6 +2,8 @@ package com.example.demo.dto;
 
 import com.fasterxml.jackson.annotation.JsonProperty;
 
+import java.util.List;
+
 public class RecommendRequest {
     private String query;
     private Integer timeout;
@@ -9,15 +11,27 @@ public class RecommendRequest {
     private Integer maxIterations;
     @JsonProperty("session_id")
     private String sessionId;
+    private List<ImageAttachment> images;
 
     public RecommendRequest() {
     }
 
     public RecommendRequest(String query, Integer timeout, Integer maxIterations, String sessionId) {
+        this(query, timeout, maxIterations, sessionId, List.of());
+    }
+
+    public RecommendRequest(
+            String query,
+            Integer timeout,
+            Integer maxIterations,
+            String sessionId,
+            List<ImageAttachment> images
+    ) {
         this.query = query;
         this.timeout = timeout;
         this.maxIterations = maxIterations;
         this.sessionId = sessionId;
+        this.images = images;
     }
 
     public String getQuery() {
@@ -50,5 +64,13 @@ public class RecommendRequest {
 
     public void setSessionId(String sessionId) {
         this.sessionId = sessionId;
+    }
+
+    public List<ImageAttachment> getImages() {
+        return images;
+    }
+
+    public void setImages(List<ImageAttachment> images) {
+        this.images = images;
     }
 }

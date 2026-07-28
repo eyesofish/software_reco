@@ -2,10 +2,12 @@ import {
   ChatStreamEvent,
   ConversationCreateRequest,
   ConversationCreateResponse,
+  ImageAttachment,
   Message,
   RecommendTaskConfirmRequest,
   RecommendTaskCreateRequest,
-  RecommendTaskStateResponse
+  RecommendTaskStateResponse,
+  RetrievedImage
 } from '~/entities/messages'
 
 function trimUrl (value : string) {
@@ -121,7 +123,8 @@ export interface ChatStreamRequest {
   messages : ChatStreamRequestMessage[],
   stream ?: boolean,
   conversation_id ?: string,
-  session_id ?: string
+  session_id ?: string,
+  images ?: ImageAttachment[]
 }
 
 export interface ChatConfirmStreamRequest {
@@ -158,6 +161,30 @@ function normalizeStringArray (raw : unknown) : string[] {
   }
   const text = asTrimmedText(raw)
   return text ? [text] : []
+}
+
+function normalizeRetrievedImages (raw : unknown) : RetrievedImage[] {
+  if (!Array.isArray(raw)) return []
+
+  const normalized : RetrievedImage[] = []
+  for (const item of raw) {
+    if (!isRecord(item)) continue
+    const docId = asTrimmedText(item.doc_id ?? item.docId)
+    const url = asTrimmedText(item.url)
+    if (!docId || !url || (!url.startsWith('/') && !/^https?:\/\//i.test(url))) {
+      continue
+    }
+    const rawScore = Number(item.score)
+    normalized.push({
+      doc_id: docId,
+      filename: asTrimmedText(item.filename) || docId,
+      media_type: asTrimmedText(item.media_type ?? item.mediaType) || '',
+      url,
+      caption: asRawText(item.caption, ''),
+      score: Number.isFinite(rawScore) ? rawScore : 0
+    })
+  }
+  return normalized
 }
 
 const STREAM_EVENT_TYPES = [
@@ -248,7 +275,8 @@ function normalizeStreamEvent (
       session_id: sessionId,
       status: asTrimmedText(payload.status) || 'success',
       final_answer: asRawText(payload.final_answer ?? payload.finalResult ?? payload.message, ''),
-      retrieved_doc_ids: normalizeStringArray(payload.retrieved_doc_ids ?? payload.retrievedDocIds)
+      retrieved_doc_ids: normalizeStringArray(payload.retrieved_doc_ids ?? payload.retrievedDocIds),
+      retrieved_images: normalizeRetrievedImages(payload.retrieved_images ?? payload.retrievedImages)
     }
   }
 

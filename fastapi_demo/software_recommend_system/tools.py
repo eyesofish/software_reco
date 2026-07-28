@@ -1,8 +1,8 @@
-from typing import Any, Dict, List
 import json
 import logging
 import os
 import time
+from typing import Any
 
 import chromadb
 import openai
@@ -30,7 +30,7 @@ def _get_openai_client() -> openai.OpenAI:
     return wrap_openai(openai.OpenAI(api_key=api_key, base_url=base_url))
 
 
-def _metadata_obj(doc_metadata: Dict[str, Any]) -> Dict[str, Any]:
+def _metadata_obj(doc_metadata: dict[str, Any]) -> dict[str, Any]:
     return {
         "source": doc_metadata.get("source", ""),
         # Preserve the upstream source document id so recall eval can
@@ -44,12 +44,17 @@ def _metadata_obj(doc_metadata: Dict[str, Any]) -> Dict[str, Any]:
         "published_date": doc_metadata.get("published_date"),
         "updated_date": doc_metadata.get("updated_date"),
         "url": doc_metadata.get("url"),
+        "filename": doc_metadata.get("filename"),
+        "media_type": doc_metadata.get("media_type"),
+        "modality": doc_metadata.get("modality"),
+        "asset_path": doc_metadata.get("asset_path"),
+        "asset_url": doc_metadata.get("asset_url"),
         "tags": doc_metadata.get("tags", []),
         "source_ranking": doc_metadata.get("source_ranking", 0.0),
     }
 
 
-def _distance_score(distance_row: List[Any], index: int) -> float:
+def _distance_score(distance_row: list[Any], index: int) -> float:
     if index >= len(distance_row) or distance_row[index] is None:
         return 0.0
     try:
@@ -59,11 +64,11 @@ def _distance_score(distance_row: List[Any], index: int) -> float:
 
 
 def _build_child_documents(
-    doc_row: List[Any],
-    metadata_row: List[Any],
-    distance_row: List[Any],
-) -> List[Document]:
-    documents: List[Document] = []
+    doc_row: list[Any],
+    metadata_row: list[Any],
+    distance_row: list[Any],
+) -> list[Document]:
+    documents: list[Document] = []
     for index, doc_content in enumerate(doc_row):
         doc_metadata = metadata_row[index] if index < len(metadata_row) and metadata_row[index] else {}
         if not isinstance(doc_metadata, dict):
@@ -79,18 +84,18 @@ def _build_child_documents(
 
 
 def _build_parent_child_documents(
-    doc_row: List[Any],
-    metadata_row: List[Any],
-    distance_row: List[Any],
+    doc_row: list[Any],
+    metadata_row: list[Any],
+    distance_row: list[Any],
     k: int,
     trace_id: str,
     query_hint: str,
-) -> List[Document]:
+) -> list[Document]:
     limit = max(0, int(k))
     if limit <= 0:
         return []
 
-    child_hits: List[Dict[str, Any]] = []
+    child_hits: list[dict[str, Any]] = []
     for index, doc_content in enumerate(doc_row):
         doc_metadata = metadata_row[index] if index < len(metadata_row) and metadata_row[index] else {}
         if not isinstance(doc_metadata, dict):
@@ -104,8 +109,8 @@ def _build_parent_child_documents(
             }
         )
 
-    best_hit_by_parent: Dict[str, Dict[str, Any]] = {}
-    standalone_hits: List[Dict[str, Any]] = []
+    best_hit_by_parent: dict[str, dict[str, Any]] = {}
+    standalone_hits: list[dict[str, Any]] = []
     for hit in child_hits:
         parent_id = str(hit.get("parent_id", "")).strip()
         if not parent_id:
@@ -119,7 +124,7 @@ def _build_parent_child_documents(
     ranked_hits = list(best_hit_by_parent.values()) + standalone_hits
     ranked_hits.sort(key=lambda item: float(item["score"]))
 
-    unique_parent_ids: List[str] = []
+    unique_parent_ids: list[str] = []
     for hit in ranked_hits:
         parent_id = str(hit.get("parent_id", "")).strip()
         if not parent_id or parent_id in unique_parent_ids:
@@ -128,7 +133,7 @@ def _build_parent_child_documents(
         if len(unique_parent_ids) >= limit:
             break
 
-    parent_lookup: Dict[str, Dict[str, Any]] = {}
+    parent_lookup: dict[str, dict[str, Any]] = {}
     if unique_parent_ids:
         try:
             parent_lookup = get_parent_documents_by_ids(
@@ -159,7 +164,7 @@ def _build_parent_child_documents(
         resolved_parent_docs=len(parent_lookup),
     )
 
-    documents: List[Document] = []
+    documents: list[Document] = []
     for hit in ranked_hits:
         if len(documents) >= limit:
             break
@@ -206,7 +211,7 @@ def similarity_search(
     k: int = 5,
     trace_id: str | None = None,
     _retry_on_tenant_error: bool = True,
-) -> List[Document]:
+) -> list[Document]:
     """
     执行向量库相似性搜索，查找与查询最相关的文档
     """
@@ -411,7 +416,7 @@ else:
         )
 
 
-def _tavily_search(query: str, trace_id: str | None = None) -> List[Document]:
+def _tavily_search(query: str, trace_id: str | None = None) -> list[Document]:
     current_trace_id = trace_id or new_trace_id("search")
     query_hint = text_preview(query)
     if not search_tool:
@@ -488,8 +493,8 @@ def _tavily_search(query: str, trace_id: str | None = None) -> List[Document]:
     if not isinstance(raw_results, list):
         raw_results = [raw_results]
 
-    documents: List[Document] = []
-    top_urls: List[str] = []
+    documents: list[Document] = []
+    top_urls: list[str] = []
     for item in raw_results[:TAVILY_MAX_RESULTS]:
         if isinstance(item, dict):
             title = item.get("title") or ""
@@ -679,7 +684,7 @@ def draw_image(structured_params: str) -> str:
             trace_id=trace_id,
             **error_fields(exc),
         )
-        raise ValueError(f"输入不是有效的JSON格式: {structured_params}")
+        raise ValueError(f"输入不是有效的JSON格式: {structured_params}") from exc
     except Exception as exc:
         log_exception(
             logger,
@@ -704,7 +709,7 @@ def draw_image_tool(structured_params: str) -> str:
     return draw_image(structured_params)
 
 
-def unified_search(query: str, k: int | None = None) -> List[Document]:
+def unified_search(query: str, k: int | None = None) -> list[Document]:
     """Backward-compatible retrieval entrypoint."""
     from .retriever import retrieve
 
