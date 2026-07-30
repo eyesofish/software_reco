@@ -4,6 +4,7 @@ import math
 import re
 from collections.abc import Iterable
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import TimeoutError as FuturesTimeoutError
 from contextlib import suppress
 from datetime import UTC, datetime
 from threading import Lock
@@ -596,6 +597,17 @@ def _channel_counts(docs: list[Document]) -> dict[str, int]:
     return counts
 
 
+def _resolve_channel_timeout(override: float | None = None) -> float | None:
+    """Wall-clock budget for the whole parallel recall fan-out.
+
+    Returns ``None`` when the budget is disabled (non-positive), which restores
+    the previous unbounded behavior.
+    """
+    raw = override if override is not None else getattr(settings, "RECALL_CHANNEL_TIMEOUT_SECONDS", 0.0)
+    budget = _safe_float(raw, default=0.0)
+    return budget if budget > 0 else None
+
+
 @traceable(name="rerank_documents")
 def rerank_documents(
     query: str,
@@ -713,6 +725,7 @@ def retrieve(
     selected_skill: str | None = None,
     memory_context: list[dict[str, Any]] | None = None,
     query_image_candidates: list[Document] | None = None,
+    channel_timeout_seconds: float | None = None,
 ) -> list[Document]:
     """Run shared hybrid retrieval and return normalized documents."""
 
@@ -758,26 +771,66 @@ def retrieve(
         )
 
     channel_docs: dict[str, list[Document]] = {}
+    timed_out_channels: list[str] = []
     if recall_tasks:
-        with ThreadPoolExecutor(max_workers=min(5, len(recall_tasks))) as executor:
+        channel_timeout = _resolve_channel_timeout(channel_timeout_seconds)
+        # Deliberately not using `with`: ThreadPoolExecutor.__exit__ calls
+        # shutdown(wait=True), which would block on the slowest channel and
+        # negate the timeout. Straggler threads are abandoned instead so the
+        # request returns on budget; they finish and exit on their own.
+        executor = ThreadPoolExecutor(max_workers=min(5, len(recall_tasks)))
+        try:
             future_map = {executor.submit(run): channel for channel, run in recall_tasks}
-            for future in as_completed(future_map):
-                channel = future_map[future]
-                try:
-                    channel_docs[channel] = future.result() or []
-                except Exception as exc:
+            pending = set(future_map)
+            try:
+                for future in as_completed(future_map, timeout=channel_timeout):
+                    pending.discard(future)
+                    channel = future_map[future]
+                    try:
+                        channel_docs[channel] = future.result() or []
+                    except Exception as exc:
+                        log_event(
+                            logger,
+                            logging.WARNING,
+                            "search.retrieve.channel.fail",
+                            component="search",
+                            trace_id=trace_id,
+                            channel=channel,
+                            query=query_hint,
+                            error_type=type(exc).__name__,
+                            error=str(exc),
+                        )
+                        channel_docs[channel] = []
+            except FuturesTimeoutError:
+                for future in pending:
+                    channel = future_map[future]
+                    future.cancel()
+                    channel_docs.setdefault(channel, [])
+                    timed_out_channels.append(channel)
                     log_event(
                         logger,
                         logging.WARNING,
-                        "search.retrieve.channel.fail",
+                        "search.retrieve.channel.timeout",
                         component="search",
                         trace_id=trace_id,
                         channel=channel,
                         query=query_hint,
-                        error_type=type(exc).__name__,
-                        error=str(exc),
+                        timeout_seconds=channel_timeout,
                     )
-                    channel_docs[channel] = []
+        finally:
+            executor.shutdown(wait=False, cancel_futures=True)
+
+    if timed_out_channels:
+        log_event(
+            logger,
+            logging.WARNING,
+            "search.retrieve.degraded",
+            component="search",
+            trace_id=trace_id,
+            query=query_hint,
+            timed_out_channels=sorted(timed_out_channels),
+            completed_channels=sorted(set(channel_docs) - set(timed_out_channels)),
+        )
 
     merged_docs: list[Document] = []
     normalized_vector_docs = _normalize_documents(

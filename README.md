@@ -122,9 +122,21 @@ Important settings used by the FastAPI side include:
 - `CHROMA_DB_PATH`
 - `INGEST_PATH`
 - `ENABLE_PARENT_CHILD_CHUNKING`
+- `RECALL_CHANNEL_TIMEOUT_SECONDS`
 
 The default vision model is `qwen-vl-max`. `VISION_API_KEY` falls back to
 `DASHSCOPE_API_KEY`, then `OPENAI_API_KEY`.
+
+### Recall timeout
+
+The five recall channels (vector, image vector, keyword, web, memory) run in
+parallel and share one wall-clock budget, `RECALL_CHANNEL_TIMEOUT_SECONDS`
+(default `20`). Channels still running when it expires are abandoned, log
+`search.retrieve.channel.timeout`, and contribute no documents; the request
+continues with whatever the other channels returned and logs
+`search.retrieve.degraded`. This bounds tail latency so one slow dependency
+(typically the external web search) cannot stall the whole turn. Set it to `0`
+to disable the budget and wait for every channel.
 
 ### Optional native image-vector route
 

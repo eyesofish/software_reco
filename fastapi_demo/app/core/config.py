@@ -94,6 +94,9 @@ class Settings(BaseSettings):
     RECALL_KEYWORD_SCAN_LIMIT: int = 2000
     KEYWORD_RECALL_CIRCUIT_BREAKER_SECONDS: float = 30.0
     RECALL_MEMORY_TOP_K: int = 6
+    # Wall-clock budget for the parallel recall fan-out. Channels still running
+    # when it expires are abandoned and contribute no documents. 0 disables it.
+    RECALL_CHANNEL_TIMEOUT_SECONDS: float = 20.0
     MULTIMODAL_RRF_K: int = 60
     MULTIMODAL_TEXT_VECTOR_WEIGHT: float = 1.0
     MULTIMODAL_IMAGE_VECTOR_WEIGHT: float = 1.0
