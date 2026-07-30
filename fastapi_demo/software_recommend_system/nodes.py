@@ -429,6 +429,12 @@ def _is_drawing_request(text: str) -> bool:
     text_lower = text.lower()
     return any(keyword in text or keyword in text_lower for keyword in DRAWING_KEYWORDS)
 
+def _safe_float(value: Any, default: float = 0.0) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
 KNOWN_FACTS_MARKER = "[Known User Facts]"
 SPRING_CONTEXT_QUERY_PATTERN = re.compile(
     r"(?is)^\s*current user input:\s*(?P<input>.*?)(?:\n\s*known user facts:\s*|\n\s*recent conversation history:\s*|$)"
@@ -1741,35 +1747,70 @@ def candidate_generation_node(state: AgentState) -> dict[str, Any]:
     return {"candidates": normalized_candidates}
 
 def coverage_check_node(state: AgentState) -> dict[str, Any]:
-    """覆盖率检查节点"""
+    """Gate for the retrieval refinement loop.
+
+    A sub-question counts as covered only when its evidence carries documents
+    *and* clears ``QUALITY_THRESHOLD``. Counting merely non-empty recall would
+    let a single low-quality hit satisfy the gate and terminate the loop.
+
+    Refinement stops as soon as an iteration fails to improve coverage: the loop
+    re-runs retrieval over the same sub-questions, so a non-improving pass cannot
+    become productive later and would only burn latency and tokens.
+    """
     sub_questions = _get_field(state, "sub_questions", [])
     evidence = _get_field(state, "evidence", [])
-    candidates = _get_field(state, "candidates", [])
-    coverage_threshold = _get_field(state, "coverage_threshold", 0.8)
-    max_iterations = _get_field(state, "max_iterations", 3)
-    iteration_count = _get_field(state, "iteration_count", 0)
+    coverage_threshold = _safe_float(_get_field(state, "coverage_threshold", 0.8), 0.8)
+    max_iterations = int(_safe_float(_get_field(state, "max_iterations", 3), 3))
+    iteration_count = int(_safe_float(_get_field(state, "iteration_count", 0), 0))
+    previous_coverage = _safe_float(_get_field(state, "previous_coverage", 0.0), 0.0)
+    quality_threshold = _safe_float(getattr(settings, "QUALITY_THRESHOLD", 0.6), 0.6)
 
-    logger.info(f"检查覆盖率: {len(evidence)}/{len(sub_questions)}")
-
-    # 计算覆盖率：已解答的子问题数量 / 总子问题数量
     total_questions = len(sub_questions)
-    covered_questions = len([item for item in evidence if _get_field(item, "documents", [])])
+    covered_questions = 0
+    for item in evidence:
+        if not _get_field(item, "documents", []):
+            continue
+        if _safe_float(_get_field(item, "quality_score", 0.0), 0.0) < quality_threshold:
+            continue
+        covered_questions += 1
     covered_questions = min(covered_questions, total_questions)
 
-    coverage = covered_questions / total_questions if total_questions > 0 else 0
+    coverage = covered_questions / total_questions if total_questions > 0 else 0.0
 
-    # 检查是否需要继续细化
-    needs_refinement = (
-        coverage < coverage_threshold and
-        iteration_count < max_iterations and
-        len(candidates) == 0  # 如果没有生成任何候选方案，也需要继续
+    below_threshold = coverage < coverage_threshold
+    has_iterations_left = iteration_count < max_iterations
+    made_progress = iteration_count <= 1 or coverage > previous_coverage
+    needs_refinement = below_threshold and has_iterations_left and made_progress
+
+    log_event(
+        logger,
+        logging.INFO,
+        "rag.coverage.check",
+        component="rag",
+        coverage=round(coverage, 4),
+        previous_coverage=round(previous_coverage, 4),
+        coverage_threshold=coverage_threshold,
+        quality_threshold=quality_threshold,
+        covered_questions=covered_questions,
+        total_questions=total_questions,
+        iteration=iteration_count,
+        max_iterations=max_iterations,
+        needs_refinement=needs_refinement,
+        stop_reason=(
+            ""
+            if needs_refinement
+            else (
+                "coverage_met"
+                if not below_threshold
+                else "max_iterations" if not has_iterations_left else "no_progress"
+            )
+        ),
     )
-
-    logger.info(f"覆盖率: {coverage:.2f}, 阈值: {coverage_threshold}, 需要细化: {needs_refinement}")
 
     return {
         "coverage": coverage,
-        "needs_refinement": needs_refinement
+        "previous_coverage": coverage,
+        "needs_refinement": needs_refinement,
     }
 
 @traceable(name="final_generation_rag")

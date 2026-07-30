@@ -186,8 +186,10 @@ def create_rag_with_routing_agent():
     workflow.add_edge("human_confirmation", "retrieve")
     workflow.add_edge("retrieve", "evidence_collection")
     workflow.add_edge("evidence_collection", "evidence_evaluation")
-    workflow.add_edge("evidence_evaluation", "candidate_generation")
-    workflow.add_edge("candidate_generation", "coverage_check")
+    # candidate_generation sits *after* the loop: it issues an LLM call and only
+    # its final output is consumed by answer generation, so running it on every
+    # refinement iteration would waste tokens and latency.
+    workflow.add_edge("evidence_evaluation", "coverage_check")
 
     # Loop control
     def should_continue(state: AgentState) -> str:
@@ -215,11 +217,12 @@ def create_rag_with_routing_agent():
         should_continue,
         {
             "continue": "retrieve",
-            "terminate": "rag_answer_generation",
+            "terminate": "candidate_generation",
         },
     )
 
     # Exit edges
+    workflow.add_edge("candidate_generation", "rag_answer_generation")
     workflow.add_edge("rag_answer_generation", "__end__")
     workflow.add_edge("chat_answer_generation", "__end__")
     workflow.add_edge("pre_drawing", "draw_image")
@@ -248,8 +251,7 @@ def create_rag_agent():
     workflow.add_edge("sub_question_generation", "retrieve")
     workflow.add_edge("retrieve", "evidence_collection")
     workflow.add_edge("evidence_collection", "evidence_evaluation")
-    workflow.add_edge("evidence_evaluation", "candidate_generation")
-    workflow.add_edge("candidate_generation", "coverage_check")
+    workflow.add_edge("evidence_evaluation", "coverage_check")
 
     def should_continue(state: AgentState) -> str:
         logger.info(
@@ -276,8 +278,9 @@ def create_rag_agent():
         should_continue,
         {
             "continue": "retrieve",
-            "terminate": "answer_generation",
+            "terminate": "candidate_generation",
         },
     )
+    workflow.add_edge("candidate_generation", "answer_generation")
     workflow.add_edge("answer_generation", "__end__")
     return workflow.compile()

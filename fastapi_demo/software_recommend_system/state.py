@@ -49,6 +49,7 @@ class AgentState(BaseModel):
     drawing_params: str = ""
     image_result: str = ""
     coverage: float = 0.0
+    previous_coverage: float = 0.0
     coverage_threshold: float = 0.8
     needs_refinement: bool = False
     iteration_count: int = 0
