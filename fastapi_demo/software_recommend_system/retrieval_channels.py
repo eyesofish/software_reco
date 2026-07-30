@@ -1,4 +1,5 @@
 import logging
+import math
 import re
 import time
 from collections.abc import Iterable
@@ -8,9 +9,10 @@ import chromadb
 from rank_bm25 import BM25Okapi
 
 from .config import settings
-from .document_schema import Document
-from .ingestion.indexer import get_chroma_collection
-from .logging_utils import error_fields, log_event, new_trace_id, text_preview
+from .document_schema import Document, Metadata
+from .image_embedder import ImageEmbeddingError, embed_image_texts
+from .ingestion.indexer import get_chroma_collection, get_image_collection
+from .logging_utils import elapsed_ms, error_fields, log_event, new_trace_id, text_preview
 from .tools import _tavily_search, similarity_search
 
 logger = logging.getLogger(__name__)
@@ -84,6 +86,321 @@ def _collection_get_documents(scan_limit: int) -> dict[str, Any]:
 def recall_vector(query: str, top_k: int, trace_id: str | None = None) -> list[Document]:
     limit = max(1, int(top_k))
     return similarity_search(query=query, k=limit, trace_id=trace_id)[:limit]
+
+
+def _query_result_rows(raw: Any) -> list[list[Any]]:
+    if not isinstance(raw, list):
+        return []
+    if raw and not isinstance(raw[0], list):
+        return [list(raw)]
+    return [list(row or []) for row in raw]
+
+
+def _validated_query_embeddings(
+    query_image_embeddings: list[list[float]] | None,
+) -> list[list[float]]:
+    vectors: list[list[float]] = []
+    expected_dimension = 0
+    for raw_vector in query_image_embeddings or []:
+        try:
+            vector = [float(value) for value in list(raw_vector or [])]
+        except (TypeError, ValueError):
+            continue
+        if not vector or not all(math.isfinite(value) for value in vector):
+            continue
+        if expected_dimension and len(vector) != expected_dimension:
+            continue
+        expected_dimension = len(vector)
+        vectors.append(vector)
+    return vectors
+
+
+def _document_metadata_dict(document: Document) -> dict[str, Any]:
+    metadata = _get_field(document, "metadata", {}) or {}
+    if isinstance(metadata, dict):
+        return dict(metadata)
+    model_dump = getattr(metadata, "model_dump", None)
+    if callable(model_dump):
+        dumped = model_dump(exclude_none=True)
+        return dict(dumped) if isinstance(dumped, dict) else {}
+    return {}
+
+
+def recall_image_vector(
+    query: str,
+    top_k: int,
+    query_image_embeddings: list[list[float]] | None = None,
+    seed_documents: list[Document] | None = None,
+    trace_id: str | None = None,
+) -> list[Document]:
+    """Retrieve knowledge images from text and image queries in one shared space."""
+    limit = max(1, int(top_k))
+    current_trace_id = trace_id or new_trace_id("search")
+    query_hint = text_preview(query)
+    seed_docs = list(seed_documents or [])
+    query_vectors: list[list[float]] = []
+    query_modalities: list[str] = []
+
+    normalized_query = str(query or "").strip()
+    if normalized_query:
+        try:
+            text_vectors = embed_image_texts([normalized_query])
+            if text_vectors:
+                query_vectors.append(text_vectors[0])
+                query_modalities.append("text")
+        except ImageEmbeddingError as exc:
+            log_event(
+                logger,
+                logging.WARNING,
+                "search.image_vector.text_embedding.fail",
+                component="search",
+                trace_id=current_trace_id,
+                query=query_hint,
+                error_type=type(exc).__name__,
+                error=str(exc),
+            )
+
+    image_vectors = _validated_query_embeddings(query_image_embeddings)
+    if query_vectors:
+        expected_dimension = len(query_vectors[0])
+        image_vectors = [
+            vector for vector in image_vectors if len(vector) == expected_dimension
+        ]
+    query_vectors.extend(image_vectors)
+    query_modalities.extend(["image"] * len(image_vectors))
+    if not query_vectors and not seed_docs:
+        return []
+
+    started_at = time.perf_counter()
+    log_event(
+        logger,
+        logging.INFO,
+        "search.image_vector.start",
+        component="search",
+        trace_id=current_trace_id,
+        query=query_hint,
+        query_vectors=len(query_vectors),
+        image_query_vectors=len(image_vectors),
+        seed_documents=len(seed_docs),
+        top_k=limit,
+    )
+
+    results: dict[str, Any] = {}
+    if query_vectors:
+        try:
+            collection = get_image_collection()
+            available = max(0, int(collection.count()))
+            if available > 0:
+                results = collection.query(
+                    query_embeddings=query_vectors,
+                    n_results=min(limit, available),
+                    include=["documents", "metadatas", "distances"],
+                )
+        except Exception as exc:
+            log_event(
+                logger,
+                logging.WARNING,
+                "search.image_vector.query.fail",
+                component="search",
+                trace_id=current_trace_id,
+                query=query_hint,
+                degraded_to_seed_documents=bool(seed_docs),
+                elapsed_ms=elapsed_ms(started_at),
+                **error_fields(exc),
+            )
+
+    id_rows = _query_result_rows((results or {}).get("ids"))
+    document_rows = _query_result_rows((results or {}).get("documents"))
+    metadata_rows = _query_result_rows((results or {}).get("metadatas"))
+    distance_rows = _query_result_rows((results or {}).get("distances"))
+    rrf_k = max(1, int(getattr(settings, "MULTIMODAL_RRF_K", 60)))
+    fused: dict[str, dict[str, Any]] = {}
+
+    def add_ranked_result(
+        *,
+        doc_id: str,
+        content: str,
+        metadata: dict[str, Any],
+        distance: float,
+        modalities: set[str],
+        rank: int,
+        replace_content: bool = True,
+    ) -> None:
+        entry = fused.setdefault(
+            doc_id,
+            {
+                "rrf_score": 0.0,
+                "content": content,
+                "metadata": dict(metadata),
+                "distance": distance,
+                "modalities": set(),
+                "best_rank": rank,
+            },
+        )
+        entry["rrf_score"] += 1.0 / (rrf_k + rank)
+        entry["modalities"].update(modalities)
+        entry["best_rank"] = min(int(entry["best_rank"]), rank)
+        for key, value in metadata.items():
+            if value not in (None, "", []) and not entry["metadata"].get(key):
+                entry["metadata"][key] = value
+        if replace_content and len(content) > len(str(entry["content"] or "")):
+            entry["content"] = content
+        if distance < float(entry["distance"]):
+            entry["distance"] = distance
+
+    ranked_list_count = 0
+    for query_index, ids in enumerate(id_rows):
+        ranked_list_count += 1
+        modality = (
+            query_modalities[query_index]
+            if query_index < len(query_modalities)
+            else "unknown"
+        )
+        documents = document_rows[query_index] if query_index < len(document_rows) else []
+        metadatas = metadata_rows[query_index] if query_index < len(metadata_rows) else []
+        distances = distance_rows[query_index] if query_index < len(distance_rows) else []
+        for rank, raw_id in enumerate(ids, start=1):
+            metadata = metadatas[rank - 1] if rank - 1 < len(metadatas) else {}
+            if not isinstance(metadata, dict):
+                metadata = {}
+            doc_id = str(
+                metadata.get("source_doc_id")
+                or metadata.get("doc_id")
+                or raw_id
+                or ""
+            ).strip()
+            if not doc_id:
+                continue
+            content = (
+                str(documents[rank - 1] or "").strip()
+                if rank - 1 < len(documents)
+                else ""
+            )
+            try:
+                distance = float(distances[rank - 1])
+            except (IndexError, TypeError, ValueError):
+                distance = float("inf")
+            add_ranked_result(
+                doc_id=doc_id,
+                content=content,
+                metadata=metadata,
+                distance=distance,
+                modalities={modality},
+                rank=rank,
+            )
+
+    if seed_docs:
+        ranked_list_count += 1
+        for rank, seed_doc in enumerate(seed_docs[:limit], start=1):
+            metadata = _document_metadata_dict(seed_doc)
+            doc_id = str(
+                metadata.get("doc_id")
+                or metadata.get("source_doc_id")
+                or ""
+            ).strip()
+            if not doc_id:
+                continue
+            raw_distance = metadata.get("vector_distance")
+            try:
+                distance = (
+                    float(raw_distance)
+                    if isinstance(raw_distance, (int, float, str))
+                    else float("inf")
+                )
+            except (TypeError, ValueError):
+                distance = float("inf")
+            modalities = {
+                str(item).strip()
+                for item in list(metadata.get("query_modalities") or ["image"])
+                if str(item).strip()
+            }
+            add_ranked_result(
+                doc_id=doc_id,
+                content=str(_get_field(seed_doc, "content", "") or ""),
+                metadata=metadata,
+                distance=distance,
+                modalities=modalities or {"image"},
+                rank=rank,
+                replace_content=False,
+            )
+
+    max_rrf_score = ranked_list_count / (rrf_k + 1)
+    output_documents: list[Document] = []
+    for doc_id, entry in fused.items():
+        metadata = entry["metadata"] if isinstance(entry["metadata"], dict) else {}
+        score = (
+            min(1.0, float(entry["rrf_score"]) / max_rrf_score)
+            if max_rrf_score > 0
+            else 0.0
+        )
+        output_documents.append(
+            Document(
+                content=str(entry["content"] or metadata.get("filename") or doc_id),
+                metadata=Metadata(
+                    source=str(metadata.get("source", "image_vector")),
+                    doc_id=doc_id,
+                    retrieval_source="image_vector",
+                    channel="image_vector",
+                    channel_score=score,
+                    score=score,
+                    filename=(
+                        str(metadata["filename"])
+                        if metadata.get("filename")
+                        else None
+                    ),
+                    media_type=(
+                        str(metadata["media_type"])
+                        if metadata.get("media_type")
+                        else None
+                    ),
+                    modality=str(metadata.get("modality", "image")),
+                    asset_path=(
+                        str(metadata["asset_path"])
+                        if metadata.get("asset_path")
+                        else None
+                    ),
+                    asset_url=(
+                        str(metadata["asset_url"])
+                        if metadata.get("asset_url")
+                        else None
+                    ),
+                    tags=_normalize_tags(metadata.get("tags")),
+                    source_ranking=_safe_float(
+                        metadata.get("source_ranking"),
+                        0.0,
+                    ),
+                    matched_channels=["image_vector"],
+                    query_modalities=sorted(entry["modalities"]),
+                    channel_rank=int(entry["best_rank"]),
+                    fusion_score=score,
+                    vector_distance=(
+                        float(entry["distance"])
+                        if math.isfinite(float(entry["distance"]))
+                        else None
+                    ),
+                ),
+                score=score,
+            )
+        )
+
+    ranked = sorted(
+        output_documents,
+        key=lambda item: item.score,
+        reverse=True,
+    )[:limit]
+    log_event(
+        logger,
+        logging.INFO,
+        "search.image_vector.done",
+        component="search",
+        trace_id=current_trace_id,
+        query=query_hint,
+        query_vectors=len(query_vectors),
+        seed_documents=len(seed_docs),
+        docs=len(ranked),
+        elapsed_ms=elapsed_ms(started_at),
+    )
+    return ranked
 
 
 def recall_web(query: str, top_k: int, trace_id: str | None = None) -> list[Document]:

@@ -24,6 +24,7 @@ class AgentState(BaseModel):
     user_query: str = ""
     messages: list[dict[str, str]] = Field(default_factory=list)
     input_images: list[dict[str, str]] = Field(default_factory=list)
+    query_image_candidates: list[Document] = Field(default_factory=list)
     mode: str | None = None
     normalized_query: str = ""
     constraints: dict[str, str] = Field(

@@ -19,6 +19,8 @@ from app.api.v1.models import (
     SessionStateUpdateRequest,
 )
 from app.core.config import settings
+from software_recommend_system.document_schema import Document
+from software_recommend_system.image_embedder import ImageEmbeddingError
 from software_recommend_system.multimodal import (
     IMAGE_MEDIA_TYPE_BY_SUFFIX,
     MultimodalInputError,
@@ -26,7 +28,9 @@ from software_recommend_system.multimodal import (
     build_multimodal_query,
     build_persisted_user_message,
     describe_image_attachments,
+    embed_image_attachments,
 )
+from software_recommend_system.retrieval_channels import recall_image_vector
 from software_recommend_system.state import AgentState
 from software_recommend_system.utils import initialize_vector_store
 
@@ -82,16 +86,40 @@ logger = logging.getLogger(__name__)
 
 async def _prepare_multimodal_request(
     request_data: RecommendationRequest,
-) -> tuple[str, str, list[dict[str, str]]]:
+) -> tuple[str, str, list[dict[str, str]], list[Document]]:
     query = request_data.query.strip()
+    attachments = list(request_data.images or [])
     image_descriptions = await asyncio.to_thread(
         describe_image_attachments,
-        list(request_data.images or []),
+        attachments,
         user_query=query,
     )
+    query_image_candidates: list[Document] = []
+    if attachments and settings.RECALL_ENABLE_IMAGE_VECTOR:
+        try:
+            query_image_embeddings = await asyncio.to_thread(
+                embed_image_attachments,
+                attachments,
+            )
+            query_image_candidates = await asyncio.to_thread(
+                recall_image_vector,
+                query="",
+                top_k=max(1, int(settings.RECALL_IMAGE_VECTOR_TOP_K)),
+                query_image_embeddings=query_image_embeddings,
+            )
+        except ImageEmbeddingError as exc:
+            logger.warning(
+                "native image query embedding unavailable; continuing caption-only: %s",
+                exc,
+            )
     effective_query = build_multimodal_query(query, image_descriptions)
     persisted_message = build_persisted_user_message(query, image_descriptions)
-    return effective_query, persisted_message, image_descriptions
+    return (
+        effective_query,
+        persisted_message,
+        image_descriptions,
+        query_image_candidates,
+    )
 
 
 def _resolve_ingested_asset(asset_path: str) -> tuple[Path, str]:
@@ -116,11 +144,11 @@ async def get_ingested_asset(asset_path: str):
 
 @router.post("/recommend", response_model=RecommendationResponse)
 async def get_software_recommendation(request_data: RecommendationRequest):
+    session_id = request_data.session_id or uuid4().hex
     try:
-        effective_query, persisted_user_message, image_descriptions = (
+        effective_query, persisted_user_message, image_descriptions, query_image_candidates = (
             await _prepare_multimodal_request(request_data)
         )
-        session_id = request_data.session_id or uuid4().hex
         session_state = _upsert_name_fact_from_query(session_id, request_data.query)
         known_name = (session_state.get("facts") or {}).get("user_name")
         session_messages = _normalize_session_messages(session_state.get("messages", []))
@@ -216,6 +244,7 @@ async def get_software_recommendation(request_data: RecommendationRequest):
             user_query=effective_query,
             messages=session_messages,
             input_images=image_descriptions,
+            query_image_candidates=query_image_candidates,
             memory_context=memory_context,
             timeout_budget=request_data.timeout,
             max_iterations=request_data.max_iterations,
@@ -254,7 +283,7 @@ async def stream_software_recommendation(request_data: RecommendationRequest):
     async def event_gen() -> AsyncIterator[str]:
         session_id = request_data.session_id or uuid4().hex
         try:
-            effective_query, persisted_user_message, image_descriptions = (
+            effective_query, persisted_user_message, image_descriptions, query_image_candidates = (
                 await _prepare_multimodal_request(request_data)
             )
             session_state = _upsert_name_fact_from_query(session_id, request_data.query)
@@ -365,6 +394,7 @@ async def stream_software_recommendation(request_data: RecommendationRequest):
                 user_query=effective_query,
                 messages=session_messages,
                 input_images=image_descriptions,
+                query_image_candidates=query_image_candidates,
                 memory_context=memory_context,
                 timeout_budget=request_data.timeout,
                 max_iterations=request_data.max_iterations,

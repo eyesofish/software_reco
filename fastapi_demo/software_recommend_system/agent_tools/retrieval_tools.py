@@ -1,4 +1,4 @@
-"""Tool wrappers for the four built-in retrieval channels.
+"""Tool wrappers for the built-in retrieval channels.
 
 Each tool is a thin adapter: it accepts JSON-schema-validated inputs from the
 registry and delegates to the existing ``recall_*`` functions in
@@ -32,6 +32,48 @@ class VectorTool(Tool):
         from ..retrieval_channels import recall_vector
 
         return ToolResult(documents=recall_vector(query, top_k, trace_id))
+
+
+class ImageVectorTool(Tool):
+    name = "image_vector"
+    description = "Shared-space text-to-image and image-to-image search over knowledge images."
+    input_schema = {
+        "type": "object",
+        "properties": {
+            "query": {"type": "string"},
+            "top_k": {"type": "integer", "minimum": 1, "default": 12},
+            "query_image_embeddings": {
+                "type": "array",
+                "items": {
+                    "type": "array",
+                    "items": {"type": "number"},
+                },
+                "nullable": True,
+            },
+            "trace_id": {"type": "string", "nullable": True},
+        },
+        "required": ["query"],
+    }
+
+    def execute(  # type: ignore[override]
+        self,
+        *,
+        query: str,
+        top_k: int = 12,
+        query_image_embeddings: list[list[float]] | None = None,
+        trace_id: str | None = None,
+        **_: Any,
+    ) -> ToolResult:
+        from ..retrieval_channels import recall_image_vector
+
+        return ToolResult(
+            documents=recall_image_vector(
+                query,
+                top_k,
+                query_image_embeddings=query_image_embeddings,
+                trace_id=trace_id,
+            )
+        )
 
 
 class WebTool(Tool):
@@ -112,8 +154,9 @@ class MemoryTool(Tool):
 
 
 def register_default_retrieval_tools(registry) -> None:
-    """Register the four built-in retrieval tools on a registry."""
+    """Register the built-in retrieval tools on a registry."""
     registry.register(VectorTool())
+    registry.register(ImageVectorTool())
     registry.register(WebTool())
     registry.register(KeywordTool())
     registry.register(MemoryTool())

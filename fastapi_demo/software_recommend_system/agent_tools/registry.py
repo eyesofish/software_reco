@@ -97,8 +97,8 @@ _default_registry: ToolRegistry | None = None
 def default_registry() -> ToolRegistry:
     """Lazy-singleton registry seeded with the project's built-in retrieval tools.
 
-    First call constructs the registry and registers the four retrieval tools
-    (vector / keyword / web / memory). Subsequent calls return the same
+    First call constructs the registry and registers the retrieval tools.
+    Subsequent calls return the same
     instance.
     """
     global _default_registry

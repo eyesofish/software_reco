@@ -880,6 +880,7 @@ def retrieve_with_search(
     session_id: str = "",
     selected_skill: str = "",
     memory_context: list[dict[str, Any]] | None = None,
+    query_image_candidates: list[Document] | None = None,
 ):
     return retrieve(
         query,
@@ -887,6 +888,7 @@ def retrieve_with_search(
         session_id=session_id or None,
         selected_skill=selected_skill or None,
         memory_context=memory_context,
+        query_image_candidates=query_image_candidates,
     )
 
 
@@ -1341,6 +1343,9 @@ def retrieve_node(state: AgentState) -> dict[str, Any]:
     if selected_skill in {"quick_fact_qa", "generic_rag"}:
         max_evidence = max(BASE_MAX_EVIDENCE, int(getattr(settings, "QA_EVIDENCE_TOP_N", 5)))
     memory_context = list(_get_field(state, "memory_context", []) or [])
+    query_image_candidates = list(
+        _get_field(state, "query_image_candidates", []) or []
+    )
     trace_id = new_trace_id("search")
     global_query = str(_get_field(state, "user_query", "") or "").strip()
     if not global_query:
@@ -1387,6 +1392,7 @@ def retrieve_node(state: AgentState) -> dict[str, Any]:
             session_id=session_id,
             selected_skill=selected_skill,
             memory_context=memory_context,
+            query_image_candidates=query_image_candidates,
         )
         search_results = search_results_future.result()
         all_docs.extend(search_results)
@@ -1908,6 +1914,9 @@ def chat_answer_generation_node(state: AgentState) -> dict[str, Any]:
     session_id = str(_get_field(state, "session_id", "") or "").strip()
     selected_skill = str(_get_field(state, "selected_skill", "") or "").strip()
     memory_context = list(_get_field(state, "memory_context", []) or [])
+    query_image_candidates = list(
+        _get_field(state, "query_image_candidates", []) or []
+    )
 
     messages = list(_get_field(state, "messages", []) or [])
     if not messages:
@@ -1939,6 +1948,7 @@ def chat_answer_generation_node(state: AgentState) -> dict[str, Any]:
                 session_id=session_id,
                 selected_skill=selected_skill,
                 memory_context=memory_context,
+                query_image_candidates=query_image_candidates,
             )
             retrieved_docs = retrieved_docs_future.result()
         except Exception as exc:

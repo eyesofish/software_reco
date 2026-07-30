@@ -141,10 +141,10 @@ class HookRunnerTests(unittest.TestCase):
 
 
 class DefaultRegistryTests(unittest.TestCase):
-    def test_default_registry_has_four_retrieval_tools(self) -> None:
+    def test_default_registry_has_retrieval_tools(self) -> None:
         registry = default_registry()
         self.assertEqual(
-            registry.list(), ["keyword", "memory", "vector", "web"]
+            registry.list(), ["image_vector", "keyword", "memory", "vector", "web"]
         )
 
     def test_default_registry_is_singleton(self) -> None:

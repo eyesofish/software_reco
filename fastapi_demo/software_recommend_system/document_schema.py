@@ -26,6 +26,11 @@ class Metadata(BaseModel):
     memory_level: str | None = None
     session_id: str | None = None
     source_ranking: float = 0.0
+    matched_channels: list[str] = Field(default_factory=list)
+    query_modalities: list[str] = Field(default_factory=list)
+    channel_rank: int | None = None
+    fusion_score: float = 0.0
+    vector_distance: float | None = None
     rerank_features: dict = Field(default_factory=dict)
 
 

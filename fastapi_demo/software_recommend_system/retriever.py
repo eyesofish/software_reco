@@ -13,7 +13,13 @@ from .config import settings
 from .document_schema import Document
 from .logging_utils import log_event, new_trace_id, text_preview
 from .observability import traceable
-from .retrieval_channels import recall_keyword, recall_memory, recall_vector, recall_web
+from .retrieval_channels import (
+    recall_image_vector,
+    recall_keyword,
+    recall_memory,
+    recall_vector,
+    recall_web,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -26,6 +32,8 @@ _SKILL_WEIGHT = 0.1
 _MEMORY_WEIGHT = 0.1
 _SOURCE_PRIOR = {
     "vector": 1.0,
+    "image_vector": 1.0,
+    "multimodal_vector": 1.0,
     "web": 0.8,
     "tavily": 0.8,
     "keyword": 0.7,
@@ -231,11 +239,21 @@ def _normalize_documents(documents: Iterable[Document], source_hint: str, channe
                     "published_date": _get_field(metadata, "published_date"),
                     "updated_date": _get_field(metadata, "updated_date"),
                     "url": _get_field(metadata, "url"),
+                    "filename": _get_field(metadata, "filename"),
+                    "media_type": _get_field(metadata, "media_type"),
+                    "modality": _get_field(metadata, "modality"),
+                    "asset_path": _get_field(metadata, "asset_path"),
+                    "asset_url": _get_field(metadata, "asset_url"),
                     "tags": _get_field(metadata, "tags", []) or [],
                     "skill_tags": _get_field(metadata, "skill_tags", []) or [],
                     "memory_level": _get_field(metadata, "memory_level"),
                     "session_id": _get_field(metadata, "session_id"),
                     "source_ranking": _get_field(metadata, "source_ranking", 0.0) or 0.0,
+                    "matched_channels": _get_field(metadata, "matched_channels", []) or [channel],
+                    "query_modalities": _get_field(metadata, "query_modalities", []) or [],
+                    "channel_rank": _get_field(metadata, "channel_rank"),
+                    "fusion_score": _get_field(metadata, "fusion_score", 0.0) or 0.0,
+                    "vector_distance": _get_field(metadata, "vector_distance"),
                     "rerank_features": _get_field(metadata, "rerank_features", {}) or {},
                 },
                 score=score,
@@ -261,6 +279,8 @@ def _score_from_retrieval(doc: Document) -> float:
     if retrieval_source == "vector":
         distance = abs(raw_score)
         return 1.0 / (1.0 + distance)
+    if retrieval_source in {"image_vector", "multimodal_vector"}:
+        return min(max(raw_score, 0.0), 1.0)
 
     if retrieval_source == "keyword":
         return min(max(raw_score, 0.0), 1.0)
@@ -299,6 +319,13 @@ def _score_from_source_prior(doc: Document) -> float:
     source_ranking = min(max(source_ranking, 0.0), 1.0)
 
     prior = _SOURCE_PRIOR.get(retrieval_source)
+    matched_channels = _get_field(metadata, "matched_channels", []) or []
+    if isinstance(matched_channels, list) and matched_channels:
+        matched_priors = [
+            _SOURCE_PRIOR.get(str(channel or "").lower(), 0.0)
+            for channel in matched_channels
+        ]
+        prior = max([prior or 0.0, *matched_priors])
     if prior is None:
         prior = _SOURCE_PRIOR.get(source, 0.5)
     return max(prior, source_ranking)
@@ -413,6 +440,134 @@ def _dedup_key(doc: Document, index: int) -> str:
     return f"fallback:{source}:{digest}:{index}"
 
 
+def _metadata_richness(doc: Document) -> int:
+    metadata = _get_field(doc, "metadata", {}) or {}
+    fields = ("filename", "media_type", "modality", "asset_path", "asset_url")
+    return sum(1 for field in fields if _get_field(metadata, field))
+
+
+def _merge_document_metadata(target: Document, source: Document) -> None:
+    target_metadata = _get_field(target, "metadata", None)
+    source_metadata = _get_field(source, "metadata", None)
+    if target_metadata is None or source_metadata is None:
+        return
+
+    scalar_fields = (
+        "filename",
+        "media_type",
+        "modality",
+        "asset_path",
+        "asset_url",
+        "url",
+        "author",
+        "published_date",
+        "updated_date",
+        "memory_level",
+        "session_id",
+        "vector_distance",
+    )
+    for field in scalar_fields:
+        if not _get_field(target_metadata, field) and _get_field(source_metadata, field):
+            with suppress(Exception):
+                setattr(target_metadata, field, _get_field(source_metadata, field))
+
+    for field in ("tags", "skill_tags", "matched_channels", "query_modalities"):
+        target_values = list(_get_field(target_metadata, field, []) or [])
+        source_values = list(_get_field(source_metadata, field, []) or [])
+        merged_values = list(dict.fromkeys([*target_values, *source_values]))
+        with suppress(Exception):
+            setattr(target_metadata, field, merged_values)
+
+
+def _fuse_local_vector_documents(
+    vector_docs: list[Document],
+    image_vector_docs: list[Document],
+) -> list[Document]:
+    if not image_vector_docs:
+        return vector_docs
+    if not vector_docs:
+        return image_vector_docs
+
+    rrf_k = max(1, int(getattr(settings, "MULTIMODAL_RRF_K", 60)))
+    text_weight = max(
+        0.0,
+        _safe_float(getattr(settings, "MULTIMODAL_TEXT_VECTOR_WEIGHT", 1.0), 1.0),
+    )
+    image_weight = max(
+        0.0,
+        _safe_float(getattr(settings, "MULTIMODAL_IMAGE_VECTOR_WEIGHT", 1.0), 1.0),
+    )
+    if text_weight + image_weight <= 0:
+        text_weight = image_weight = 1.0
+
+    fused: dict[str, dict[str, Any]] = {}
+    channel_specs = (
+        ("vector", vector_docs, text_weight),
+        ("image_vector", image_vector_docs, image_weight),
+    )
+    max_rrf_score = sum(weight / (rrf_k + 1) for _, docs, weight in channel_specs if docs)
+
+    for channel, docs, weight in channel_specs:
+        seen_channel_keys: set[str] = set()
+        for rank, doc in enumerate(docs, start=1):
+            key = _dedup_key(doc, index=rank)
+            entry = fused.get(key)
+            if key in seen_channel_keys:
+                if entry is not None:
+                    representative = entry["doc"]
+                    if _metadata_richness(doc) > _metadata_richness(representative):
+                        replacement = doc.model_copy(deep=True)
+                        _merge_document_metadata(replacement, representative)
+                        entry["doc"] = replacement
+                    else:
+                        _merge_document_metadata(representative, doc)
+                continue
+            seen_channel_keys.add(key)
+            if entry is None:
+                entry = {
+                    "doc": doc.model_copy(deep=True),
+                    "rrf_score": 0.0,
+                    "channels": set(),
+                    "best_rank": rank,
+                }
+                fused[key] = entry
+            else:
+                representative = entry["doc"]
+                if (
+                    _metadata_richness(doc) > _metadata_richness(representative)
+                    or _score_from_retrieval(doc) > _score_from_retrieval(representative)
+                ):
+                    replacement = doc.model_copy(deep=True)
+                    _merge_document_metadata(replacement, representative)
+                    entry["doc"] = replacement
+                else:
+                    _merge_document_metadata(representative, doc)
+
+            entry["rrf_score"] += weight / (rrf_k + rank)
+            entry["channels"].add(channel)
+            entry["best_rank"] = min(int(entry["best_rank"]), rank)
+
+    output: list[Document] = []
+    for entry in fused.values():
+        doc = entry["doc"]
+        score = (
+            min(1.0, float(entry["rrf_score"]) / max_rrf_score)
+            if max_rrf_score > 0
+            else 0.0
+        )
+        doc.score = score
+        metadata = doc.metadata
+        metadata.retrieval_source = "multimodal_vector"
+        metadata.channel = "multimodal_vector"
+        metadata.channel_score = score
+        metadata.score = score
+        metadata.matched_channels = sorted(entry["channels"])
+        metadata.channel_rank = int(entry["best_rank"])
+        metadata.fusion_score = score
+        output.append(doc)
+    return sorted(output, key=lambda item: item.score, reverse=True)
+
+
 def _deduplicate_documents(docs: list[Document]) -> list[Document]:
     best_by_key: dict[str, Document] = {}
     for index, doc in enumerate(docs, start=1):
@@ -421,10 +576,13 @@ def _deduplicate_documents(docs: list[Document]) -> list[Document]:
         if current is None:
             best_by_key[key] = doc
             continue
-        incoming_score = _safe_float(_get_field(doc, "score", 0.0), default=0.0)
-        current_score = _safe_float(_get_field(current, "score", 0.0), default=0.0)
+        incoming_score = _score_from_retrieval(doc)
+        current_score = _score_from_retrieval(current)
         if incoming_score > current_score:
+            _merge_document_metadata(doc, current)
             best_by_key[key] = doc
+        else:
+            _merge_document_metadata(current, doc)
     return list(best_by_key.values())
 
 
@@ -554,12 +712,14 @@ def retrieve(
     session_id: str | None = None,
     selected_skill: str | None = None,
     memory_context: list[dict[str, Any]] | None = None,
+    query_image_candidates: list[Document] | None = None,
 ) -> list[Document]:
-    """Run shared hybrid retrieval (vector + web) and return normalized documents."""
+    """Run shared hybrid retrieval and return normalized documents."""
 
     trace_id = new_trace_id("search")
     query_hint = text_preview(query)
     vector_k = max(1, int(getattr(settings, "RECALL_VECTOR_TOP_K", top_k)))
+    image_vector_k = max(1, int(getattr(settings, "RECALL_IMAGE_VECTOR_TOP_K", top_k)))
     web_k = max(1, int(getattr(settings, "RECALL_WEB_TOP_K", top_k)))
     keyword_k = max(1, int(getattr(settings, "RECALL_KEYWORD_TOP_K", top_k)))
     memory_k = max(1, int(getattr(settings, "RECALL_MEMORY_TOP_K", top_k)))
@@ -568,6 +728,18 @@ def retrieve(
     recall_tasks: list[tuple[str, Any]] = []
     if getattr(settings, "RECALL_ENABLE_VECTOR", True):
         recall_tasks.append(("vector", lambda: recall_vector(query=query, top_k=vector_k, trace_id=trace_id)))
+    if getattr(settings, "RECALL_ENABLE_IMAGE_VECTOR", False):
+        recall_tasks.append(
+            (
+                "image_vector",
+                lambda: recall_image_vector(
+                    query=query,
+                    top_k=image_vector_k,
+                    seed_documents=query_image_candidates,
+                    trace_id=trace_id,
+                ),
+            )
+        )
     if getattr(settings, "RECALL_ENABLE_WEB", True):
         recall_tasks.append(("web", lambda: recall_web(query=query, top_k=web_k, trace_id=trace_id)))
     if getattr(settings, "RECALL_ENABLE_KEYWORD", True):
@@ -587,7 +759,7 @@ def retrieve(
 
     channel_docs: dict[str, list[Document]] = {}
     if recall_tasks:
-        with ThreadPoolExecutor(max_workers=min(4, len(recall_tasks))) as executor:
+        with ThreadPoolExecutor(max_workers=min(5, len(recall_tasks))) as executor:
             future_map = {executor.submit(run): channel for channel, run in recall_tasks}
             for future in as_completed(future_map):
                 channel = future_map[future]
@@ -608,7 +780,22 @@ def retrieve(
                     channel_docs[channel] = []
 
     merged_docs: list[Document] = []
-    merged_docs.extend(_normalize_documents(channel_docs.get("vector", []), source_hint="vector", channel="vector"))
+    normalized_vector_docs = _normalize_documents(
+        channel_docs.get("vector", []),
+        source_hint="vector",
+        channel="vector",
+    )
+    normalized_image_vector_docs = _normalize_documents(
+        channel_docs.get("image_vector", []),
+        source_hint="image_vector",
+        channel="image_vector",
+    )
+    merged_docs.extend(
+        _fuse_local_vector_documents(
+            normalized_vector_docs,
+            normalized_image_vector_docs,
+        )
+    )
     merged_docs.extend(_normalize_documents(channel_docs.get("web", []), source_hint="web", channel="web"))
     merged_docs.extend(_normalize_documents(channel_docs.get("keyword", []), source_hint="keyword", channel="keyword"))
     merged_docs.extend(_normalize_documents(channel_docs.get("memory", []), source_hint="memory", channel="memory"))

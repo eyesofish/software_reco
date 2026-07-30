@@ -37,7 +37,7 @@ ARC plugin root: `.arc/` (local clone of github.com/howells/arc)
 
 ## Architecture seams worth knowing
 
-- **Tool registry** (`agent_tools/registry.py`): the four retrievers (vector / keyword / web / memory) are now wrapped as `Tool` subclasses, dispatched through `ToolRegistry.execute()`, with automatic `tool.invoke.{start,done,fail}` structured logs and pluggable `before_tool_call` / `after_tool_call` hooks. The static `retrieve_node` still calls `recall_*` directly — the registry is the seam for a future LLM-driven tool-calling agent loop, not a behavior change today.
+- **Tool registry** (`agent_tools/registry.py`): the five retrievers (vector / image-vector / keyword / web / memory) are wrapped as `Tool` subclasses, dispatched through `ToolRegistry.execute()`, with automatic `tool.invoke.{start,done,fail}` structured logs and pluggable `before_tool_call` / `after_tool_call` hooks. The static `retrieve_node` still calls `recall_*` directly — the registry is the seam for a future LLM-driven tool-calling agent loop.
 - **Auth dependency** (`app/api/v1/auth.py`): `X-API-Key` middleware applied router-wide; `/initialize-db` uses a separate admin router.
 - **Route handlers split**: `routes.py` keeps the FastAPI surface; `handlers/normalizers.py` owns pure helpers; `handlers/recommend_orchestrator.py` owns `execute_recommend_turn` and task helpers.
 

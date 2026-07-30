@@ -10,6 +10,7 @@ from typing import Any
 import openai
 
 from .config import settings
+from .image_embedder import embed_image_bytes
 from .logging_utils import elapsed_ms, error_fields, log_event, new_trace_id
 from .observability import wrap_openai
 
@@ -287,17 +288,63 @@ def describe_image_attachments(
     return descriptions
 
 
+def embed_image_attachments(attachments: list[Any]) -> list[list[float]]:
+    """Encode uploaded images in memory for native image-vector retrieval."""
+    if not attachments:
+        return []
+
+    max_images = max(1, int(settings.MULTIMODAL_MAX_IMAGES))
+    max_image_bytes = max(1, int(settings.MULTIMODAL_MAX_IMAGE_BYTES))
+    max_total_bytes = max(max_image_bytes, int(settings.MULTIMODAL_MAX_TOTAL_IMAGE_BYTES))
+    if len(attachments) > max_images:
+        raise MultimodalInputError(f"At most {max_images} images may be attached")
+
+    raw_images: list[bytes] = []
+    total_bytes = 0
+    for attachment in attachments:
+        media_type = str(_get_value(attachment, "media_type", "") or "").strip().lower()
+        data_url = str(_get_value(attachment, "data_url", "") or "").strip()
+        raw = decode_image_data_url(
+            data_url,
+            expected_media_type=media_type,
+            max_bytes=max_image_bytes,
+        )
+        total_bytes += len(raw)
+        if total_bytes > max_total_bytes:
+            raise MultimodalInputError(
+                f"Combined image attachments exceed {max_total_bytes} bytes"
+            )
+        raw_images.append(raw)
+    return embed_image_bytes(raw_images)
+
+
 def describe_local_image(file_path: Path) -> dict[str, str]:
     media_type = IMAGE_MEDIA_TYPE_BY_SUFFIX.get(file_path.suffix.lower())
     if not media_type:
         raise MultimodalInputError(f"Unsupported image extension: {file_path.suffix}")
 
-    raw = file_path.read_bytes()
+    max_image_bytes = max(1, int(settings.MULTIMODAL_MAX_IMAGE_BYTES))
+    try:
+        file_size = file_path.stat().st_size
+    except OSError as exc:
+        raise MultimodalInputError(
+            f"Failed to inspect image {file_path.name}: {exc}"
+        ) from exc
+    if file_size > max_image_bytes:
+        raise MultimodalInputError(
+            f"Image exceeds the {max_image_bytes}-byte attachment limit"
+        )
+    try:
+        raw = file_path.read_bytes()
+    except OSError as exc:
+        raise MultimodalInputError(
+            f"Failed to read image {file_path.name}: {exc}"
+        ) from exc
     data_url = image_bytes_to_data_url(raw, media_type)
     decode_image_data_url(
         data_url,
         expected_media_type=media_type,
-        max_bytes=max(1, int(settings.MULTIMODAL_MAX_IMAGE_BYTES)),
+        max_bytes=max_image_bytes,
     )
     description = caption_image_data_url(
         name=file_path.name,

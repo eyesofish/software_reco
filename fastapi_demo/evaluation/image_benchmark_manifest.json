@@ -1,0 +1,680 @@
+{
+  "schema_version": 1,
+  "name": "software-reco-synthetic-image-retrieval-v1",
+  "description": "A small synthetic benchmark for caption retrieval, shared-space image retrieval, and reciprocal-rank fusion.",
+  "expected_asset_counts": {
+    "architecture": 12,
+    "ui": 10,
+    "error": 8
+  },
+  "expected_query_counts": {
+    "text": 12,
+    "image": 6
+  },
+  "labeling": {
+    "kind": "synthetic_consensus",
+    "human_verified": false,
+    "policy": "Two independent Copilot labeling passes must produce identical relevant asset sets. Disagreements are excluded.",
+    "passes": [
+      "copilot-independent-labeler",
+      "copilot-main-review"
+    ]
+  },
+  "licenses": [
+    {
+      "id": "architecture-diagrams-mit",
+      "name": "MIT",
+      "source": "https://github.com/arpitbhardwaj/architecture-diagrams/blob/554f5c5f82acac4cc955cf347cfa527408d1be78/LICENSE",
+      "attribution": "Architecture diagrams by arpitbhardwaj/architecture-diagrams contributors."
+    },
+    {
+      "id": "rico-cc-by-4.0",
+      "name": "CC BY 4.0",
+      "source": "https://github.com/google-research-datasets/screen_annotation",
+      "attribution": "Rico screenshots with Google Screen Annotation metadata; image mirror provided by Voxel51/rico."
+    },
+    {
+      "id": "project-generated",
+      "name": "Project generated",
+      "source": "evaluation/image_benchmark.py",
+      "attribution": "Deterministically generated software error screenshots for this benchmark."
+    }
+  ],
+  "assets": [
+    {
+      "id": "arch_message_queue",
+      "category": "architecture",
+      "filename": "arch_message_queue.png",
+      "reference_caption": "Software architecture diagram showing producers publishing messages to a broker or queue and consumers processing them asynchronously.",
+      "tags": ["message queue", "broker", "producer", "consumer", "asynchronous"],
+      "source": {
+        "kind": "download",
+        "license_id": "architecture-diagrams-mit",
+        "url": "https://raw.githubusercontent.com/arpitbhardwaj/architecture-diagrams/554f5c5f82acac4cc955cf347cfa527408d1be78/cloudnative/image/MessageQueue.png",
+        "sha256": "165ed5348946012ab75a1312100c851fae4db0afac746cf2da9118c9540501fd"
+      }
+    },
+    {
+      "id": "arch_service_mesh",
+      "category": "architecture",
+      "filename": "arch_service_mesh.png",
+      "reference_caption": "Service mesh architecture diagram showing managed service-to-service communication between microservices.",
+      "tags": ["service mesh", "microservices", "networking", "sidecar"],
+      "source": {
+        "kind": "download",
+        "license_id": "architecture-diagrams-mit",
+        "url": "https://raw.githubusercontent.com/arpitbhardwaj/architecture-diagrams/554f5c5f82acac4cc955cf347cfa527408d1be78/cloudnative/image/ServiceMesh.png",
+        "sha256": "e441887eb0bdd7b4058114906eb1238151ae6f0178dc06a00efa0c7571b036c1"
+      }
+    },
+    {
+      "id": "arch_kubernetes",
+      "category": "architecture",
+      "filename": "arch_kubernetes.png",
+      "reference_caption": "Kubernetes cluster architecture diagram with control-plane components, worker nodes, pods, and cluster networking.",
+      "tags": ["kubernetes", "cluster", "control plane", "worker node", "orchestration"],
+      "source": {
+        "kind": "download",
+        "license_id": "architecture-diagrams-mit",
+        "url": "https://raw.githubusercontent.com/arpitbhardwaj/architecture-diagrams/554f5c5f82acac4cc955cf347cfa527408d1be78/cloudnative/image/k8s.png",
+        "sha256": "ee1b5f503e4d264cab2a3ab07a7bc4cafe2b12b97fd6f3d2ff72dfa1502cdae5"
+      }
+    },
+    {
+      "id": "arch_ad_click",
+      "category": "architecture",
+      "filename": "arch_ad_click.png",
+      "reference_caption": "Distributed ad-click aggregation architecture for ingesting events, processing streams, and storing aggregated metrics.",
+      "tags": ["ad click", "aggregation", "stream processing", "analytics"],
+      "source": {
+        "kind": "download",
+        "license_id": "architecture-diagrams-mit",
+        "url": "https://raw.githubusercontent.com/arpitbhardwaj/architecture-diagrams/554f5c5f82acac4cc955cf347cfa527408d1be78/services/image/AdClickAggregation.png",
+        "sha256": "d97fecb4ca55a86b4571ac95f21116deec5eb98ca3a8d8ab3166c24bfb88169a"
+      }
+    },
+    {
+      "id": "arch_autocomplete",
+      "category": "architecture",
+      "filename": "arch_autocomplete.png",
+      "reference_caption": "Autocomplete system architecture for collecting search terms, building suggestions, caching results, and serving low-latency queries.",
+      "tags": ["autocomplete", "search", "suggestions", "cache"],
+      "source": {
+        "kind": "download",
+        "license_id": "architecture-diagrams-mit",
+        "url": "https://raw.githubusercontent.com/arpitbhardwaj/architecture-diagrams/554f5c5f82acac4cc955cf347cfa527408d1be78/services/image/AutoCompleteSystem.png",
+        "sha256": "635f9673e93f3962bfa14690cc08a43fbc6dbd3ba32e44ca7cd8f17cc8bb8e20"
+      }
+    },
+    {
+      "id": "arch_chat",
+      "category": "architecture",
+      "filename": "arch_chat.png",
+      "reference_caption": "Real-time chat system architecture showing clients, gateways, messaging services, presence, and persistent message storage.",
+      "tags": ["chat", "real time", "messaging", "websocket", "presence"],
+      "source": {
+        "kind": "download",
+        "license_id": "architecture-diagrams-mit",
+        "url": "https://raw.githubusercontent.com/arpitbhardwaj/architecture-diagrams/554f5c5f82acac4cc955cf347cfa527408d1be78/services/image/ChatSystem.png",
+        "sha256": "5f1389732064c9b843feaf183c13c158eb1f2d8aaa24f8d03c01ca2e6decca3d"
+      }
+    },
+    {
+      "id": "arch_cloud_storage",
+      "category": "architecture",
+      "filename": "arch_cloud_storage.png",
+      "reference_caption": "Cloud storage architecture showing file upload and download services, metadata, object chunks, replication, and storage nodes.",
+      "tags": ["cloud storage", "object storage", "file", "replication"],
+      "source": {
+        "kind": "download",
+        "license_id": "architecture-diagrams-mit",
+        "url": "https://raw.githubusercontent.com/arpitbhardwaj/architecture-diagrams/554f5c5f82acac4cc955cf347cfa527408d1be78/services/image/CloudStorage.png",
+        "sha256": "099285ba0235a77bd32c2f6cc363395ce70b4bc373e781c7cbfd57eb387db5af"
+      }
+    },
+    {
+      "id": "arch_monitoring",
+      "category": "architecture",
+      "filename": "arch_monitoring.png",
+      "reference_caption": "Metrics monitoring and alerting architecture with metric collection, time-series storage, dashboards, rules, and notifications.",
+      "tags": ["metrics", "monitoring", "alerting", "observability", "dashboard"],
+      "source": {
+        "kind": "download",
+        "license_id": "architecture-diagrams-mit",
+        "url": "https://raw.githubusercontent.com/arpitbhardwaj/architecture-diagrams/554f5c5f82acac4cc955cf347cfa527408d1be78/services/image/MetricsMonitoringAndAlerting.png",
+        "sha256": "ebdf7df3dda01e5b0e87371d8d8828187aeacbfe4e5ce971e9aa79d0da6b4806"
+      }
+    },
+    {
+      "id": "arch_news_feed",
+      "category": "architecture",
+      "filename": "arch_news_feed.png",
+      "reference_caption": "Social news-feed architecture showing post creation, fan-out, feed generation, caching, and timeline delivery.",
+      "tags": ["news feed", "social", "fan out", "timeline", "cache"],
+      "source": {
+        "kind": "download",
+        "license_id": "architecture-diagrams-mit",
+        "url": "https://raw.githubusercontent.com/arpitbhardwaj/architecture-diagrams/554f5c5f82acac4cc955cf347cfa527408d1be78/services/image/NewsFeed.png",
+        "sha256": "9b53fdb003a3ba1d86d1f9c2df1d727003c21c61242a9186c9ac16dd7bf5ace4"
+      }
+    },
+    {
+      "id": "arch_notification",
+      "category": "architecture",
+      "filename": "arch_notification.png",
+      "reference_caption": "Notification service architecture for accepting events and delivering push, email, or SMS notifications through multiple providers.",
+      "tags": ["notification", "push", "email", "sms", "delivery"],
+      "source": {
+        "kind": "download",
+        "license_id": "architecture-diagrams-mit",
+        "url": "https://raw.githubusercontent.com/arpitbhardwaj/architecture-diagrams/554f5c5f82acac4cc955cf347cfa527408d1be78/services/image/Notification.png",
+        "sha256": "bc34602ae55decb938070ce083246d5a9eeb51abf7e415958a1752d59fec5c8a"
+      }
+    },
+    {
+      "id": "arch_rate_limiter",
+      "category": "architecture",
+      "filename": "arch_rate_limiter.png",
+      "reference_caption": "Rate-limiter service architecture that tracks request quotas and rejects clients that exceed configured limits.",
+      "tags": ["rate limiter", "quota", "api gateway", "throttling"],
+      "source": {
+        "kind": "download",
+        "license_id": "architecture-diagrams-mit",
+        "url": "https://raw.githubusercontent.com/arpitbhardwaj/architecture-diagrams/554f5c5f82acac4cc955cf347cfa527408d1be78/services/image/RateLimiter.png",
+        "sha256": "91d43d5e2f45256cc9ec05435e66223c01488d1ee6072ee29441d841c02097a4"
+      }
+    },
+    {
+      "id": "arch_video_streaming",
+      "category": "architecture",
+      "filename": "arch_video_streaming.png",
+      "reference_caption": "Video-streaming architecture with upload, transcoding, object storage, CDN distribution, and playback clients.",
+      "tags": ["video streaming", "transcoding", "cdn", "object storage"],
+      "source": {
+        "kind": "download",
+        "license_id": "architecture-diagrams-mit",
+        "url": "https://raw.githubusercontent.com/arpitbhardwaj/architecture-diagrams/554f5c5f82acac4cc955cf347cfa527408d1be78/services/image/VideoStreaming.png",
+        "sha256": "81373fb485a7cd4e9f557a4c6112918a9c153e0c46ac0d8de0695a04c2fa1749"
+      }
+    },
+    {
+      "id": "ui_jobs_feed",
+      "category": "ui",
+      "filename": "ui_jobs_feed.jpg",
+      "reference_caption": "Android jobs recommendation feed with job cards, company names, trending content, and a bottom navigation bar.",
+      "tags": ["mobile ui", "jobs", "feed", "cards", "navigation"],
+      "source": {
+        "kind": "download",
+        "license_id": "rico-cc-by-4.0",
+        "dataset_id": "40553",
+        "url": "https://huggingface.co/datasets/Voxel51/rico/resolve/a675f84fbb93e23e1a74681638951c8efe18c0eb/data/data_20/40553.jpg?download=true",
+        "sha256": "c623621777188600f8c537cf5c981bd1de642a021790b99adee5129a5e893da2"
+      }
+    },
+    {
+      "id": "ui_study_units",
+      "category": "ui",
+      "filename": "ui_study_units.jpg",
+      "reference_caption": "Android study screen titled Units 1 and 2 with Flip Cards, Take Quiz, Review Sheet, and a list of study questions.",
+      "tags": ["mobile ui", "study", "quiz", "flash cards", "list"],
+      "source": {
+        "kind": "download",
+        "license_id": "rico-cc-by-4.0",
+        "dataset_id": "28130",
+        "url": "https://huggingface.co/datasets/Voxel51/rico/resolve/a675f84fbb93e23e1a74681638951c8efe18c0eb/data/data_42/28130.jpg?download=true",
+        "sha256": "49218d8291caebfee730e66846b7d9412b5295f6c49c8d6f49bb13935af1176c"
+      }
+    },
+    {
+      "id": "ui_signup",
+      "category": "ui",
+      "filename": "ui_signup.jpg",
+      "reference_caption": "Minimal Android signup screen with a username text field, validation check mark, and Finish button.",
+      "tags": ["mobile ui", "signup", "form", "text input"],
+      "source": {
+        "kind": "download",
+        "license_id": "rico-cc-by-4.0",
+        "dataset_id": "20430",
+        "url": "https://huggingface.co/datasets/Voxel51/rico/resolve/a675f84fbb93e23e1a74681638951c8efe18c0eb/data/data_17/20430.jpg?download=true",
+        "sha256": "aa63985c032c78bdf2c40e01dea12a20d8ce463b85cae2767830659dd45598cf"
+      }
+    },
+    {
+      "id": "ui_share_sheet",
+      "category": "ui",
+      "filename": "ui_share_sheet.jpg",
+      "reference_caption": "Android share chooser displaying Facebook, Messaging, Bluetooth, Android Beam, and work-profile targets.",
+      "tags": ["mobile ui", "share sheet", "chooser", "bluetooth", "messaging"],
+      "source": {
+        "kind": "download",
+        "license_id": "rico-cc-by-4.0",
+        "dataset_id": "57160",
+        "url": "https://huggingface.co/datasets/Voxel51/rico/resolve/a675f84fbb93e23e1a74681638951c8efe18c0eb/data/data_61/57160.jpg?download=true",
+        "sha256": "d0f83edd5be0fcac75f71e527aac3ab4fd23292d98065d8e91f057012a1e402a"
+      }
+    },
+    {
+      "id": "ui_timer",
+      "category": "ui",
+      "filename": "ui_timer.jpg",
+      "reference_caption": "Dark Android smart-alarm countdown screen showing 02:35 left, clock controls, and a large Stop button.",
+      "tags": ["mobile ui", "timer", "alarm", "countdown", "dark"],
+      "source": {
+        "kind": "download",
+        "license_id": "rico-cc-by-4.0",
+        "dataset_id": "66748",
+        "url": "https://huggingface.co/datasets/Voxel51/rico/resolve/a675f84fbb93e23e1a74681638951c8efe18c0eb/data/data_43/66748.jpg?download=true",
+        "sha256": "c30b5d645e443147bbc8ee0164e10ec7f79a6f87d4e54f841625c140222542eb"
+      }
+    },
+    {
+      "id": "ui_fan_zone",
+      "category": "ui",
+      "filename": "ui_fan_zone.jpg",
+      "reference_caption": "Sports fan-zone menu with schedule download, draft results, radio, merchandise, roster, and newsletter actions.",
+      "tags": ["mobile ui", "sports", "menu", "schedule", "roster"],
+      "source": {
+        "kind": "download",
+        "license_id": "rico-cc-by-4.0",
+        "dataset_id": "67360",
+        "url": "https://huggingface.co/datasets/Voxel51/rico/resolve/a675f84fbb93e23e1a74681638951c8efe18c0eb/data/data_42/67360.jpg?download=true",
+        "sha256": "2b942c52943501cd86ec8c2f248c49464f9583a170f8c02b4319af3086367577"
+      }
+    },
+    {
+      "id": "ui_team_standings",
+      "category": "ui",
+      "filename": "ui_team_standings.jpg",
+      "reference_caption": "Buffalo Bills mobile team dashboard with statistics, roster, depth chart, injuries, and AFC East standings.",
+      "tags": ["mobile ui", "sports", "statistics", "standings", "team"],
+      "source": {
+        "kind": "download",
+        "license_id": "rico-cc-by-4.0",
+        "dataset_id": "57449",
+        "url": "https://huggingface.co/datasets/Voxel51/rico/resolve/a675f84fbb93e23e1a74681638951c8efe18c0eb/data/data_56/57449.jpg?download=true",
+        "sha256": "f9cc4f0522ed519b608a1964080db0cbab40733efbc4c9e0c843d0bf46b6090b"
+      }
+    },
+    {
+      "id": "ui_account_form",
+      "category": "ui",
+      "filename": "ui_account_form.jpg",
+      "reference_caption": "Android My Account data-entry form with email, password, name, surname, address, country, and phone fields.",
+      "tags": ["mobile ui", "account", "profile", "form", "text input"],
+      "source": {
+        "kind": "download",
+        "license_id": "rico-cc-by-4.0",
+        "dataset_id": "34029",
+        "url": "https://huggingface.co/datasets/Voxel51/rico/resolve/a675f84fbb93e23e1a74681638951c8efe18c0eb/data/data_18/34029.jpg?download=true",
+        "sha256": "7ab6bb1599ddf80ed7d3e686eb50daa5b9132876387223d18db695072c000f74"
+      }
+    },
+    {
+      "id": "ui_permission_dialog",
+      "category": "ui",
+      "filename": "ui_permission_dialog.jpg",
+      "reference_caption": "Google account permission screen explaining requested profile access and offering Deny and Allow buttons.",
+      "tags": ["mobile ui", "permission", "consent", "deny", "allow"],
+      "source": {
+        "kind": "download",
+        "license_id": "rico-cc-by-4.0",
+        "dataset_id": "52174",
+        "url": "https://huggingface.co/datasets/Voxel51/rico/resolve/a675f84fbb93e23e1a74681638951c8efe18c0eb/data/data_7/52174.jpg?download=true",
+        "sha256": "9857006e5eba7a600ed1517a58775ecad0f9af7c682d80a67e3b0b3560e22c41"
+      }
+    },
+    {
+      "id": "ui_map",
+      "category": "ui",
+      "filename": "ui_map.jpg",
+      "reference_caption": "Android map search screen with street labels, location markers, search and cross actions, and a current-location control.",
+      "tags": ["mobile ui", "map", "location", "search", "navigation"],
+      "source": {
+        "kind": "download",
+        "license_id": "rico-cc-by-4.0",
+        "dataset_id": "14907",
+        "url": "https://huggingface.co/datasets/Voxel51/rico/resolve/a675f84fbb93e23e1a74681638951c8efe18c0eb/data/data_55/14907.jpg?download=true",
+        "sha256": "0d65bf6d7372934e2bad4a2a37e54bae535f1e51ce2f442645d800feeb54dbaa"
+      }
+    },
+    {
+      "id": "err_python_import",
+      "category": "error",
+      "filename": "err_python_import.png",
+      "reference_caption": "Terminal showing a Python traceback that ends with ModuleNotFoundError because the redis package is missing.",
+      "tags": ["python", "traceback", "module not found", "dependency"],
+      "source": {
+        "kind": "generated",
+        "license_id": "project-generated",
+        "title": "Python service - terminal",
+        "lines": [
+          "$ python app.py",
+          "Traceback (most recent call last):",
+          "  File \"app.py\", line 4, in <module>",
+          "    import redis",
+          "ModuleNotFoundError: No module named 'redis'"
+        ]
+      }
+    },
+    {
+      "id": "err_fastapi_422",
+      "category": "error",
+      "filename": "err_fastapi_422.png",
+      "reference_caption": "Terminal showing a FastAPI HTTP 422 Unprocessable Entity response for a missing required query field.",
+      "tags": ["fastapi", "http 422", "validation", "json"],
+      "source": {
+        "kind": "generated",
+        "license_id": "project-generated",
+        "title": "FastAPI request - terminal",
+        "lines": [
+          "$ curl -X POST http://localhost:8000/api/v1/recommend",
+          "HTTP/1.1 422 Unprocessable Entity",
+          "{",
+          "  \"detail\": [{",
+          "    \"type\": \"missing\", \"loc\": [\"body\", \"query\"],",
+          "    \"msg\": \"Field required\"",
+          "  }]",
+          "}"
+        ]
+      }
+    },
+    {
+      "id": "err_docker_refused",
+      "category": "error",
+      "filename": "err_docker_refused.png",
+      "reference_caption": "Terminal showing Docker Compose failing because the client cannot connect to the Docker daemon and the connection is refused.",
+      "tags": ["docker", "connection refused", "daemon", "container"],
+      "source": {
+        "kind": "generated",
+        "license_id": "project-generated",
+        "title": "Docker Compose - terminal",
+        "lines": [
+          "$ docker compose up api",
+          "[+] Running 0/1",
+          " - Container software-reco-api  Starting",
+          "ERROR: Cannot connect to the Docker daemon",
+          "dial unix /var/run/docker.sock: connect: connection refused",
+          "Is the docker daemon running?"
+        ]
+      }
+    },
+    {
+      "id": "err_k8s_crashloop",
+      "category": "error",
+      "filename": "err_k8s_crashloop.png",
+      "reference_caption": "Terminal showing kubectl pod status where the API pod is in CrashLoopBackOff with repeated restarts.",
+      "tags": ["kubernetes", "crashloopbackoff", "pod", "container"],
+      "source": {
+        "kind": "generated",
+        "license_id": "project-generated",
+        "title": "Kubernetes - terminal",
+        "lines": [
+          "$ kubectl get pods -n software-reco",
+          "NAME                         READY   STATUS             RESTARTS   AGE",
+          "api-7d9c8f66b8-k2m4p          0/1     CrashLoopBackOff   7          11m",
+          "frontend-6fb47b8f74-mx9nr     1/1     Running            0          11m",
+          "",
+          "$ kubectl logs api-7d9c8f66b8-k2m4p --previous",
+          "RuntimeError: failed to initialize vector store"
+        ]
+      }
+    },
+    {
+      "id": "err_postgres_connections",
+      "category": "error",
+      "filename": "err_postgres_connections.png",
+      "reference_caption": "Terminal showing PostgreSQL refusing a client because remaining connection slots are reserved and the connection limit is exhausted.",
+      "tags": ["postgresql", "connections", "capacity", "database"],
+      "source": {
+        "kind": "generated",
+        "license_id": "project-generated",
+        "title": "PostgreSQL - terminal",
+        "lines": [
+          "$ psql postgresql://app@db/software_reco",
+          "psql: error: connection to server at \"db\" (10.0.0.12), port 5432 failed:",
+          "FATAL: remaining connection slots are reserved for non-replication",
+          "superuser connections",
+          "",
+          "pool status: active=100 idle=0 waiting=28 max=100"
+        ]
+      }
+    },
+    {
+      "id": "err_git_conflict",
+      "category": "error",
+      "filename": "err_git_conflict.png",
+      "reference_caption": "Terminal showing a Git merge conflict in routes.py and an automatic merge failure requiring manual resolution.",
+      "tags": ["git", "merge conflict", "version control"],
+      "source": {
+        "kind": "generated",
+        "license_id": "project-generated",
+        "title": "Git merge - terminal",
+        "lines": [
+          "$ git merge feature/image-retrieval",
+          "Auto-merging fastapi_demo/app/api/v1/routes.py",
+          "CONFLICT (content): Merge conflict in fastapi_demo/app/api/v1/routes.py",
+          "Automatic merge failed; fix conflicts and then commit the result.",
+          "",
+          "$ git status --short",
+          "UU fastapi_demo/app/api/v1/routes.py"
+        ]
+      }
+    },
+    {
+      "id": "err_typescript_type",
+      "category": "error",
+      "filename": "err_typescript_type.png",
+      "reference_caption": "Code editor build output showing TypeScript error TS2322 because a string value is assigned to a number field.",
+      "tags": ["typescript", "type error", "compiler", "frontend"],
+      "source": {
+        "kind": "generated",
+        "license_id": "project-generated",
+        "title": "TypeScript build - editor",
+        "lines": [
+          "$ npm run typecheck",
+          "",
+          "src/components/ResultCard.tsx:42:7 - error TS2322:",
+          "Type 'string' is not assignable to type 'number'.",
+          "",
+          "42     score={result.score.toFixed(2)}",
+          "       ~~~~~",
+          "",
+          "Found 1 error in src/components/ResultCard.tsx:42"
+        ]
+      }
+    },
+    {
+      "id": "err_ci_assertion",
+      "category": "error",
+      "filename": "err_ci_assertion.png",
+      "reference_caption": "CI terminal showing a pytest failure with AssertionError because expected and actual retrieved document IDs differ.",
+      "tags": ["ci", "pytest", "assertion", "test failure"],
+      "source": {
+        "kind": "generated",
+        "license_id": "project-generated",
+        "title": "CI test run - terminal",
+        "lines": [
+          "$ pytest tests/test_image_vector_retrieval.py -q",
+          "........F",
+          "=================================== FAILURES ===================================",
+          "________________ test_fused_result_orders_relevant_image_first _________________",
+          "",
+          ">       assert ranked_ids[0] == \"arch_chat\"",
+          "E       AssertionError: assert 'arch_news_feed' == 'arch_chat'",
+          "",
+          "1 failed, 8 passed in 4.21s"
+        ]
+      }
+    }
+  ],
+  "queries": [
+    {
+      "id": "q_text_message_broker",
+      "category": "architecture",
+      "modality": "text",
+      "text": "architecture that decouples producers and consumers through a message broker or queue",
+      "label_pass_a": ["arch_message_queue"],
+      "label_pass_b": ["arch_message_queue"],
+      "relevant_ids": ["arch_message_queue"]
+    },
+    {
+      "id": "q_text_service_platform",
+      "category": "architecture",
+      "modality": "text",
+      "text": "microservice platform showing Kubernetes orchestration and service-to-service mesh networking",
+      "label_pass_a": ["arch_kubernetes", "arch_service_mesh"],
+      "label_pass_b": ["arch_kubernetes", "arch_service_mesh"],
+      "relevant_ids": ["arch_kubernetes", "arch_service_mesh"]
+    },
+    {
+      "id": "q_text_realtime_delivery",
+      "category": "architecture",
+      "modality": "text",
+      "text": "backend designs for real-time chat messages and user notification delivery",
+      "label_pass_a": ["arch_chat", "arch_notification"],
+      "label_pass_b": ["arch_chat", "arch_notification"],
+      "relevant_ids": ["arch_chat", "arch_notification"]
+    },
+    {
+      "id": "q_text_observability",
+      "category": "architecture",
+      "modality": "text",
+      "text": "system design for collecting metrics, monitoring services, and sending alerts",
+      "label_pass_a": ["arch_monitoring"],
+      "label_pass_b": ["arch_monitoring"],
+      "relevant_ids": ["arch_monitoring"]
+    },
+    {
+      "id": "q_text_profile_form",
+      "category": "ui",
+      "modality": "text",
+      "text": "mobile account profile form containing email, password, address, country and phone fields",
+      "label_pass_a": ["ui_account_form"],
+      "label_pass_b": ["ui_account_form"],
+      "relevant_ids": ["ui_account_form"]
+    },
+    {
+      "id": "q_text_learning_actions",
+      "category": "ui",
+      "modality": "text",
+      "text": "study app screen offering flash cards, quizzes and a review sheet",
+      "label_pass_a": ["ui_study_units"],
+      "label_pass_b": ["ui_study_units"],
+      "relevant_ids": ["ui_study_units"]
+    },
+    {
+      "id": "q_text_sports_dashboard",
+      "category": "ui",
+      "modality": "text",
+      "text": "mobile sports app showing team statistics, standings, roster or schedule features",
+      "label_pass_a": ["ui_fan_zone", "ui_team_standings"],
+      "label_pass_b": ["ui_fan_zone", "ui_team_standings"],
+      "relevant_ids": ["ui_fan_zone", "ui_team_standings"]
+    },
+    {
+      "id": "q_text_permission",
+      "category": "ui",
+      "modality": "text",
+      "text": "mobile consent screen asking whether an app may access account information, with deny and allow buttons",
+      "label_pass_a": ["ui_permission_dialog"],
+      "label_pass_b": ["ui_permission_dialog"],
+      "relevant_ids": ["ui_permission_dialog"]
+    },
+    {
+      "id": "q_text_missing_dependency",
+      "category": "error",
+      "modality": "text",
+      "text": "Python application fails at startup because an imported package is not installed",
+      "label_pass_a": ["err_python_import"],
+      "label_pass_b": ["err_python_import"],
+      "relevant_ids": ["err_python_import"]
+    },
+    {
+      "id": "q_text_container_failure",
+      "category": "error",
+      "modality": "text",
+      "text": "deployment troubleshooting screen where a container cannot connect or repeatedly crashes",
+      "label_pass_a": ["err_docker_refused", "err_k8s_crashloop"],
+      "label_pass_b": ["err_docker_refused", "err_k8s_crashloop"],
+      "relevant_ids": ["err_docker_refused", "err_k8s_crashloop"]
+    },
+    {
+      "id": "q_text_database_capacity",
+      "category": "error",
+      "modality": "text",
+      "text": "database refuses a new client because the server has exhausted its connection slots",
+      "label_pass_a": ["err_postgres_connections"],
+      "label_pass_b": ["err_postgres_connections"],
+      "relevant_ids": ["err_postgres_connections"]
+    },
+    {
+      "id": "q_text_build_type_failure",
+      "category": "error",
+      "modality": "text",
+      "text": "typed frontend build or CI job fails because a value has the wrong type or an assertion differs",
+      "label_pass_a": ["err_ci_assertion", "err_typescript_type"],
+      "label_pass_b": ["err_ci_assertion", "err_typescript_type"],
+      "relevant_ids": ["err_ci_assertion", "err_typescript_type"]
+    },
+    {
+      "id": "q_image_arch_chat",
+      "category": "architecture",
+      "modality": "image",
+      "text": "architecture visually similar to a real-time chat backend",
+      "query_asset_id": "arch_chat",
+      "label_pass_a": ["arch_chat"],
+      "label_pass_b": ["arch_chat"],
+      "relevant_ids": ["arch_chat"]
+    },
+    {
+      "id": "q_image_arch_storage",
+      "category": "architecture",
+      "modality": "image",
+      "text": "architecture visually similar to a cloud storage backend",
+      "query_asset_id": "arch_cloud_storage",
+      "label_pass_a": ["arch_cloud_storage"],
+      "label_pass_b": ["arch_cloud_storage"],
+      "relevant_ids": ["arch_cloud_storage"]
+    },
+    {
+      "id": "q_image_ui_share",
+      "category": "ui",
+      "modality": "image",
+      "text": "screen visually similar to an Android action or share chooser",
+      "query_asset_id": "ui_share_sheet",
+      "label_pass_a": ["ui_share_sheet"],
+      "label_pass_b": ["ui_share_sheet"],
+      "relevant_ids": ["ui_share_sheet"]
+    },
+    {
+      "id": "q_image_ui_account",
+      "category": "ui",
+      "modality": "image",
+      "text": "screen visually similar to a mobile data-entry account form",
+      "query_asset_id": "ui_account_form",
+      "label_pass_a": ["ui_account_form", "ui_signup"],
+      "label_pass_b": ["ui_account_form", "ui_signup"],
+      "relevant_ids": ["ui_account_form", "ui_signup"]
+    },
+    {
+      "id": "q_image_error_connectivity",
+      "category": "error",
+      "modality": "image",
+      "text": "error screen visually and semantically similar to a refused service connection",
+      "query_asset_id": "err_docker_refused",
+      "label_pass_a": ["err_docker_refused", "err_postgres_connections"],
+      "label_pass_b": ["err_docker_refused", "err_postgres_connections"],
+      "relevant_ids": ["err_docker_refused", "err_postgres_connections"]
+    },
+    {
+      "id": "q_image_error_test",
+      "category": "error",
+      "modality": "image",
+      "text": "error screen visually and semantically similar to a failed automated test",
+      "query_asset_id": "err_ci_assertion",
+      "label_pass_a": ["err_ci_assertion"],
+      "label_pass_b": ["err_ci_assertion"],
+      "relevant_ids": ["err_ci_assertion"]
+    }
+  ]
+}
