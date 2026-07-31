@@ -153,6 +153,16 @@ class Settings(BaseSettings):
     EVIDENCE_EVAL_MAX_DOCS: int = 8
     EVIDENCE_EVAL_CONTENT_CHARS: int = 600
 
+    # ---- agent tool-calling loop ----
+    # Off by default: it replaces deterministic fan-out with model-chosen tool
+    # calls. Any failure falls back to the static retrieval pipeline.
+    AGENT_LOOP_ENABLE: bool = False
+    AGENT_LOOP_MODEL: str = ""
+    AGENT_LOOP_MAX_STEPS: int = 3
+    AGENT_LOOP_MAX_TOOL_CALLS: int = 6
+    AGENT_LOOP_TOOL_RESULT_CHARS: int = 500
+    AGENT_LOOP_MAX_DOCS: int = 20
+
     # ---- layered memory ----
     FEATURE_LAYERED_MEMORY: bool = True
     MEMORY_ENABLE_WRITEBACK: bool = True

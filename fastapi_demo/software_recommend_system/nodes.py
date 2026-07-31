@@ -9,6 +9,7 @@ from typing import Any
 from langgraph.func import task
 from langgraph.types import interrupt
 
+from .agent_loop import run_agent_loop
 from .config import settings
 from .document_schema import Document
 from .evidence_evaluator import evaluate_evidence
@@ -1402,15 +1403,31 @@ def retrieve_node(state: AgentState) -> dict[str, Any]:
             query=question_hint,
             top_k=settings.TOP_K,
         )
-        search_results_future = retrieve_with_search(
-            question,
-            top_k=settings.TOP_K,
-            session_id=session_id,
-            selected_skill=selected_skill,
-            memory_context=memory_context,
-            query_image_candidates=query_image_candidates,
-        )
-        search_results = search_results_future.result()
+        search_results: list[Document] | None = None
+        retrieval_strategy = "static"
+        if bool(getattr(settings, "AGENT_LOOP_ENABLE", False)):
+            # Model-driven tool selection. Returns None on any failure so the
+            # deterministic pipeline below stays the safety net.
+            agent_docs = run_agent_loop(
+                question,
+                session_id=session_id or None,
+                memory_context=memory_context,
+                top_k=settings.TOP_K,
+            )
+            if agent_docs:
+                search_results = agent_docs
+                retrieval_strategy = "agent_loop"
+
+        if search_results is None:
+            search_results_future = retrieve_with_search(
+                question,
+                top_k=settings.TOP_K,
+                session_id=session_id,
+                selected_skill=selected_skill,
+                memory_context=memory_context,
+                query_image_candidates=query_image_candidates,
+            )
+            search_results = search_results_future.result()
         all_docs.extend(search_results)
         subquery_id = f"sq_{index}"
         retrieval_record = _build_retrieval_record(
@@ -1420,6 +1437,7 @@ def retrieve_node(state: AgentState) -> dict[str, Any]:
         )
         retrieval_record["selected_skill"] = selected_skill
         retrieval_record["skill_used"] = selected_skill
+        retrieval_record["retrieval_strategy"] = retrieval_strategy
         rerank_mode = ""
         for candidate in search_results:
             metadata = _get_field(candidate, "metadata", {}) or {}

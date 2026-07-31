@@ -53,6 +53,13 @@ streaming, human-in-the-loop, memory, and evaluation flows.
 
 - Skill router with domain-specific profiles such as software comparison, architecture design, implementation guidance, and quick fact QA.
 - Planner-driven retrieval flow with sub-question generation.
+- Optional LLM-driven tool-calling loop (`AGENT_LOOP_ENABLE`) that lets the model
+  choose which retrieval tools to call through the `ToolRegistry`, with step and
+  tool-call budgets and automatic fallback to the static retrieval pipeline.
+- Evidence quality evaluation feeding the coverage gate, with a deterministic
+  heuristic by default and an optional LLM judge (`EVIDENCE_EVAL_USE_LLM`).
+- LLM call governance: bounded timeout, exponential backoff on transient errors
+  only, and a per-scene token/cost ledger.
 - Human-in-the-loop confirm and confirm-stream endpoints.
 - Layered memory with fact, episodic, semantic, and working-memory retrieval.
 - Parent-child chunking support for ingestion and retrieval.
