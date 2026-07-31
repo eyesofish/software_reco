@@ -11,6 +11,7 @@ from langgraph.types import interrupt
 
 from .config import settings
 from .document_schema import Document
+from .llm_governance import governed_chat_completion
 from .llm_utils import (
     _build_retrieval_record,
     _build_retrieved_images,
@@ -696,7 +697,9 @@ def normalize_query_with_llm(model: str, prompt: str, query: str):
         request_hint=f"query_len={len(query or '')}",
     )
     try:
-        response = client.chat.completions.create(
+        response = governed_chat_completion(
+            client=client,
+            scene="normalize_query",
             model=model,
             messages=[
                 {"role": "system", "content": prompt},
@@ -857,7 +860,9 @@ def sub_question_generation_with_llm(model: str, prompt: str, query: str):
         request_hint=f"query_len={len(query or '')}",
     )
     try:
-        response = client.chat.completions.create(
+        response = governed_chat_completion(
+            client=client,
+            scene="sub_question_generation",
             model=model,
             messages=[
                 {"role": "system", "content": prompt},
@@ -905,7 +910,9 @@ def candidate_generation_with_llm(
     temperature: float,
 ):
     client = _get_openai_client()
-    return client.chat.completions.create(
+    return governed_chat_completion(
+        client=client,
+        scene="candidate_generation",
         model=model,
         messages=messages,
         temperature=temperature,
@@ -920,7 +927,9 @@ def chat_answer_with_llm(
     max_tokens: int,
 ):
     client = _get_openai_client()
-    return client.chat.completions.create(
+    return governed_chat_completion(
+        client=client,
+        scene="chat_answer",
         model=model,
         messages=messages,
         temperature=temperature,

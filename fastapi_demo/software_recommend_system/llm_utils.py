@@ -10,6 +10,7 @@ from langgraph.config import get_stream_writer
 
 from .config import settings
 from .document_schema import Document
+from .llm_governance import request_timeout_seconds
 from .logging_utils import elapsed_ms, error_fields, log_event, log_exception, new_trace_id
 from .observability import wrap_openai
 
@@ -265,7 +266,16 @@ def _build_retrieval_record(
 def _get_openai_client() -> openai.OpenAI:
     api_key = settings.DASHSCOPE_API_KEY or settings.OPENAI_API_KEY
     base_url = settings.OPENAI_BASE_URL or None
-    return wrap_openai(openai.OpenAI(api_key=api_key, base_url=base_url))
+    # max_retries=0: retries are owned by llm_governance. Leaving the SDK default
+    # of 2 would multiply with our own attempts (3 x 3 = 9 requests worst case).
+    return wrap_openai(
+        openai.OpenAI(
+            api_key=api_key,
+            base_url=base_url,
+            timeout=request_timeout_seconds(),
+            max_retries=0,
+        )
+    )
 
 
 def _safe_get_stream_writer() -> Callable[[dict[str, Any]], None] | None:

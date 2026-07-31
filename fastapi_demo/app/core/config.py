@@ -25,6 +25,15 @@ class Settings(BaseSettings):
 
     # ---- LLM ----
     LLM_MODEL: str = "qwen-flash"
+    # Governance for LLM calls (see software_recommend_system/llm_governance.py).
+    LLM_TIMEOUT_SECONDS: float = 60.0
+    LLM_MAX_RETRIES: int = 2
+    LLM_RETRY_BACKOFF_SECONDS: float = 0.5
+    LLM_RETRY_BACKOFF_MAX_SECONDS: float = 8.0
+    # Per-1K-token pricing for cost accounting. Left at 0 so the ledger reports 0
+    # instead of a fabricated figure when real pricing is not configured.
+    LLM_COST_PROMPT_PER_1K_USD: float = 0.0
+    LLM_COST_COMPLETION_PER_1K_USD: float = 0.0
     OPENAI_API_KEY: str = ""
     DASHSCOPE_API_KEY: str = ""
     BASE_URL: str = ""
