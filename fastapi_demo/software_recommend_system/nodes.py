@@ -11,6 +11,7 @@ from langgraph.types import interrupt
 
 from .config import settings
 from .document_schema import Document
+from .evidence_evaluator import evaluate_evidence
 from .llm_governance import governed_chat_completion
 from .llm_utils import (
     _build_retrieval_record,
@@ -1557,21 +1558,35 @@ def evidence_collection_node(state: AgentState) -> dict[str, Any]:
     }
 
 def evidence_evaluation_node(state: AgentState) -> dict[str, Any]:
-    """证据评估节点"""
-    evidence = _get_field(state, "evidence", [])
+    """Score each evidence item for how well it supports the question.
 
-    logger.info(f"评估 {len(evidence)} 个证据项")
+    Feeds `coverage_check_node`, so the score has to mean something. Uses the
+    LLM judge when `EVIDENCE_EVAL_USE_LLM` is on and falls back to the
+    deterministic heuristic otherwise or on any judge failure.
+    """
+    evidence = list(_get_field(state, "evidence", []) or [])
+    if not evidence:
+        return {"evidence": evidence}
 
-    # 在实际应用中，这里会使用 LLM 来评估证据的质量
-    # 简化实现：根据文档数量和分数评估
+    question = str(_get_field(state, "user_query", "") or "").strip()
+    if not question:
+        question = str(_get_field(state, "normalized_query", "") or "").strip()
 
-    for item in evidence:
-        # 重新计算质量分数，结合相关性、时效性和权威性
-        docs = _get_field(item, "documents", [])
-        if docs:
-            avg_score = sum(doc.score for doc in docs) / len(docs) if docs else 0
-            # 简化的质量分数计算，实际应用中会更复杂
-            _set_field(item, "quality_score", min(1.0, avg_score + 0.1))
+    scores, mode = evaluate_evidence(question, evidence)
+    for item, score in zip(evidence, scores, strict=True):
+        _set_field(item, "quality_score", score)
+
+    log_event(
+        logger,
+        logging.INFO,
+        "rag.evidence.evaluated",
+        component="rag",
+        mode=mode,
+        items=len(evidence),
+        min_score=round(min(scores), 4) if scores else 0.0,
+        max_score=round(max(scores), 4) if scores else 0.0,
+        mean_score=round(sum(scores) / len(scores), 4) if scores else 0.0,
+    )
 
     return {
         "evidence": evidence

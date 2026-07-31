@@ -145,6 +145,14 @@ class Settings(BaseSettings):
     QUERY_NORMALIZATION_USE_LLM: bool = True
     QUERY_NORMALIZATION_MAX_CHARS_FOR_LLM: int = 320
 
+    # ---- evidence evaluation ----
+    # Off by default: enabling it adds one LLM call per turn. When off (or on
+    # any judge failure) the deterministic heuristic is used.
+    EVIDENCE_EVAL_USE_LLM: bool = False
+    EVIDENCE_EVAL_MODEL: str = ""
+    EVIDENCE_EVAL_MAX_DOCS: int = 8
+    EVIDENCE_EVAL_CONTENT_CHARS: int = 600
+
     # ---- layered memory ----
     FEATURE_LAYERED_MEMORY: bool = True
     MEMORY_ENABLE_WRITEBACK: bool = True
