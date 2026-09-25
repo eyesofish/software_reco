@@ -31,6 +31,20 @@ from .state import AgentState
 logger = logging.getLogger(__name__)
 _SQLITE_CHECKPOINTER_RESOURCE = None
 
+
+def _controlled_node(node):
+    """Check cancellation/deadline on both sides of each graph node."""
+    def run(state, config=None):
+        from .execution_control import check_for_session
+
+        session_id = state.get("session_id", "") if isinstance(state, dict) else getattr(state, "session_id", "")
+        check_for_session(session_id)
+        result = node(state)
+        check_for_session(session_id)
+        return result
+
+    return run
+
 try:
     from langgraph.checkpoint.sqlite import SqliteSaver  # type: ignore
 
@@ -139,22 +153,22 @@ def create_rag_with_routing_agent():
     workflow = StateGraph(AgentState)
 
     # Nodes
-    workflow.add_node("entry", entry_node)
-    workflow.add_node("routing", routing_node)
-    workflow.add_node("skill_routing", skill_routing_node)
-    workflow.add_node("planning", planning_node)
-    workflow.add_node("query_normalization", query_normalization_node)
-    workflow.add_node("sub_question_generation", sub_question_generation_node)
-    workflow.add_node("human_confirmation", human_confirmation_node)
-    workflow.add_node("retrieve", retrieve_node)
-    workflow.add_node("evidence_collection", evidence_collection_node)
-    workflow.add_node("evidence_evaluation", evidence_evaluation_node)
-    workflow.add_node("candidate_generation", candidate_generation_node)
-    workflow.add_node("coverage_check", coverage_check_node)
-    workflow.add_node("rag_answer_generation", answer_generation_node)
-    workflow.add_node("chat_answer_generation", chat_answer_generation_node)
-    workflow.add_node("pre_drawing", pre_drawing_node)
-    workflow.add_node("draw_image", draw_image_node)
+    workflow.add_node("entry", _controlled_node(entry_node))
+    workflow.add_node("routing", _controlled_node(routing_node))
+    workflow.add_node("skill_routing", _controlled_node(skill_routing_node))
+    workflow.add_node("planning", _controlled_node(planning_node))
+    workflow.add_node("query_normalization", _controlled_node(query_normalization_node))
+    workflow.add_node("sub_question_generation", _controlled_node(sub_question_generation_node))
+    workflow.add_node("human_confirmation", _controlled_node(human_confirmation_node))
+    workflow.add_node("retrieve", _controlled_node(retrieve_node))
+    workflow.add_node("evidence_collection", _controlled_node(evidence_collection_node))
+    workflow.add_node("evidence_evaluation", _controlled_node(evidence_evaluation_node))
+    workflow.add_node("candidate_generation", _controlled_node(candidate_generation_node))
+    workflow.add_node("coverage_check", _controlled_node(coverage_check_node))
+    workflow.add_node("rag_answer_generation", _controlled_node(answer_generation_node))
+    workflow.add_node("chat_answer_generation", _controlled_node(chat_answer_generation_node))
+    workflow.add_node("pre_drawing", _controlled_node(pre_drawing_node))
+    workflow.add_node("draw_image", _controlled_node(draw_image_node))
 
     # Entry
     workflow.set_entry_point("entry")
@@ -235,15 +249,15 @@ def create_rag_agent():
     """Create baseline RAG graph (without mode routing)."""
     workflow = StateGraph(AgentState)
 
-    workflow.add_node("entry", entry_node)
-    workflow.add_node("query_normalization", query_normalization_node)
-    workflow.add_node("sub_question_generation", sub_question_generation_node)
-    workflow.add_node("retrieve", retrieve_node)
-    workflow.add_node("evidence_collection", evidence_collection_node)
-    workflow.add_node("evidence_evaluation", evidence_evaluation_node)
-    workflow.add_node("candidate_generation", candidate_generation_node)
-    workflow.add_node("coverage_check", coverage_check_node)
-    workflow.add_node("answer_generation", answer_generation_node)
+    workflow.add_node("entry", _controlled_node(entry_node))
+    workflow.add_node("query_normalization", _controlled_node(query_normalization_node))
+    workflow.add_node("sub_question_generation", _controlled_node(sub_question_generation_node))
+    workflow.add_node("retrieve", _controlled_node(retrieve_node))
+    workflow.add_node("evidence_collection", _controlled_node(evidence_collection_node))
+    workflow.add_node("evidence_evaluation", _controlled_node(evidence_evaluation_node))
+    workflow.add_node("candidate_generation", _controlled_node(candidate_generation_node))
+    workflow.add_node("coverage_check", _controlled_node(coverage_check_node))
+    workflow.add_node("answer_generation", _controlled_node(answer_generation_node))
 
     workflow.set_entry_point("entry")
     workflow.add_edge("entry", "query_normalization")

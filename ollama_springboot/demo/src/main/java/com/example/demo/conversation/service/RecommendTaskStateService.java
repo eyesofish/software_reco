@@ -244,6 +244,9 @@ public class RecommendTaskStateService {
         }
 
         task = applyLifecycleRules(task, Instant.now());
+        if (isTerminal(task.getStatus())) {
+            return toResponse(task);
+        }
         String normalizedEventType = firstNonBlank(
                         trimToNull(eventType),
                         asText(payload == null ? null : payload.get("type")),

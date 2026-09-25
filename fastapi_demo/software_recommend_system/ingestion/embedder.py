@@ -6,6 +6,7 @@ from dataclasses import dataclass
 import openai
 
 from ..config import settings
+from ..execution_control import check_current_run, current_request_timeout
 from ..logging_utils import elapsed_ms, error_fields, log_event, log_exception, new_trace_id
 from ..observability import wrap_openai
 
@@ -258,7 +259,7 @@ def _get_openai_client(attempt: _EmbeddingAttempt) -> openai.OpenAI:
     return wrap_openai(openai.OpenAI(
         api_key=attempt.api_key,
         base_url=attempt.base_url,
-        timeout=_resolve_embedding_timeout_seconds(),
+        timeout=current_request_timeout(_resolve_embedding_timeout_seconds()),
         max_retries=0,
     ))
 
@@ -303,6 +304,7 @@ def embed_texts(texts: list[str]) -> list[list[float]]:
 
     last_error: Exception | None = None
     for idx, attempt in enumerate(attempts, start=1):
+        check_current_run()
         started_at = time.perf_counter()
         log_event(
             logger,

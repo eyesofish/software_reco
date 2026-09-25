@@ -132,6 +132,9 @@ class RecommendationResponse(BaseModel):
         None,
         description="Planner output steps",
     )
+    run_id: str | None = Field(None, description="Identifier of this execution")
+    stop_reason: str | None = Field(None, description="Reason the execution did not complete")
+    elapsed_ms: int | None = Field(None, description="Elapsed execution time in milliseconds")
 
 
 class SessionStateUpdateRequest(BaseModel):

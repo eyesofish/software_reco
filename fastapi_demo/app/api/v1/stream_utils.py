@@ -3,9 +3,10 @@ import json
 import logging
 import time
 from collections.abc import AsyncIterator
-from typing import Any
+from typing import Any, Dict, List, Optional
 
 from software_recommend_system.observability import traceable
+from software_recommend_system.execution_control import run_controlled, stream_controlled
 
 logger = logging.getLogger(__name__)
 
@@ -118,159 +119,79 @@ async def run_agent_stream_async(
     checkpointer_module = getattr(type(checkpointer), "__module__", "")
     mode_list = list(stream_mode or ["updates", "custom"])
 
-    if _is_sync_sqlite_checkpointer(checkpointer_type, checkpointer_module):
-        logger.info(
-            "AGENT_STREAM_START mode=sync_sqlite graph_input_type=%s checkpointer=%s module=%s stream_mode=%s",
-            type(graph_input).__name__,
-            checkpointer_type,
-            checkpointer_module,
-            mode_list,
-        )
-        async for item in _stream_agent_sync_fallback(
-            agent,
-            graph_input,
-            config=config,
-            stream_mode=mode_list,
-        ):
-            yield item
-        logger.info(
-            "AGENT_STREAM_DONE mode=sync_sqlite checkpointer=%s",
-            checkpointer_type,
-        )
-        return
+    session_id = str((config or {}).get("configurable", {}).get("thread_id", ""))
+    timeout_seconds = 60.0
+    if isinstance(graph_input, dict):
+        timeout_seconds = float(graph_input.get("timeout_budget", timeout_seconds))
+        session_id = str(graph_input.get("session_id", session_id) or session_id)
+    else:
+        timeout_seconds = float(getattr(graph_input, "timeout_budget", timeout_seconds))
+        session_id = str(getattr(graph_input, "session_id", session_id) or session_id)
 
-    try:
-        logger.info(
-            "AGENT_STREAM_START mode=async graph_input_type=%s checkpointer=%s module=%s stream_mode=%s",
-            type(graph_input).__name__,
-            checkpointer_type,
-            checkpointer_module,
-            mode_list,
-        )
-        async for item in agent.astream(
-            graph_input,
-            config=config,
-            stream_mode=mode_list,
-        ):
+    logger.info(
+        "AGENT_STREAM_START mode=bounded_sync graph_input_type=%s checkpointer=%s module=%s stream_mode=%s",
+        type(graph_input).__name__,
+        checkpointer_type,
+        checkpointer_module,
+        mode_list,
+    )
+    async for item, _control in stream_controlled(
+        lambda control: _stream_with_run_id(
+            agent, graph_input, config, mode_list, control.run_id
+        ),
+        session_id=session_id,
+        timeout_seconds=timeout_seconds,
+    ):
+        if item is None:
+            yield ("__execution__", {"run_id": _control.run_id, "elapsed_ms": _control.elapsed_ms})
+        else:
             yield item
-        logger.info(
-            "AGENT_STREAM_DONE mode=async checkpointer=%s",
-            checkpointer_type,
-        )
-    except (TypeError, NotImplementedError) as exc:
-        error_text = str(exc)
-        if (
-            "does not support async methods" not in error_text
-            and "AsyncSqliteSaver" not in error_text
-        ):
-            raise
-        logger.warning(
-            "Agent async stream is unavailable for current checkpointer; "
-            "falling back to sync stream in thread pool.",
-        )
-        logger.info(
-            "AGENT_STREAM_START mode=sync_fallback graph_input_type=%s checkpointer=%s module=%s stream_mode=%s",
-            type(graph_input).__name__,
-            checkpointer_type,
-            checkpointer_module,
-            mode_list,
-        )
-        async for item in _stream_agent_sync_fallback(
-            agent,
-            graph_input,
-            config=config,
-            stream_mode=mode_list,
-        ):
-            yield item
-        logger.info(
-            "AGENT_STREAM_DONE mode=sync_fallback checkpointer=%s",
-            checkpointer_type,
-        )
-    except Exception:
-        logger.exception(
-            "AGENT_STREAM_FAILED checkpointer=%s module=%s",
-            checkpointer_type,
-            checkpointer_module,
-        )
-        raise
 
 
 @traceable(name="api_agent_invoke")
-async def run_agent_async(agent, graph_input: Any, config: dict[str, Any] | None = None):
-    """Run the agent asynchronously."""
-    checkpointer = getattr(agent, "checkpointer", None)
-    checkpointer_type = type(checkpointer).__name__
-    checkpointer_module = getattr(type(checkpointer), "__module__", "")
+async def run_agent_async(agent, graph_input: Any, config: Optional[Dict[str, Any]] = None):
+    """Run one graph invocation inside the bounded, deadline-aware worker pool."""
+    from .handlers.normalizers import _get_value
+    from software_recommend_system.config import settings
 
-    if (
-        checkpointer_type == "SqliteSaver"
-        and "langgraph.checkpoint.sqlite" in checkpointer_module
-        and ".aio" not in checkpointer_module
-    ):
-        logger.info(
-            "AGENT_INVOKE_START mode=sync_sqlite graph_input_type=%s checkpointer=%s module=%s",
-            type(graph_input).__name__,
-            checkpointer_type,
-            checkpointer_module,
-        )
-        started_at = time.perf_counter()
-        result = await asyncio.to_thread(agent.invoke, graph_input, config=config)
-        elapsed_ms = int((time.perf_counter() - started_at) * 1000)
-        logger.info(
-            "AGENT_INVOKE_DONE mode=sync_sqlite elapsed_ms=%d checkpointer=%s",
-            elapsed_ms,
-            checkpointer_type,
-        )
-        return result
+    config = dict(config or {})
+    config["recursion_limit"] = 64
+    session_id = str(config.get("configurable", {}).get("thread_id", ""))
+    timeout_seconds = float(_get_value(graph_input, "timeout_budget", settings.TIMEOUT_BUDGET))
+    session_id = str(_get_value(graph_input, "session_id", session_id) or session_id)
+    started_at = time.perf_counter()
+    result, control = await run_controlled(
+        lambda run: _invoke_with_run_id(agent, graph_input, config, run.run_id),
+        session_id=session_id,
+        timeout_seconds=timeout_seconds,
+    )
+    logger.info(
+        "AGENT_INVOKE_DONE run_id=%s elapsed_ms=%d",
+        control.run_id,
+        int((time.perf_counter() - started_at) * 1000),
+    )
+    if isinstance(result, dict):
+        result["_execution"] = {"run_id": control.run_id, "elapsed_ms": control.elapsed_ms}
+    return result
 
-    try:
-        logger.info(
-            "AGENT_INVOKE_START mode=async graph_input_type=%s checkpointer=%s module=%s",
-            type(graph_input).__name__,
-            checkpointer_type,
-            checkpointer_module,
-        )
-        started_at = time.perf_counter()
-        result = await agent.ainvoke(graph_input, config=config)
-        elapsed_ms = int((time.perf_counter() - started_at) * 1000)
-        logger.info(
-            "AGENT_INVOKE_DONE mode=async elapsed_ms=%d checkpointer=%s",
-            elapsed_ms,
-            checkpointer_type,
-        )
-        return result
-    except (TypeError, NotImplementedError) as exc:
-        error_text = str(exc)
-        if (
-            "does not support async methods" not in error_text
-            and "AsyncSqliteSaver" not in error_text
-        ):
-            raise
-        logger.warning(
-            "Agent async invocation is unavailable for current checkpointer; "
-            "falling back to sync invoke in thread pool.",
-        )
-        logger.info(
-            "AGENT_INVOKE_START mode=sync_fallback graph_input_type=%s checkpointer=%s module=%s",
-            type(graph_input).__name__,
-            checkpointer_type,
-            checkpointer_module,
-        )
-        started_at = time.perf_counter()
-        result = await asyncio.to_thread(agent.invoke, graph_input, config=config)
-        elapsed_ms = int((time.perf_counter() - started_at) * 1000)
-        logger.info(
-            "AGENT_INVOKE_DONE mode=sync_fallback elapsed_ms=%d checkpointer=%s",
-            elapsed_ms,
-            checkpointer_type,
-        )
-        return result
-    except Exception as exc:
-        logger.exception(
-            "AGENT_INVOKE_FAILED mode=unknown checkpointer=%s module=%s error=%s",
-            checkpointer_type,
-            checkpointer_module,
-            exc,
-        )
-        logger.exception("Error running agent: %s", exc)
-        raise
+
+def _invoke_with_run_id(agent: Any, graph_input: Any, config: dict[str, Any], run_id: str):
+    if isinstance(graph_input, dict):
+        graph_input["run_id"] = run_id
+    elif hasattr(graph_input, "run_id"):
+        graph_input.run_id = run_id
+    return agent.invoke(graph_input, config=config)
+
+
+def _stream_with_run_id(
+    agent: Any, graph_input: Any, config: Optional[Dict[str, Any]], stream_mode: List[str], run_id: str
+):
+    if isinstance(graph_input, dict):
+        graph_input["run_id"] = run_id
+    elif hasattr(graph_input, "run_id"):
+        graph_input.run_id = run_id
+    return agent.stream(
+        graph_input,
+        config={**(config or {}), "recursion_limit": 64},
+        stream_mode=stream_mode,
+    )

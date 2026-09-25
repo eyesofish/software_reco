@@ -10,6 +10,7 @@ from typing import Any
 import openai
 
 from .config import settings
+from .execution_control import current_request_timeout
 from .observability import wrap_openai
 
 logger = logging.getLogger(__name__)
@@ -126,12 +127,13 @@ def _get_router_client() -> openai.OpenAI:
         or "LOCAL_DUMMY_KEY"
     )
     base_url = str(settings.ROUTER_BASE_URL or "").strip() or None
-    timeout_seconds = max(1.0, float(settings.ROUTER_TIMEOUT_SECONDS))
+    timeout_seconds = current_request_timeout(max(0.05, float(settings.ROUTER_TIMEOUT_SECONDS)))
     return wrap_openai(
         openai.OpenAI(
             api_key=api_key,
             base_url=base_url,
             timeout=timeout_seconds,
+            max_retries=0,
         )
     )
 

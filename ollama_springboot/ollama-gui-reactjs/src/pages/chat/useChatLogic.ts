@@ -36,6 +36,7 @@ export type TaskStatus =
   | 'CONFIRMING'
   | 'GENERATING'
   | 'DONE'
+  | 'INCOMPLETE'
   | 'ERROR'
 
 export interface ChatState {
@@ -316,10 +317,22 @@ export default function useChatLogic () : UseChatLogicResult {
   }, [applySnapshot])
 
   const stopActiveStream = useCallback(() => {
+    const controller = streamAbortControllerRef.current
+    const conversationId = activeConversationIdRef.current
+    if (controller && conversationId) {
+      const snapshot = conversationSnapshotsRef.current[conversationId]
+      if (snapshot?.loading) {
+        setSnapshotPatch(conversationId, {
+          loading: false,
+          taskStatus: 'INCOMPLETE',
+          error: 'Generation stopped before completion; partial text is preserved.'
+        })
+      }
+    }
     activeStreamRunIdRef.current += 1
-    streamAbortControllerRef.current?.abort()
+    controller?.abort()
     streamAbortControllerRef.current = null
-  }, [])
+  }, [setSnapshotPatch])
 
   const beginStream = useCallback(() => {
     const runId = activeStreamRunIdRef.current + 1
@@ -598,11 +611,11 @@ export default function useChatLogic () : UseChatLogicResult {
         }
         setSnapshotPatch(streamedConversationId, {
           activeTaskId: streamedTaskId,
-          taskStatus: 'DONE',
+          taskStatus: 'INCOMPLETE',
           subQuestions: [],
           finalResult: streamedText,
           loading: false,
-          error: undefined
+          error: 'Stream ended before a completion event; partial text is preserved.'
         })
       }
 
@@ -878,11 +891,11 @@ export default function useChatLogic () : UseChatLogicResult {
           }
           setSnapshotPatch(streamedConversationId, {
             activeTaskId: streamedTaskId,
-            taskStatus: 'DONE',
+            taskStatus: 'INCOMPLETE',
             subQuestions: [],
             finalResult: streamedText,
             loading: false,
-            error: undefined
+            error: 'Stream ended before a completion event; partial text is preserved.'
           })
         }
       }

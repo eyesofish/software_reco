@@ -18,6 +18,7 @@ import org.springframework.stereotype.Component;
 import org.springframework.web.client.RestTemplate;
 import org.springframework.web.reactive.function.client.WebClient;
 import reactor.core.publisher.Flux;
+import reactor.core.Disposable;
 
 import java.util.HashMap;
 import java.util.LinkedHashMap;
@@ -108,6 +109,29 @@ public class FastApiClient {
                 .blockLast();
     }
 
+    public Disposable streamRecommendCancellable(
+            RecommendRequest request,
+            Consumer<RecommendStreamEvent> onEvent,
+            Consumer<Throwable> onError,
+            Runnable onComplete
+    ) {
+        Map<String, Object> payload = buildRecommendPayload(request);
+        Flux<ServerSentEvent<String>> events = webClient
+                .post()
+                .uri(recommendStreamUrl)
+                .contentType(MediaType.APPLICATION_JSON)
+                .accept(MediaType.TEXT_EVENT_STREAM)
+                .bodyValue(payload)
+                .retrieve()
+                .bodyToFlux(new ParameterizedTypeReference<>() {});
+
+        return events.map(event -> {
+                    String eventType = firstNonBlank(trimToNull(event.event()), "message");
+                    return new RecommendStreamEvent(eventType, decodeSsePayload(event.data(), eventType));
+                })
+                .subscribe(onEvent, onError, onComplete);
+    }
+
     public void streamConfirm(
             String sessionId,
             String action,
@@ -139,6 +163,36 @@ public class FastApiClient {
                     onEvent.accept(new RecommendStreamEvent(eventType, eventPayload));
                 })
                 .blockLast();
+    }
+
+    public Disposable streamConfirmCancellable(
+            String sessionId,
+            String action,
+            List<String> subQuestions,
+            String comment,
+            Consumer<RecommendStreamEvent> onEvent,
+            Consumer<Throwable> onError,
+            Runnable onComplete
+    ) {
+        Map<String, Object> payload = new HashMap<>();
+        payload.put("session_id", sessionId);
+        payload.put("action", action);
+        payload.put("sub_questions", subQuestions == null ? List.of() : subQuestions);
+        payload.put("comment", comment == null ? "" : comment);
+        Flux<ServerSentEvent<String>> events = webClient
+                .post()
+                .uri(confirmStreamUrl)
+                .contentType(MediaType.APPLICATION_JSON)
+                .accept(MediaType.TEXT_EVENT_STREAM)
+                .bodyValue(payload)
+                .retrieve()
+                .bodyToFlux(new ParameterizedTypeReference<>() {});
+
+        return events.map(event -> {
+                    String eventType = firstNonBlank(trimToNull(event.event()), "message");
+                    return new RecommendStreamEvent(eventType, decodeSsePayload(event.data(), eventType));
+                })
+                .subscribe(onEvent, onError, onComplete);
     }
 
     public RecommendResponse confirm(String sessionId, String action, List<String> subQuestions, String comment) {

@@ -1,6 +1,7 @@
 package com.example.demo.controller;
 
 import com.example.demo.client.FastApiClient;
+import com.example.demo.client.FastApiClient.RecommendStreamEvent;
 import com.example.demo.conversation.entity.ConversationEntity;
 import com.example.demo.conversation.entity.ConversationMessageEntity;
 import com.example.demo.conversation.service.ConversationService;
@@ -34,6 +35,7 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
+import reactor.core.Disposable;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -292,60 +294,26 @@ public class ChatController {
             logger.warn("FastAPI session-state sync failed: {}", ex.getMessage());
         }
 
-        CompletableFuture.runAsync(() -> {
-            StringBuilder tokenBuffer = new StringBuilder();
-            try {
-                fastApiClient.streamRecommend(
-                        new RecommendRequest(
-                                enrichedQuery,
-                                60,
-                                3,
-                                conversation.getId(),
-                                images
-                        ),
-                        event -> {
-                            Map<String, Object> payload = normalizeStreamPayload(
-                                    event.type(),
-                                    event.payload(),
-                                    streamTaskId,
-                                    conversation.getId(),
-                                    conversation.getId()
-                            );
-                            String eventType = firstNonBlank(asText(payload.get("type")), "state");
-                            if ("token".equals(eventType)) {
-                                tokenBuffer.append(firstNonBlank(asText(payload.get("delta")), ""));
-                            }
-                            if ("final".equals(eventType)) {
-                                String finalAnswer = firstNonBlank(
-                                        asText(payload.get("final_answer")),
-                                        tokenBuffer.toString()
-                                );
-                                if (finalAnswer != null && !finalAnswer.isBlank()) {
-                                    conversationService.appendMessage(conversation, "assistant", finalAnswer);
-                                }
-                            }
-                            sendSseEvent(emitter, eventType, payload);
-                        }
-                );
-                emitter.complete();
-            } catch (Exception ex) {
-                String errorMessage = firstNonBlank(ex.getMessage(), ex.getClass().getSimpleName(), "stream failed");
-                Map<String, Object> errorPayload = normalizeStreamPayload(
-                        "error",
-                        Map.of("message", errorMessage),
-                        streamTaskId,
-                        conversation.getId(),
-                        conversation.getId()
-                );
-                sendSseEvent(emitter, "error", errorPayload);
-                emitter.complete();
-            }
+        SseStreamHandle stream = SseStreamHandle.start(emitter, () -> {
+            Map<String, Object> disconnected = normalizeStreamPayload(
+                    "error",
+                    Map.of("message", "client disconnected; generation cancelled", "stop_reason", "cancelled"),
+                    streamTaskId,
+                    conversation.getId(),
+                    conversation.getId()
+            );
+            recommendTaskStateService.applyStreamEvent(streamTaskId, "error", disconnected);
         });
-
-        emitter.onCompletion(() ->
-                logger.info("chat stream completed conversation_id={}", conversation.getId()));
-        emitter.onTimeout(() ->
-                logger.warn("chat stream timeout conversation_id={}", conversation.getId()));
+        StringBuilder tokenBuffer = new StringBuilder();
+        Disposable subscription = fastApiClient.streamRecommendCancellable(
+                new RecommendRequest(enrichedQuery, 60, 3, conversation.getId(), images),
+                event -> forwardChatStreamEvent(
+                        stream, event, streamTaskId, conversation, conversation.getId(), tokenBuffer
+                ),
+                stream::fail,
+                stream::complete
+        );
+        stream.attach(subscription);
 
         return emitter;
     }
@@ -469,59 +437,55 @@ public class ChatController {
         );
         sendSseEvent(emitter, "meta", bootstrap);
 
-        CompletableFuture.runAsync(() -> {
-            StringBuilder tokenBuffer = new StringBuilder();
-            try {
-                fastApiClient.streamConfirm(
-                        sessionId,
-                        effectiveAction,
-                        subQuestions,
-                        comment,
-                        event -> {
-                            Map<String, Object> payload = normalizeStreamPayload(
-                                    event.type(),
-                                    event.payload(),
-                                    streamTaskId,
-                                    conversation.getId(),
-                                    sessionId
-                            );
-                            String eventType = firstNonBlank(asText(payload.get("type")), "state");
-                            if ("token".equals(eventType)) {
-                                tokenBuffer.append(firstNonBlank(asText(payload.get("delta")), ""));
-                            }
-                            if ("final".equals(eventType)) {
-                                String finalAnswer = firstNonBlank(
-                                        asText(payload.get("final_answer")),
-                                        tokenBuffer.toString()
-                                );
-                                if (finalAnswer != null && !finalAnswer.isBlank()) {
-                                    conversationService.appendMessage(conversation, "assistant", finalAnswer);
-                                }
-                            }
-                            sendSseEvent(emitter, eventType, payload);
-                        }
-                );
-                emitter.complete();
-            } catch (Exception ex) {
-                String errorMessage = firstNonBlank(ex.getMessage(), ex.getClass().getSimpleName(), "stream failed");
-                Map<String, Object> errorPayload = normalizeStreamPayload(
-                        "error",
-                        Map.of("message", errorMessage),
-                        streamTaskId,
-                        conversation.getId(),
-                        sessionId
-                );
-                sendSseEvent(emitter, "error", errorPayload);
-                emitter.complete();
-            }
+        SseStreamHandle stream = SseStreamHandle.start(emitter, () -> {
+            Map<String, Object> disconnected = normalizeStreamPayload(
+                    "error",
+                    Map.of("message", "client disconnected; generation cancelled", "stop_reason", "cancelled"),
+                    streamTaskId,
+                    conversation.getId(),
+                    sessionId
+            );
+            recommendTaskStateService.applyStreamEvent(streamTaskId, "error", disconnected);
         });
-
-        emitter.onCompletion(() ->
-                logger.info("chat confirm stream completed conversation_id={}", conversation.getId()));
-        emitter.onTimeout(() ->
-                logger.warn("chat confirm stream timeout conversation_id={}", conversation.getId()));
+        StringBuilder tokenBuffer = new StringBuilder();
+        Disposable subscription = fastApiClient.streamConfirmCancellable(
+                sessionId,
+                effectiveAction,
+                subQuestions,
+                comment,
+                event -> forwardChatStreamEvent(stream, event, streamTaskId, conversation, sessionId, tokenBuffer),
+                stream::fail,
+                stream::complete
+        );
+        stream.attach(subscription);
 
         return emitter;
+    }
+
+    private void forwardChatStreamEvent(
+            SseStreamHandle stream,
+            RecommendStreamEvent event,
+            String taskId,
+            ConversationEntity conversation,
+            String sessionId,
+            StringBuilder tokenBuffer
+    ) {
+        Map<String, Object> payload = normalizeStreamPayload(
+                event.type(), event.payload(), taskId, conversation.getId(), sessionId
+        );
+        String eventType = firstNonBlank(asText(payload.get("type")), "state");
+        if ("token".equals(eventType)) {
+            tokenBuffer.append(firstNonBlank(asText(payload.get("delta")), ""));
+        }
+        if ("final".equals(eventType)) {
+            String finalAnswer = firstNonBlank(asText(payload.get("final_answer")), tokenBuffer.toString());
+            if (finalAnswer != null && !finalAnswer.isBlank()) {
+                conversationService.appendMessage(conversation, "assistant", finalAnswer);
+                payload.put("final_answer", finalAnswer);
+            }
+        }
+        recommendTaskStateService.applyStreamEvent(taskId, eventType, payload);
+        stream.send(eventType, payload);
     }
 
     private void logIncomingMessages(OllamaChatRequest request) {
@@ -935,11 +899,15 @@ public class ChatController {
                                         : source.get("retrievedImages")
                         )
                 );
+                if (source.get("run_id") != null) normalized.put("run_id", source.get("run_id"));
+                if (source.get("elapsed_ms") != null) normalized.put("elapsed_ms", source.get("elapsed_ms"));
             }
-            case "error" -> normalized.put(
-                    "message",
-                    firstNonBlank(asText(source.get("message")), "stream failed")
-            );
+            case "error" -> {
+                normalized.put("message", firstNonBlank(asText(source.get("message")), "stream failed"));
+                normalized.put("stop_reason", firstNonBlank(asText(source.get("stop_reason")), "execution_error"));
+                if (source.get("run_id") != null) normalized.put("run_id", source.get("run_id"));
+                if (source.get("elapsed_ms") != null) normalized.put("elapsed_ms", source.get("elapsed_ms"));
+            }
             default -> {
                 eventType = "state";
                 normalized.put("type", eventType);

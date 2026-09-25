@@ -24,6 +24,7 @@ from typing import Any
 import openai
 
 from .config import settings
+from .execution_control import check_current_run
 from .logging_utils import elapsed_ms, error_fields, log_event, new_trace_id
 
 logger = logging.getLogger(__name__)
@@ -250,6 +251,7 @@ def governed_chat_completion(
     )
 
     for attempt in range(1, attempts + 1):
+        check_current_run()
         try:
             response = client.chat.completions.create(model=model, **create_kwargs)
         except Exception as exc:  # noqa: BLE001  boundary: classified below
@@ -294,6 +296,7 @@ def governed_chat_completion(
             )
             if delay > 0:
                 sleep(delay)
+            check_current_run()
             continue
 
         prompt_tokens, completion_tokens, total_tokens = _extract_usage(response)

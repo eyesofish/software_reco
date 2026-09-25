@@ -96,6 +96,8 @@ pnpm-debug.log*
 *.txt
 !.claude/**/*.md
 !CLAUDE.md
+!/plan/agent-reliability/*.md
+!/story/2026-09-24-agent-reliability-evidence.md
 langsmith_tracing_evaluation_minimal_changes.md
 langsmith_tracing_evaluation_minimal_changes.md
 启动教程.md

@@ -286,7 +286,10 @@ function normalizeStreamEvent (
       task_id: taskId,
       conversation_id: conversationId,
       session_id: sessionId,
-      message: asRawText(payload.message, 'stream failed')
+      message: asRawText(payload.message, 'stream failed'),
+      stop_reason: asTrimmedText(payload.stop_reason) || undefined,
+      run_id: asTrimmedText(payload.run_id) || undefined,
+      elapsed_ms: typeof payload.elapsed_ms === 'number' ? payload.elapsed_ms : undefined
     }
   }
 

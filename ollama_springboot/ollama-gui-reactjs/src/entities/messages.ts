@@ -198,7 +198,10 @@ export interface ChatStreamFinalEvent extends ChatStreamBaseEvent {
 
 export interface ChatStreamErrorEvent extends ChatStreamBaseEvent {
   type : 'error',
-  message : string
+  message : string,
+  stop_reason ?: string,
+  run_id ?: string,
+  elapsed_ms ?: number
 }
 
 export type ChatStreamEvent =

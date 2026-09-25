@@ -21,6 +21,11 @@ from ..session_store import (
     _safe_write_turn_memories,
 )
 from ..stream_utils import run_agent_async
+from software_recommend_system.execution_control import (
+    RunCapacityExceeded,
+    RunStopped,
+    SessionRunConflict,
+)
 from ._agent import AGENT
 from .normalizers import (
     _build_human_confirmation_ack,
@@ -60,6 +65,8 @@ def _build_success_response(
         coverage=coverage,
         session_id=session_id,
         awaiting_human_confirmation=False,
+        run_id=(_get_value(result, "_execution", {}) or {}).get("run_id"),
+        elapsed_ms=(_get_value(result, "_execution", {}) or {}).get("elapsed_ms"),
         retrieval_records=eval_payload["retrieval_records"],
         retrieved_doc_ids=eval_payload["retrieved_doc_ids"],
         retrieved_images=eval_payload["retrieved_images"],
@@ -209,19 +216,49 @@ async def execute_recommend_turn(
             retrieved_doc_ids=list(response.retrieved_doc_ids or []),
         )
         return response
-    except Exception:
+    except RunStopped as exc:
+        logger.warning(
+            "RECOMMEND_TURN_STOPPED session_id=%s source=%s run_id=%s reason=%s elapsed_ms=%d",
+            session_id,
+            interrupt_source,
+            exc.run_id,
+            exc.stop_reason,
+            exc.elapsed_ms,
+        )
+        _append_session_message_once(session_id, "system", f"Request stopped: {exc.stop_reason}.")
+        return RecommendationResponse(
+            status="failed",
+            final_answer=f"Request stopped: {exc.stop_reason}.",
+            candidates=[],
+            session_id=session_id,
+            run_id=exc.run_id,
+            stop_reason=exc.stop_reason,
+            elapsed_ms=exc.elapsed_ms,
+        )
+    except (RunCapacityExceeded, SessionRunConflict) as exc:
+        stop_reason = "capacity_exceeded" if isinstance(exc, RunCapacityExceeded) else "session_conflict"
+        return RecommendationResponse(
+            status="failed",
+            final_answer="Request could not be started. Please retry shortly.",
+            candidates=[],
+            session_id=session_id,
+            stop_reason=stop_reason,
+        )
+    except Exception as exc:
         logger.exception(
             "RECOMMEND_TURN_FAILED session_id=%s source=%s query=%r",
             session_id,
             interrupt_source,
             request_query,
         )
-        _append_session_message_once(
-            session_id,
-            "system",
-            "Request failed while processing this turn.",
+        _append_session_message_once(session_id, "system", "Request failed while processing this turn.")
+        return RecommendationResponse(
+            status="failed",
+            final_answer="Request failed while processing this turn.",
+            candidates=[],
+            session_id=session_id,
+            stop_reason="execution_error",
         )
-        raise
 
 
 def _log_recommend_task_outcome(task: asyncio.Task, session_id: str, source: str) -> None:
@@ -253,9 +290,9 @@ async def await_recommend_task(
     source: str,
 ) -> RecommendationResponse:
     try:
-        return await asyncio.shield(task)
+        return await task
     except asyncio.CancelledError:
-        logger.warning("CLIENT_DISCONNECTED_CONTINUE session_id=%s source=%s", session_id, source)
+        logger.warning("CLIENT_DISCONNECTED_CANCELLED session_id=%s source=%s", session_id, source)
         raise
 
 

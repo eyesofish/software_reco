@@ -33,6 +33,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
+import reactor.core.Disposable;
 
 @RestController
 @RequestMapping("/api/v1")
@@ -125,50 +126,40 @@ public class RecommendTaskController {
         bootstrap.put("conversation_id", resolvedConversationId);
         bootstrap.put("status", taskState.getStatus());
         sendSseEvent(emitter, "meta", bootstrap);
-
-        CompletableFuture.runAsync(() -> {
-            try {
-                fastApiClient.streamRecommend(
-                        new RecommendRequest(
-                                query,
-                                request.getTimeout() == null ? 60 : request.getTimeout(),
-                                request.getMaxIterations() == null ? 3 : request.getMaxIterations(),
-                                resolvedConversationId,
-                                images
-                        ),
-                        event -> {
-                            Map<String, Object> payload = normalizeStreamPayload(
-                                    event.type(),
-                                    event.payload(),
-                                    taskId,
-                                    resolvedConversationId,
-                                    resolvedConversationId
-                            );
-                            String eventType = firstNonBlank(asText(payload.get("type")), "state");
-                            recommendTaskStateService.applyStreamEvent(taskId, eventType, payload);
-                            sendSseEvent(emitter, eventType, payload);
-                        }
-                );
-                emitter.complete();
-            } catch (Exception ex) {
-                String errorMessage = firstNonBlank(ex.getMessage(), ex.getClass().getSimpleName(), "stream failed");
-                Map<String, Object> errorPayload = normalizeStreamPayload(
-                        "error",
-                        Map.of("message", errorMessage),
-                        taskId,
-                        resolvedConversationId,
-                        resolvedConversationId
-                );
-                recommendTaskStateService.applyStreamEvent(taskId, "error", errorPayload);
-                sendSseEvent(emitter, "error", errorPayload);
-                emitter.completeWithError(ex);
-            }
+        SseStreamHandle stream = SseStreamHandle.start(emitter, () -> {
+            Map<String, Object> disconnected = normalizeStreamPayload(
+                    "error",
+                    Map.of("message", "client disconnected; generation cancelled", "stop_reason", "cancelled"),
+                    taskId,
+                    resolvedConversationId,
+                    resolvedConversationId
+            );
+            recommendTaskStateService.applyStreamEvent(taskId, "error", disconnected);
         });
-
-        emitter.onCompletion(() ->
-                logger.info("recommend stream completed task_id={}, conversation_id={}", taskId, resolvedConversationId));
-        emitter.onTimeout(() ->
-                logger.warn("recommend stream timeout task_id={}, conversation_id={}", taskId, resolvedConversationId));
+        Disposable subscription = fastApiClient.streamRecommendCancellable(
+                new RecommendRequest(
+                        query,
+                        request.getTimeout() == null ? 60 : request.getTimeout(),
+                        request.getMaxIterations() == null ? 3 : request.getMaxIterations(),
+                        resolvedConversationId,
+                        images
+                ),
+                event -> {
+                    try {
+                        Map<String, Object> payload = normalizeStreamPayload(
+                                event.type(), event.payload(), taskId, resolvedConversationId, resolvedConversationId
+                        );
+                        String eventType = firstNonBlank(asText(payload.get("type")), "state");
+                        recommendTaskStateService.applyStreamEvent(taskId, eventType, payload);
+                        stream.send(eventType, payload);
+                    } catch (RuntimeException error) {
+                        stream.fail(error);
+                    }
+                },
+                stream::fail,
+                stream::complete
+        );
+        stream.attach(subscription);
 
         return emitter;
     }
@@ -205,47 +196,37 @@ public class RecommendTaskController {
         bootstrap.put("session_id", sessionId);
         bootstrap.put("status", taskState.getStatus());
         sendSseEvent(emitter, "meta", bootstrap);
-
-        CompletableFuture.runAsync(() -> {
-            try {
-                fastApiClient.streamConfirm(
-                        sessionId,
-                        preparation.action(),
-                        preparation.subQuestions(),
-                        preparation.comment(),
-                        event -> {
-                            Map<String, Object> payload = normalizeStreamPayload(
-                                    event.type(),
-                                    event.payload(),
-                                    resolvedTaskId,
-                                    resolvedConversationId,
-                                    sessionId
-                            );
-                            String eventType = firstNonBlank(asText(payload.get("type")), "state");
-                            recommendTaskStateService.applyStreamEvent(resolvedTaskId, eventType, payload);
-                            sendSseEvent(emitter, eventType, payload);
-                        }
-                );
-                emitter.complete();
-            } catch (Exception ex) {
-                String errorMessage = firstNonBlank(ex.getMessage(), ex.getClass().getSimpleName(), "stream failed");
-                Map<String, Object> errorPayload = normalizeStreamPayload(
-                        "error",
-                        Map.of("message", errorMessage),
-                        resolvedTaskId,
-                        resolvedConversationId,
-                        sessionId
-                );
-                recommendTaskStateService.applyStreamEvent(resolvedTaskId, "error", errorPayload);
-                sendSseEvent(emitter, "error", errorPayload);
-                emitter.completeWithError(ex);
-            }
+        SseStreamHandle stream = SseStreamHandle.start(emitter, () -> {
+            Map<String, Object> disconnected = normalizeStreamPayload(
+                    "error",
+                    Map.of("message", "client disconnected; generation cancelled", "stop_reason", "cancelled"),
+                    resolvedTaskId,
+                    resolvedConversationId,
+                    sessionId
+            );
+            recommendTaskStateService.applyStreamEvent(resolvedTaskId, "error", disconnected);
         });
-
-        emitter.onCompletion(() ->
-                logger.info("confirm stream completed task_id={}, conversation_id={}", resolvedTaskId, resolvedConversationId));
-        emitter.onTimeout(() ->
-                logger.warn("confirm stream timeout task_id={}, conversation_id={}", resolvedTaskId, resolvedConversationId));
+        Disposable subscription = fastApiClient.streamConfirmCancellable(
+                sessionId,
+                preparation.action(),
+                preparation.subQuestions(),
+                preparation.comment(),
+                event -> {
+                    try {
+                        Map<String, Object> payload = normalizeStreamPayload(
+                                event.type(), event.payload(), resolvedTaskId, resolvedConversationId, sessionId
+                        );
+                        String eventType = firstNonBlank(asText(payload.get("type")), "state");
+                        recommendTaskStateService.applyStreamEvent(resolvedTaskId, eventType, payload);
+                        stream.send(eventType, payload);
+                    } catch (RuntimeException error) {
+                        stream.fail(error);
+                    }
+                },
+                stream::fail,
+                stream::complete
+        );
+        stream.attach(subscription);
 
         return emitter;
     }
@@ -385,10 +366,12 @@ public class RecommendTaskController {
                         )
                 );
             }
-            case "error" -> normalized.put(
-                    "message",
-                    firstNonBlank(asText(source.get("message")), "stream failed")
-            );
+            case "error" -> {
+                normalized.put("message", firstNonBlank(asText(source.get("message")), "stream failed"));
+                normalized.put("stop_reason", firstNonBlank(asText(source.get("stop_reason")), "execution_error"));
+                if (source.get("run_id") != null) normalized.put("run_id", source.get("run_id"));
+                if (source.get("elapsed_ms") != null) normalized.put("elapsed_ms", source.get("elapsed_ms"));
+            }
             default -> {
                 eventType = "state";
                 normalized.put("type", eventType);

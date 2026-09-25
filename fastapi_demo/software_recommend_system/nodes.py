@@ -12,6 +12,7 @@ from langgraph.types import interrupt
 from .agent_loop import run_agent_loop
 from .config import settings
 from .document_schema import Document
+from .execution_control import check_current_run, current_request_timeout
 from .evidence_evaluator import evaluate_evidence
 from .llm_governance import governed_chat_completion
 from .llm_utils import (
@@ -1388,6 +1389,7 @@ def retrieve_node(state: AgentState) -> dict[str, Any]:
     )
 
     for index, question in enumerate(sub_questions, start=1):
+        check_current_run()
         question_started_at = time.perf_counter()
         question_hint = text_preview(question)
         log_event(
@@ -1428,6 +1430,7 @@ def retrieve_node(state: AgentState) -> dict[str, Any]:
                 query_image_candidates=query_image_candidates,
             )
             search_results = search_results_future.result()
+        check_current_run()
         all_docs.extend(search_results)
         subquery_id = f"sq_{index}"
         retrieval_record = _build_retrieval_record(
@@ -1706,6 +1709,7 @@ def candidate_generation_node(state: AgentState) -> dict[str, Any]:
                     {"role": "user", "content": json.dumps(evidence_payload, ensure_ascii=False)},
                 ],
                 temperature=0.4,
+                timeout=current_request_timeout(60.0),
             )
             response = response_future.result()
             _llm_invoke_done("candidate_generation", settings.LLM_MODEL, trace_id, started_at, response)

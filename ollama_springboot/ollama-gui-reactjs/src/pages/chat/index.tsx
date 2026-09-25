@@ -50,7 +50,7 @@ export default function Chat () {
             </div>
           )}
 
-          {taskStatus === 'ERROR' && error && (
+          {(taskStatus === 'ERROR' || taskStatus === 'INCOMPLETE') && error && (
             <p className='systemMessage'>{error}</p>
           )}
 

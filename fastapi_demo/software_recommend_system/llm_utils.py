@@ -10,6 +10,7 @@ from langgraph.config import get_stream_writer
 
 from .config import settings
 from .document_schema import Document
+from .execution_control import check_current_run, current_request_timeout
 from .llm_governance import request_timeout_seconds
 from .logging_utils import elapsed_ms, error_fields, log_event, log_exception, new_trace_id
 from .observability import wrap_openai
@@ -272,7 +273,7 @@ def _get_openai_client() -> openai.OpenAI:
         openai.OpenAI(
             api_key=api_key,
             base_url=base_url,
-            timeout=request_timeout_seconds(),
+            timeout=current_request_timeout(request_timeout_seconds()),
             max_retries=0,
         )
     )
@@ -332,6 +333,7 @@ def _stream_chat_completion_text(
         "messages": messages,
         "temperature": temperature,
         "stream": True,
+        "timeout": current_request_timeout(60.0),
     }
     if max_tokens is not None:
         kwargs["max_tokens"] = max_tokens
@@ -340,6 +342,7 @@ def _stream_chat_completion_text(
         stream = client.chat.completions.create(**kwargs)
         parts: list[str] = []
         for chunk in stream:
+            check_current_run()
             delta = _extract_stream_delta_text(chunk)
             if not delta:
                 continue

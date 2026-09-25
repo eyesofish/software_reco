@@ -9,6 +9,7 @@ from typing import Any
 import openai
 
 from .config import settings
+from .execution_control import current_request_timeout
 from .observability import wrap_openai
 from .skill_registry import DEFAULT_SKILL_ID, SkillSpec, get_skill, list_skills, validate_skill_id
 
@@ -116,12 +117,15 @@ def _get_router_client() -> openai.OpenAI:
         or "LOCAL_DUMMY_KEY"
     )
     base_url = _normalize_text(getattr(settings, "SKILL_ROUTER_BASE_URL", "")) or None
-    timeout_seconds = max(1.0, float(getattr(settings, "SKILL_ROUTER_TIMEOUT_SECONDS", 8)))
+    timeout_seconds = current_request_timeout(
+        max(0.05, float(getattr(settings, "SKILL_ROUTER_TIMEOUT_SECONDS", 8)))
+    )
     return wrap_openai(
         openai.OpenAI(
             api_key=api_key,
             base_url=base_url,
             timeout=timeout_seconds,
+            max_retries=0,
         )
     )
 

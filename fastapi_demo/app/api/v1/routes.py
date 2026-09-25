@@ -32,6 +32,7 @@ from software_recommend_system.multimodal import (
 )
 from software_recommend_system.retrieval_channels import recall_image_vector
 from software_recommend_system.state import AgentState
+from software_recommend_system.execution_control import RunStopped
 from software_recommend_system.utils import initialize_vector_store
 
 from .handlers._agent import AGENT
@@ -408,6 +409,7 @@ async def stream_software_recommendation(request_data: RecommendationRequest):
             merged_result: dict[str, Any] = {}
             token_parts: list[str] = []
             awaiting_emitted = False
+            execution_meta: dict[str, Any] = {}
 
             async for stream_item in run_agent_stream_async(
                 AGENT,
@@ -416,6 +418,10 @@ async def stream_software_recommendation(request_data: RecommendationRequest):
                 stream_mode=["updates", "custom"],
             ):
                 mode, chunk = _to_stream_mode_chunk(stream_item)
+
+                if mode == "__execution__":
+                    execution_meta = dict(chunk or {})
+                    continue
 
                 if mode == "updates":
                     _merge_stream_updates(merged_result, chunk)
@@ -531,6 +537,25 @@ async def stream_software_recommendation(request_data: RecommendationRequest):
                     "retrieved_images": eval_payload["retrieved_images"],
                     "selected_skill": skill_planner_payload["selected_skill"],
                     "hitl": eval_payload["hitl"],
+                    **execution_meta,
+                },
+            )
+        except RunStopped as exc:
+            logger.warning(
+                "RECOMMEND_STREAM_STOPPED session_id=%s run_id=%s reason=%s elapsed_ms=%d",
+                session_id,
+                exc.run_id,
+                exc.stop_reason,
+                exc.elapsed_ms,
+            )
+            yield _sse(
+                "error",
+                {
+                    "session_id": session_id,
+                    "run_id": exc.run_id,
+                    "stop_reason": exc.stop_reason,
+                    "elapsed_ms": exc.elapsed_ms,
+                    "message": f"Request stopped: {exc.stop_reason}.",
                 },
             )
         except (MultimodalInputError, VisionProcessingError) as exc:
@@ -607,6 +632,7 @@ async def confirm_software_recommendation_stream(request_data: RecommendationCon
             merged_result: dict[str, Any] = {}
             token_parts: list[str] = []
             awaiting_emitted = False
+            execution_meta: dict[str, Any] = {}
 
             async for stream_item in run_agent_stream_async(
                 AGENT,
@@ -615,6 +641,10 @@ async def confirm_software_recommendation_stream(request_data: RecommendationCon
                 stream_mode=["updates", "custom"],
             ):
                 mode, chunk = _to_stream_mode_chunk(stream_item)
+
+                if mode == "__execution__":
+                    execution_meta = dict(chunk or {})
+                    continue
 
                 if mode == "updates":
                     _merge_stream_updates(merged_result, chunk)
@@ -767,6 +797,25 @@ async def confirm_software_recommendation_stream(request_data: RecommendationCon
                     "retrieved_images": eval_payload["retrieved_images"],
                     "selected_skill": skill_planner_payload["selected_skill"],
                     "hitl": eval_payload["hitl"],
+                    **execution_meta,
+                },
+            )
+        except RunStopped as exc:
+            logger.warning(
+                "HITL_CONFIRM_STREAM_STOPPED session_id=%s run_id=%s reason=%s elapsed_ms=%d",
+                request_data.session_id,
+                exc.run_id,
+                exc.stop_reason,
+                exc.elapsed_ms,
+            )
+            yield _sse(
+                "error",
+                {
+                    "session_id": request_data.session_id,
+                    "run_id": exc.run_id,
+                    "stop_reason": exc.stop_reason,
+                    "elapsed_ms": exc.elapsed_ms,
+                    "message": f"Request stopped: {exc.stop_reason}.",
                 },
             )
         except Exception as exc:

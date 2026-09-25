@@ -8,6 +8,7 @@ import chromadb
 import openai
 
 from .config import settings
+from .execution_control import current_request_timeout
 from .document_schema import Document
 from .ingestion.embedder import embed_texts
 from .ingestion.indexer import get_parent_documents_by_ids
@@ -27,7 +28,14 @@ def _search_tool_impl_name() -> str:
 def _get_openai_client() -> openai.OpenAI:
     api_key = settings.DASHSCOPE_API_KEY or settings.OPENAI_API_KEY
     base_url = settings.OPENAI_BASE_URL or None
-    return wrap_openai(openai.OpenAI(api_key=api_key, base_url=base_url))
+    return wrap_openai(
+        openai.OpenAI(
+            api_key=api_key,
+            base_url=base_url,
+            timeout=current_request_timeout(60.0),
+            max_retries=0,
+        )
+    )
 
 
 def _metadata_obj(doc_metadata: dict[str, Any]) -> dict[str, Any]:
