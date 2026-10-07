@@ -2,85 +2,67 @@ import unittest
 from unittest.mock import MagicMock, patch
 
 from software_recommend_system import retrieval_channels
+from software_recommend_system.document_schema import Document
 
 
-class KeywordRecallFallbackTests(unittest.TestCase):
+class KeywordRecallTests(unittest.TestCase):
     def setUp(self) -> None:
         retrieval_channels._KEYWORD_RECALL_UNAVAILABLE_UNTIL = 0.0
 
     def tearDown(self) -> None:
         retrieval_channels._KEYWORD_RECALL_UNAVAILABLE_UNTIL = 0.0
 
-    def test_keyword_recall_retries_with_fresh_client_on_tenant_error(self) -> None:
-        tenant_error = ValueError("Could not connect to tenant default_tenant. Are you sure it exists?")
+    def test_es_results_preserve_existing_channel_contract(self) -> None:
+        index = MagicMock()
+        index.search.return_value = [
+            Document(
+                content="streamtool",
+                metadata={"source": "startup_ingest", "doc_id": "guide"},
+                score=2.3,
+            )
+        ]
+        with patch.object(retrieval_channels, "get_keyword_index", return_value=index):
+            docs = retrieval_channels.recall_keyword("streamtool application-ev", top_k=3, trace_id="test")
+        index.search.assert_called_once_with("streamtool application-ev", 3)
+        self.assertEqual(docs[0].metadata.doc_id, "guide")
+        self.assertEqual(docs[0].score, 2.3)
 
-        collection = MagicMock()
-        collection.get.return_value = {
-            "documents": ["streamtool setproperty --application-ev ODBCINI=/tmp/odbc.ini"],
-            "metadatas": [
-                {
-                    "source": "keyword_index",
-                    "source_doc_id": "swg21996508.txt",
-                    "tags": ["streamtool", "application-ev"],
-                }
-            ],
-        }
+    def test_blank_query_does_not_connect(self) -> None:
+        with patch.object(retrieval_channels, "get_keyword_index") as get_index:
+            self.assertEqual(retrieval_channels.recall_keyword("   ", top_k=3), [])
+        get_index.assert_not_called()
 
-        client = MagicMock()
-        client.get_or_create_collection.return_value = collection
+    def test_disabled_channel_does_not_connect_even_for_agent_tool_calls(self) -> None:
+        with patch.object(retrieval_channels.settings, "RECALL_ENABLE_KEYWORD", False), patch.object(
+            retrieval_channels, "get_keyword_index",
+        ) as get_index:
+            self.assertEqual(retrieval_channels.recall_keyword("redis", 3), [])
+        get_index.assert_not_called()
 
-        with patch.object(retrieval_channels, "get_chroma_collection", side_effect=tenant_error), patch.object(
-            retrieval_channels.chromadb, "PersistentClient", return_value=client
+    def test_failure_opens_circuit_then_recovers(self) -> None:
+        index = MagicMock()
+        index.search.side_effect = TimeoutError("ES unavailable")
+        with (
+            patch.object(retrieval_channels, "get_keyword_index", return_value=index),
+            patch.object(
+                retrieval_channels.time,
+                "time",
+                return_value=100.0,
+            ),
+            patch.object(retrieval_channels.settings, "KEYWORD_RECALL_CIRCUIT_BREAKER_SECONDS", 30),
         ):
-            docs = retrieval_channels.recall_keyword("streamtool application-ev", top_k=3, trace_id="test-keyword")
-
-        self.assertEqual(len(docs), 1)
-        self.assertEqual(getattr(docs[0].metadata, "doc_id", ""), "swg21996508.txt")
-        self.assertGreater(docs[0].score, 0.0)
-        client.get_or_create_collection.assert_called_once()
-
-    def test_keyword_recall_uses_bm25_and_indexes_tags(self) -> None:
-        with patch.object(
-            retrieval_channels,
-            "_collection_get_documents",
-            return_value={
-                "documents": [
-                    "streamtool setproperty updates environment values",
-                    "streamtool command reference for operators",
-                    "java spring deployment guide",
-                ],
-                "metadatas": [
-                    {
-                        "source": "keyword_index",
-                        "doc_id": "best-match",
-                        "tags": ["application-ev", "odbcini"],
-                    },
-                    {
-                        "source": "keyword_index",
-                        "doc_id": "partial-match",
-                        "tags": [],
-                    },
-                    {
-                        "source": "keyword_index",
-                        "doc_id": "no-match",
-                        "tags": ["spring"],
-                    },
-                ],
-            },
+            self.assertEqual(retrieval_channels.recall_keyword("redis", 3), [])
+            self.assertEqual(retrieval_channels.recall_keyword("redis", 3), [])
+            self.assertEqual(index.search.call_count, 1)
+        index.search.side_effect = None
+        index.search.return_value = []
+        with (
+            patch.object(retrieval_channels, "get_keyword_index", return_value=index),
+            patch.object(
+                retrieval_channels.time,
+                "time",
+                return_value=131.0,
+            ),
         ):
-            docs = retrieval_channels.recall_keyword("streamtool application-ev", top_k=3, trace_id="test-keyword")
-
-        self.assertEqual([getattr(doc.metadata, "doc_id", "") for doc in docs], ["best-match", "partial-match"])
-        self.assertGreater(docs[0].score, docs[1].score)
-        self.assertEqual(getattr(docs[0].metadata, "tags", []), ["application-ev", "odbcini"])
-
-    def test_keyword_recall_returns_empty_for_blank_query_without_collection_read(self) -> None:
-        with patch.object(retrieval_channels, "_collection_get_documents") as mocked_get_documents:
-            docs = retrieval_channels.recall_keyword("   ", top_k=3, trace_id="test-keyword")
-
-        self.assertEqual(docs, [])
-        mocked_get_documents.assert_not_called()
-
-
-if __name__ == "__main__":
-    unittest.main()
+            self.assertEqual(retrieval_channels.recall_keyword("redis", 3), [])
+        self.assertEqual(index.search.call_count, 2)

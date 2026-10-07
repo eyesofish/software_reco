@@ -22,6 +22,7 @@ from software_recommend_system.ingestion.indexer import (
     index_parent_documents,
 )
 from software_recommend_system.ingestion.loader import normalize_documents
+from software_recommend_system.keyword_index import mirror_deletions
 from software_recommend_system.multimodal import (
     IMAGE_MEDIA_TYPE_BY_SUFFIX,
     MultimodalInputError,
@@ -164,6 +165,8 @@ def _delete_stale_source_ids(
     collection: Any,
     relative_path: str,
     keep_ids: list[str],
+    *,
+    sync_keyword: bool = True,
 ) -> None:
     keep = set(keep_ids)
     stale_ids = [
@@ -173,6 +176,8 @@ def _delete_stale_source_ids(
     ]
     if stale_ids:
         collection.delete(ids=stale_ids)
+        if sync_keyword:
+            mirror_deletions(stale_ids)
 
 
 def _ingest_single_document(
@@ -233,6 +238,7 @@ def _ingest_single_document(
                 get_parent_collection(rag_settings.PARENT_COLLECTION_NAME),
                 replace_source_path,
                 parent_ids,
+                sync_keyword=False,
             )
         logger.info(
             "startup ingest parent-child indexed: doc_id=%s parent_vectors=%s child_vectors=%s",

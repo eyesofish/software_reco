@@ -3,6 +3,7 @@ langchain-core==1.2.7
 openai==2.15.0
 tiktoken==0.5.1
 chromadb==1.4.1
+elasticsearch==9.5.1
 clickhouse-connect==0.10.0
 pydantic==2.12.5
 python-dotenv==1.0.0

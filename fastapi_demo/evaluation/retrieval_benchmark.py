@@ -19,6 +19,8 @@ from typing import Any
 
 from dotenv import load_dotenv
 
+from evaluation.keyword_index_config import validate_keyword_index
+
 DEFAULT_TOP_K = 10
 
 METHOD_LABELS: dict[str, str] = {
@@ -255,6 +257,8 @@ def _runtime_summary(settings: Any) -> dict[str, Any]:
     child_name = "software_recommendations"
     parent_name = str(getattr(settings, "PARENT_COLLECTION_NAME", "software_recommendations_parent"))
     payload = {
+        "keyword_index": settings.ELASTICSEARCH_INDEX,
+        "keyword_backend": "elasticsearch",
         "chroma_db_path": str(chroma_path) if chroma_path else "",
         "ingest_path": str(_resolve_path(os.environ.get("INGEST_PATH", "")) or ""),
         "enable_parent_child_chunking": bool(getattr(settings, "ENABLE_PARENT_CHILD_CHUNKING", False)),
@@ -320,6 +324,9 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run direct retrieval benchmarking over a LangSmith dataset.")
     parser.add_argument("--dataset", required=True, help="LangSmith dataset name")
     parser.add_argument(
+        "--keyword-index", required=True, type=validate_keyword_index, help="Dedicated software_reco_eval_* ES index",
+    )
+    parser.add_argument(
         "--method",
         required=True,
         choices=sorted(METHOD_PRESETS.keys()),
@@ -343,6 +350,7 @@ def main() -> None:
 
     root_dir = Path(__file__).resolve().parents[1]
     load_dotenv(root_dir / ".env")
+    os.environ["ELASTICSEARCH_INDEX"] = args.keyword_index
     preset_env = _apply_method_preset(args.method, args.top_k)
 
     import software_recommend_system.observability as observability
@@ -354,6 +362,14 @@ def main() -> None:
     from software_recommend_system.retriever import retrieve
 
     runtime = _runtime_summary(settings)
+    if settings.RECALL_ENABLE_KEYWORD:
+        from software_recommend_system.keyword_index import get_keyword_index
+
+        keyword = get_keyword_index()
+        count = int(keyword.client.count(index=keyword.index)["count"])
+        runtime["keyword_document_count"] = count
+        if count != runtime["child_collection_count"]:
+            raise RuntimeError("ES and Chroma counts differ; rebuild or synchronize the evaluation index first.")
     if runtime["recall_enable_web"] or runtime["recall_enable_memory"]:
         raise RuntimeError("Retrieval benchmark requires RECALL_ENABLE_WEB=false and RECALL_ENABLE_MEMORY=false.")
 

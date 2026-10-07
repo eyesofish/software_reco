@@ -13,6 +13,7 @@ streaming, human-in-the-loop, memory, and evaluation flows.
 - Optionally adds native CLIP shared-space text-to-image and image-to-image retrieval.
 - Routes requests through a recommendation workflow with skill routing and planning.
 - Retrieves evidence from local vector search, keyword search, web search, and memory.
+- Uses Chroma for semantic recall and Elasticsearch for indexed keyword recall, followed by application-level deduplication and reranking.
 - Ingests image knowledge assets into Chroma through caption-then-text embedding and returns the original images as citations.
 - Supports human confirmation before continuing with generated sub-questions.
 - Streams intermediate and final responses over Server-Sent Events.
@@ -69,7 +70,7 @@ streaming, human-in-the-loop, memory, and evaluation flows.
 
 ## Prerequisites
 
-- Python 3
+- Python 3.11 or newer
 - Java 21
 - Node.js with `npm` or `yarn`
 - An OpenAI-compatible or DashScope-compatible LLM/embedding setup for the FastAPI service
@@ -105,8 +106,74 @@ The startup script launches:
 - FastAPI on port `8000`
 - Spring Boot on port `8080`
 - React frontend on port `3000`
+- Elasticsearch in Docker on `http://127.0.0.1:9200` (use `-SkipElasticsearch` for an already managed service)
 
 It also writes started process IDs to `.runtime/started-processes.txt`.
+
+Elasticsearch needs Docker Desktop running. Startup waits at most 60 seconds for
+the ES launch command; a first image pull may continue in the background. If ES
+is unavailable, the application continues with the other retrieval channels.
+After ES becomes ready, restart FastAPI or run the synchronization command below.
+
+### Keyword retrieval: Elasticsearch + Chroma
+
+```text
+Files -> chunks + embeddings -> Chroma (semantic search)
+                         \-> Elasticsearch (keyword search)
+Query -> both recall channels -> existing deduplication / reranking -> LLM
+```
+
+Elasticsearch replaces the Python `rank_bm25` implementation that loaded at most
+2,000 chunks and rebuilt BM25 on every query. ES still uses BM25 scoring, with
+the built-in CJK analyzer for mixed Chinese/English content and tags. Keyword
+queries now search the entire indexed corpus; vectors remain in Chroma.
+
+Chroma is the source of truth. Successful text writes also upsert the same chunk
+IDs into ES; the image-caption replacement flow mirrors stale-chunk deletions.
+Every FastAPI startup reconciles all existing Chroma text chunks into ES in pages
+of 500, including files skipped by incremental ingestion. This does not call the
+embedding or vision models again. Native image vectors and parent-only documents
+are not added to the keyword index.
+
+The mirror is eventually consistent: a failed ES write leaves the Chroma write
+intact. Startup reconciliation or the command below repairs missing writes and
+removes ES records absent from Chroma. Pruning runs only after every source page
+has been copied successfully. Run manual synchronization with ingestion paused;
+this workflow targets the current single-worker application, not concurrent
+writers across several processes. File removal/text-change detection retains the
+existing ingestion behavior: reconciliation mirrors Chroma, not the filesystem.
+
+From the repository root, start ES with `docker compose up -d elasticsearch`.
+Then from `fastapi_demo`, repair or initially populate the keyword index:
+
+```powershell
+python -m software_recommend_system.ingestion.sync_keyword_index
+```
+
+The command prints counts on success and exits nonzero on failure. Normal keyword
+queries time out after 3 seconds and open a 30-second circuit on failure; they
+return no keyword evidence while vector, web, and memory recall can continue.
+There is no fallback to the old Python BM25 implementation.
+
+Configuration (also shown in `fastapi_demo/.env.example`):
+
+| Setting | Default |
+| --- | --- |
+| `RECALL_ENABLE_KEYWORD` | `true`; `false` disables keyword recall and automatic mirroring |
+| `ELASTICSEARCH_URL` | `http://127.0.0.1:9200` (`http://elasticsearch:9200` inside Compose) |
+| `ELASTICSEARCH_INDEX` | `software_recommendations_keyword_v1` |
+| `ELASTICSEARCH_REQUEST_TIMEOUT_SECONDS` | `3` |
+
+The bundled ES service is a local development node with persistent storage,
+one shard, zero replicas, a 512 MB JVM heap, and authentication disabled. Its
+host port binds only to loopback. Use separate index names for separate Chroma
+databases. Retrieval evaluation requires a `software_reco_eval_*` index; see
+`fastapi_demo/README.md` for commands.
+
+面试可以这样解释：Chroma 负责“意思相近”的语义召回，ES 负责软件名、错误码等
+词面匹配，结果进入已有去重与重排流程。ES 让关键词检索覆盖全库，并避免每次
+请求重新构建 BM25。两边复用 chunk ID 做幂等写入；同步失败保留向量检索，
+通过启动校准或手动同步恢复。召回率和延迟是否改善，要通过同一数据集实测。
 
 ## Manual Startup
 

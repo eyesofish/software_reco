@@ -818,13 +818,23 @@ class StartupImageIngestionTests(unittest.TestCase):
             "ids": ["ui.png:0", "ui.png:1", "ui.png:2"]
         }
 
-        startup_ingest._delete_stale_source_ids(
-            collection,
-            "ui.png",
-            ["ui.png:0", "ui.png:1"],
-        )
+        with patch.object(startup_ingest, "mirror_deletions") as mirror:
+            startup_ingest._delete_stale_source_ids(
+                collection,
+                "ui.png",
+                ["ui.png:0", "ui.png:1"],
+            )
+        mirror.assert_called_once_with(["ui.png:2"])
 
         collection.delete.assert_called_once_with(ids=["ui.png:2"])
+
+    def test_parent_cleanup_does_not_delete_keyword_chunks(self) -> None:
+        collection = MagicMock()
+        collection.get.return_value = {"ids": ["parent-old"]}
+        with patch.object(startup_ingest, "mirror_deletions") as mirror:
+            startup_ingest._delete_stale_source_ids(collection, "ui.png", [], sync_keyword=False)
+        collection.delete.assert_called_once_with(ids=["parent-old"])
+        mirror.assert_not_called()
 
 
 class AssetResolutionTests(unittest.TestCase):

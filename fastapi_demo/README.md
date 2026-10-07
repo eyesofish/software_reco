@@ -9,12 +9,35 @@ image-to-image retrieval without replacing the caption/OCR route.
 
 ## Setup
 
+Use Python 3.11 or newer (the project imports `datetime.UTC` and `typing.Self`).
+
 ```bash
 cd D:\Github\software_reco\fastapi_demo
 pip install -r requirements.txt
 ```
 
 ## Run
+
+Start the keyword search service from the repository root:
+
+```powershell
+docker compose up -d elasticsearch
+```
+
+Install the updated requirements before running FastAPI. Existing Chroma text
+chunks are automatically mirrored into ES after startup ingestion, including when
+there are no new input files. To synchronize without restarting the API, run from
+this directory:
+
+```powershell
+python -m software_recommend_system.ingestion.sync_keyword_index
+```
+
+Pause ingestion while running this manual command. It reads the configured
+`CHROMA_DB_PATH`, upserts every text chunk, and prunes stale ES IDs only after a
+complete copy. It does not regenerate embeddings. ES failures degrade the keyword
+channel; they do not block the application or discard Chroma writes. Recovery
+uses startup or manual synchronization, rather than a background retry queue.
 
 ```bash
 python main.py
@@ -26,7 +49,43 @@ Or:
 uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
 ```
 
-## Multimodal Configuration
+## Keyword Retrieval
+
+See the root README for the Elasticsearch architecture and connection settings.
+Keyword retrieval uses ES BM25 over content and tags, with built-in CJK analysis.
+
+## Retrieval Evaluation with Elasticsearch
+
+Both index building and querying require an explicit, dedicated ES index whose
+name starts with `software_reco_eval_`. Pass the same name for the same Chroma
+database; use another name for the child-only ablation. The suite script assigns
+separate unique names automatically. The existing `bm25_only` preset now measures
+Elasticsearch BM25, so historical Python BM25 scores should be treated as a
+different backend rather than silently compared as an identical method.
+
+```powershell
+python -m evaluation.build_retrieval_eval_index --chroma-path .runtime/eval/chroma --ingest-path .runtime/eval/docs --enable-parent-child true --keyword-index software_reco_eval_local
+python -m evaluation.retrieval_benchmark --dataset YOUR_DATASET --method bm25_only --keyword-index software_reco_eval_local
+```
+
+Before the second command, set `CHROMA_DB_PATH=.runtime/eval/chroma` and
+`ENABLE_PARENT_CHILD_CHUNKING=true` in that process environment. The benchmark
+checks ES availability and index count against Chroma before keyword-enabled
+runs. Reports record the keyword backend and index name. Image-vector-only
+benchmarks do not write to the keyword index.
+
+Run unit/regression tests normally with `python -m pytest`. To include the real
+ES integration test (2,501 chunks, Chinese, English, tags, update and deletion):
+
+```powershell
+$env:RUN_ES_INTEGRATION="1"
+python -m pytest tests/test_keyword_index_integration.py -q
+```
+
+It uses a UUID-named test index and removes it afterwards. `ES_TEST_URL` can
+override the default test connection `http://127.0.0.1:9200`.
+
+## Vision Configuration
 
 Configure an OpenAI-compatible vision endpoint:
 

@@ -4,6 +4,7 @@ from pathlib import Path
 
 from app.api.v1.startup_ingest import run_startup_ingestion_if_needed
 from app.core.config import settings
+from software_recommend_system.ingestion.sync_keyword_index import sync_keyword_index_on_startup
 
 logger = logging.getLogger(__name__)
 
@@ -13,6 +14,7 @@ class _EmbeddingLogFilter(logging.Filter):
         logger_name = record.name or ""
         return (
             logger_name.startswith("software_recommend_system.ingestion.")
+            or logger_name == "software_recommend_system.keyword_index"
             or logger_name == "app.api.v1.startup_ingest"
             or logger_name == "app.core.startup"
         )
@@ -112,5 +114,7 @@ async def startup_event_handler():
         run_startup_ingestion_if_needed()
     except Exception as exc:  # pragma: no cover - startup safeguard
         logger.exception("startup ingestion failed: %s", exc)
+
+    sync_keyword_index_on_startup()
 
     logger.info("Software Recommendation System API startup complete.")

@@ -140,9 +140,13 @@ $null = Invoke-AndCapture -CommandArgs @(
 ) -FailureMessage "TechQA export failed."
 
 # 2) Build the shared parent-child index and the child-only ablation index.
+$keywordRun = [guid]::NewGuid().ToString("N")
+$parentKeywordIndex = "software_reco_eval_${keywordRun}_parent"
+$childKeywordIndex = "software_reco_eval_${keywordRun}_child"
 $null = Invoke-AndCapture -CommandArgs @(
     "-m", "evaluation.build_retrieval_eval_index",
     "--chroma-path", $parentChildChroma,
+    "--keyword-index", $parentKeywordIndex,
     "--ingest-path", $ingestPath,
     "--enable-parent-child", "true",
     "--output-json", $parentBuildJson
@@ -151,6 +155,7 @@ $null = Invoke-AndCapture -CommandArgs @(
 $null = Invoke-AndCapture -CommandArgs @(
     "-m", "evaluation.build_retrieval_eval_index",
     "--chroma-path", $childOnlyChroma,
+    "--keyword-index", $childKeywordIndex,
     "--ingest-path", $ingestPath,
     "--enable-parent-child", "false",
     "--output-json", $childBuildJson
@@ -192,6 +197,7 @@ foreach ($method in $methods) {
         $resultCsv = Join-Path $rawDir ("{0}__b{1}.csv" -f $method.Name, $bucketIndex)
 
         $selectedChroma = if ($method.IndexMode -eq "child_only") { $childOnlyChroma } else { $parentChildChroma }
+        $selectedKeywordIndex = if ($method.IndexMode -eq "child_only") { $childKeywordIndex } else { $parentKeywordIndex }
         $env:CHROMA_DB_PATH = $selectedChroma
         $env:INGEST_PATH = $ingestPath
         $env:ENABLE_PARENT_CHILD_CHUNKING = if ($method.IndexMode -eq "child_only") { "false" } else { "true" }
@@ -201,6 +207,7 @@ foreach ($method in $methods) {
         $null = Invoke-AndCapture -CommandArgs @(
             "-m", "evaluation.retrieval_benchmark",
             "--dataset", $datasetName,
+            "--keyword-index", $selectedKeywordIndex,
             "--method", $method.Name,
             "--top-k", $topK,
             "--output-json", $resultJson,

@@ -2,22 +2,18 @@ import logging
 import math
 import re
 import time
-from collections.abc import Iterable
 from typing import Any
-
-import chromadb
-from rank_bm25 import BM25Okapi
 
 from .config import settings
 from .document_schema import Document, Metadata
 from .image_embedder import ImageEmbeddingError, embed_image_texts
-from .ingestion.indexer import get_chroma_collection, get_image_collection
+from .ingestion.indexer import get_image_collection
+from .keyword_index import get_keyword_index
 from .logging_utils import elapsed_ms, error_fields, log_event, new_trace_id, text_preview
 from .tools import _tavily_search, similarity_search
 
 logger = logging.getLogger(__name__)
 
-_KEYWORD_COLLECTION_NAME = "software_recommendations"
 _KEYWORD_RECALL_UNAVAILABLE_UNTIL = 0.0
 
 
@@ -61,26 +57,6 @@ def _keyword_circuit_ttl_seconds() -> float:
     except Exception:
         ttl = 30.0
     return max(0.0, ttl)
-
-
-def _collection_get_documents(scan_limit: int) -> dict[str, Any]:
-    def _read(collection: Any) -> dict[str, Any]:
-        try:
-            return collection.get(include=["documents", "metadatas"], limit=scan_limit)
-        except TypeError:
-            return collection.get(include=["documents", "metadatas"])
-
-    try:
-        collection = get_chroma_collection(collection_name=_KEYWORD_COLLECTION_NAME)
-        return _read(collection)
-    except Exception as exc:
-        # Chroma can intermittently throw tenant errors after collection rebuild.
-        # Retry with a fresh client once before declaring the keyword channel unavailable.
-        if "tenant" not in str(exc or "").lower():
-            raise
-        client = chromadb.PersistentClient(path=settings.CHROMA_DB_PATH)
-        collection = client.get_or_create_collection(_KEYWORD_COLLECTION_NAME)
-        return _read(collection)
 
 
 def recall_vector(query: str, top_k: int, trace_id: str | None = None) -> list[Document]:
@@ -408,20 +384,10 @@ def recall_web(query: str, top_k: int, trace_id: str | None = None) -> list[Docu
     return _tavily_search(query=query, trace_id=trace_id)[:limit]
 
 
-def _keyword_corpus_tokens(text: str, metadata: dict[str, Any]) -> list[str]:
-    tokens = _tokenize_terms(text)
-    tags = _normalize_tags(metadata.get("tags"))
-    if tags:
-        tokens.extend(_tokenize_terms(" ".join(tags)))
-    return tokens
-
-
 def recall_keyword(query: str, top_k: int, trace_id: str | None = None) -> list[Document]:
     global _KEYWORD_RECALL_UNAVAILABLE_UNTIL
     limit = max(1, int(top_k))
-    scan_limit = max(limit, int(getattr(settings, "RECALL_KEYWORD_SCAN_LIMIT", 2000)))
-    query_tokens = _tokenize_terms(query)
-    if not query_tokens:
+    if not settings.RECALL_ENABLE_KEYWORD or not query.strip():
         return []
 
     current_trace_id = trace_id or new_trace_id("search")
@@ -440,76 +406,7 @@ def recall_keyword(query: str, top_k: int, trace_id: str | None = None) -> list[
         return []
 
     try:
-        raw = _collection_get_documents(scan_limit)
-        documents: Iterable[Any] = raw.get("documents") or []
-        metadatas: Iterable[Any] = raw.get("metadatas") or []
-        documents = list(documents)[:scan_limit]
-        metadatas = list(metadatas)[:scan_limit]
-
-        scored: list[tuple[float, str, dict[str, Any]]] = []
-        corpus_rows: list[tuple[str, dict[str, Any], list[str], set[str]]] = []
-        query_token_set = set(query_tokens)
-        for idx, content in enumerate(documents):
-            text = str(content or "").strip()
-            if not text:
-                continue
-            metadata = {}
-            if idx < len(metadatas):
-                metadata = metadatas[idx] or {}
-
-            text_tokens = _keyword_corpus_tokens(text, metadata)
-            text_token_set = set(text_tokens)
-            if not text_token_set:
-                continue
-            corpus_rows.append((text, metadata, text_tokens, text_token_set))
-
-        if corpus_rows:
-            bm25 = BM25Okapi([tokens for _, _, tokens, _ in corpus_rows])
-            scores = bm25.get_scores(query_tokens)
-            matched_rows: list[tuple[float, str, dict[str, Any]]] = []
-            for score, (text, metadata, _, text_token_set) in zip(scores, corpus_rows, strict=True):
-                if not (query_token_set & text_token_set):
-                    continue
-                matched_rows.append((float(score), text, metadata))
-
-            score_shift = 0.0
-            if matched_rows and max(score for score, _, _ in matched_rows) <= 0:
-                # BM25Okapi can return non-positive scores for very small corpora.
-                # Shift only matching rows so real hits are retained without changing their order.
-                score_shift = abs(min(score for score, _, _ in matched_rows)) + 1e-9
-
-            for score, text, metadata in matched_rows:
-                adjusted_score = score + score_shift
-                if adjusted_score <= 0:
-                    continue
-                scored.append((adjusted_score, text, metadata))
-
-        scored.sort(key=lambda item: item[0], reverse=True)
-        top_items = scored[:limit]
-
-        output: list[Document] = []
-        for index, (score, content, metadata) in enumerate(top_items, start=1):
-            output.append(
-                Document(
-                    content=content,
-                    metadata={
-                        "source": metadata.get("source", "keyword_index"),
-                        "doc_id": (
-                            metadata.get("source_doc_id")
-                            or metadata.get("doc_id")
-                            or metadata.get("filename")
-                            or f"keyword:{index}"
-                        ),
-                        "author": metadata.get("author"),
-                        "published_date": metadata.get("published_date"),
-                        "updated_date": metadata.get("updated_date"),
-                        "url": metadata.get("url"),
-                        "tags": _normalize_tags(metadata.get("tags")),
-                        "source_ranking": _safe_float(metadata.get("source_ranking"), 0.0),
-                    },
-                    score=float(score),
-                )
-            )
+        output = get_keyword_index().search(query, limit)
 
         log_event(
             logger,

@@ -1,6 +1,7 @@
 [CmdletBinding()]
 param(
     [switch]$SkipFrontend,
+    [switch]$SkipElasticsearch,
     [switch]$InstallDeps
 )
 
@@ -69,13 +70,35 @@ if ($InstallDeps) {
 
 $started = @()
 
+if (-not $SkipElasticsearch) {
+    Write-Host "[Start] Elasticsearch -> http://127.0.0.1:9200" -ForegroundColor Green
+    try {
+        Require-Command -Name "docker" -Hint "Install Docker Desktop or use -SkipElasticsearch."
+        $esLog = Join-Path $RepoRoot ".runtime"
+        New-Item -Path $esLog -ItemType Directory -Force | Out-Null
+        # Use a bounded background process: a first image pull can take minutes.
+        $esProcess = Start-Process -FilePath "docker" -WorkingDirectory $RepoRoot `
+            -ArgumentList @("compose", "up", "-d", "--wait", "--wait-timeout", "55", "elasticsearch") `
+            -WindowStyle Hidden -PassThru `
+            -RedirectStandardOutput (Join-Path $esLog "elasticsearch-start.log") `
+            -RedirectStandardError (Join-Path $esLog "elasticsearch-start-error.log")
+        if (-not $esProcess.WaitForExit(60000)) {
+            Write-Warning "ES startup is still running. Keyword retrieval may be unavailable; sync after ES is ready."
+        } elseif ($esProcess.ExitCode -ne 0) {
+            Write-Warning "ES startup failed; see .runtime/elasticsearch-start-error.log. Other retrieval channels remain available."
+        }
+    } catch {
+        Write-Warning "ES startup failed: $_. Other retrieval channels remain available."
+    }
+}
+
 Write-Host "[Start] FastAPI -> http://127.0.0.1:8000" -ForegroundColor Green
 $fastapiCmd = "cd /d `"$FastApiDir`" && python main.py"
-$started += Start-Process -FilePath "cmd.exe" -ArgumentList "/k", $fastapiCmd -PassThru
+$started += Start-Process -FilePath "cmd.exe" -ArgumentList "/k", $fastapiCmd -WindowStyle Hidden -PassThru
 
 Write-Host "[Start] SpringBoot -> http://127.0.0.1:8080" -ForegroundColor Green
 $springCmd = "cd /d `"$SpringDir`" && mvnw.cmd spring-boot:run"
-$started += Start-Process -FilePath "cmd.exe" -ArgumentList "/k", $springCmd -PassThru
+$started += Start-Process -FilePath "cmd.exe" -ArgumentList "/k", $springCmd -WindowStyle Hidden -PassThru
 
 if (-not $SkipFrontend) {
     Write-Host "[Start] Frontend -> http://127.0.0.1:3000" -ForegroundColor Green
@@ -84,7 +107,7 @@ if (-not $SkipFrontend) {
     } else {
         $frontendCmd = "cd /d `"$FrontendDir`" && npm run start"
     }
-    $started += Start-Process -FilePath "cmd.exe" -ArgumentList "/k", $frontendCmd -PassThru
+    $started += Start-Process -FilePath "cmd.exe" -ArgumentList "/k", $frontendCmd -WindowStyle Hidden -PassThru
 }
 
 $runtimeDir = Join-Path $RepoRoot ".runtime"
@@ -93,7 +116,7 @@ $pidFile = Join-Path $runtimeDir "started-processes.txt"
 $started | ForEach-Object { "$($_.Id)`t$($_.ProcessName)" } | Set-Content -Path $pidFile -Encoding UTF8
 
 Write-Host ""
-Write-Host "All services started in new terminal windows." -ForegroundColor Yellow
+Write-Host "Application services started in the background." -ForegroundColor Yellow
 Write-Host "PIDs saved to: $pidFile"
 Write-Host ""
 Write-Host "Usage:"

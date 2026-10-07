@@ -7,6 +7,7 @@ import chromadb
 
 from ..config import settings
 from ..image_embedder import image_embedding_identity
+from ..keyword_index import mirror_chunks
 
 DEFAULT_COLLECTION_NAME = "software_recommendations"
 DEFAULT_PARENT_COLLECTION_NAME = "software_recommendations_parent"
@@ -60,6 +61,8 @@ def index_embeddings(
     metadatas: Sequence[dict[str, Any]],
     embeddings: Sequence[Sequence[float]],
     collection_name: str = DEFAULT_COLLECTION_NAME,
+    *,
+    sync_keyword: bool = True,
 ) -> int:
     """Write chunk records into Chroma and return indexed count."""
     ids = [str(item) for item in chunk_ids]
@@ -85,6 +88,8 @@ def index_embeddings(
         metadatas=metas,
         embeddings=vectors,
     )
+    if sync_keyword and collection_name == DEFAULT_COLLECTION_NAME:
+        mirror_chunks(ids, docs, metas)
     return expected_len
 
 

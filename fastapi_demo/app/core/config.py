@@ -100,7 +100,9 @@ class Settings(BaseSettings):
     RECALL_IMAGE_VECTOR_TOP_K: int = 12
     RECALL_WEB_TOP_K: int = 3
     RECALL_KEYWORD_TOP_K: int = 15
-    RECALL_KEYWORD_SCAN_LIMIT: int = 2000
+    ELASTICSEARCH_URL: str = "http://127.0.0.1:9200"
+    ELASTICSEARCH_INDEX: str = "software_recommendations_keyword_v1"
+    ELASTICSEARCH_REQUEST_TIMEOUT_SECONDS: float = 3.0
     KEYWORD_RECALL_CIRCUIT_BREAKER_SECONDS: float = 30.0
     RECALL_MEMORY_TOP_K: int = 6
     # Wall-clock budget for the parallel recall fan-out. Channels still running

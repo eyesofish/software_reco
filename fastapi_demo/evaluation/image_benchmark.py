@@ -873,6 +873,7 @@ def build_index(
         chunk_texts=captions,
         metadatas=metadatas,
         embeddings=text_vectors,
+        sync_keyword=False,
     )
     image_count = index_image_embeddings(
         image_ids=ids,

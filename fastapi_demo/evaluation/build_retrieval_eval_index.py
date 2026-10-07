@@ -10,6 +10,8 @@ from typing import Any
 
 from dotenv import load_dotenv
 
+from evaluation.keyword_index_config import validate_keyword_index
+
 
 def _resolve_path(value: str) -> Path:
     path = Path(str(value).strip()).expanduser()
@@ -26,6 +28,9 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Build an isolated Chroma index for retrieval benchmarking.")
     parser.add_argument("--chroma-path", required=True, help="Target isolated Chroma DB path")
     parser.add_argument("--ingest-path", required=True, help="Directory containing ingest docs")
+    parser.add_argument(
+        "--keyword-index", required=True, type=validate_keyword_index, help="Dedicated software_reco_eval_* ES index",
+    )
     parser.add_argument(
         "--enable-parent-child",
         required=True,
@@ -48,11 +53,14 @@ def main() -> None:
     os.environ["CHROMA_DB_PATH"] = str(chroma_path)
     os.environ["INGEST_PATH"] = str(ingest_path)
     os.environ["ENABLE_PARENT_CHILD_CHUNKING"] = args.enable_parent_child
+    os.environ["ELASTICSEARCH_INDEX"] = args.keyword_index
+    os.environ["RECALL_ENABLE_KEYWORD"] = "true"
 
     import chromadb
 
     from app.api.v1.startup_ingest import run_startup_ingestion_if_needed
     from software_recommend_system.config import settings as rag_settings
+    from software_recommend_system.ingestion.sync_keyword_index import sync_keyword_index
 
     chroma_path.parent.mkdir(parents=True, exist_ok=True)
     ingest_path.mkdir(parents=True, exist_ok=True)
@@ -63,6 +71,7 @@ def main() -> None:
         client.delete_collection(name)
 
     run_startup_ingestion_if_needed()
+    keyword_sync = sync_keyword_index()
 
     refreshed_client = chromadb.PersistentClient(path=str(chroma_path))
     child_name = "software_recommendations"
@@ -75,6 +84,8 @@ def main() -> None:
             return 0
 
     summary = {
+        "keyword_index": args.keyword_index,
+        "keyword_sync": keyword_sync,
         "chroma_db_path": str(chroma_path),
         "ingest_path": str(ingest_path),
         "enable_parent_child_chunking": args.enable_parent_child == "true",

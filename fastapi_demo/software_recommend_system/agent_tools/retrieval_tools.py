@@ -99,7 +99,7 @@ class WebTool(Tool):
 
 class KeywordTool(Tool):
     name = "keyword"
-    description = "BM25 keyword recall against the local Chroma 'software_recommendations' collection."
+    description = "Elasticsearch BM25 keyword search over knowledge-base content and tags."
     input_schema = {
         "type": "object",
         "properties": {
