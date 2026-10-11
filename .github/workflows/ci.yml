@@ -26,18 +26,18 @@ jobs:
         run: |
           python -m pip install -r requirements.txt
           python -m pip install -e ".[dev]"
-      - name: Lint (ruff)
-        run: python -m ruff check .
-      - name: Type check (mypy)
-        continue-on-error: true
-        run: python -m mypy --strict --ignore-missing-imports software_recommend_system app 2>&1 | head -100
-      - name: Tests
-        run: python -m pytest tests/ -v
-        env:
-          OPENAI_API_KEY: dummy
-          DASHSCOPE_API_KEY: dummy
-          TAVILY_API_KEY: dummy
-          LANGSMITH_API_KEY: dummy
+      - name: Offline local checks
+        run: python -m evaluation.local_checks
+      - name: Upload check reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: offline-checks-python-${{ matrix.python-version }}
+          path: |
+            fastapi_demo/evaluation/reports/checks/**
+            !fastapi_demo/evaluation/reports/checks/**/chroma/**
+          include-hidden-files: true
+          retention-days: 14
 
   java:
     name: Java (Spring Boot)

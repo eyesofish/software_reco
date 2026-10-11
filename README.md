@@ -53,6 +53,13 @@ streaming, human-in-the-loop, memory, and evaluation flows.
 ## Notable Features
 
 - Skill router with domain-specific profiles such as software comparison, architecture design, implementation guidance, and quick fact QA.
+- Few-shot routing prompts include labeled input/output examples: six for
+  `rag`/`direct`/`hitl` mode routing and five for task selection. Mode routing uses
+  them by default when its model is available (including the completion API
+  fallback). Task examples apply only when `SKILL_ROUTER_USE_LLM=true` and the
+  rule score is below the LLM threshold; task routing remains rule-based by
+  default. Examples guide inference without training model weights, and their
+  confidence values illustrate the output format rather than measured accuracy.
 - Planner-driven retrieval flow with sub-question generation.
 - Optional LLM-driven tool-calling loop (`AGENT_LOOP_ENABLE`) that lets the model
   choose which retrieval tools to call through the `ToolRegistry`, with step and
@@ -174,6 +181,60 @@ databases. Retrieval evaluation requires a `software_reco_eval_*` index; see
 词面匹配，结果进入已有去重与重排流程。ES 让关键词检索覆盖全库，并避免每次
 请求重新构建 BM25。两边复用 chunk ID 做幂等写入；同步失败保留向量检索，
 通过启动校准或手动同步恢复。召回率和延迟是否改善，要通过同一数据集实测。
+
+## Structure-aware document chunking
+
+New Markdown and text-based PDF documents use `CHUNKING_STRATEGY=structure`
+by default. Markdown headings (including Setext headings) define sections;
+fenced code is split on whole lines. PDF parsing uses matched outline titles,
+numbered headings, and font-size cues, with page/paragraph fallback when a
+section cannot be identified. PDF tables are extracted separately from prose.
+Scanned pages are reported as `needs_ocr`; this pipeline does not run OCR or
+merge tables across PDF pages. Complex layouts can still require preprocessing.
+
+Chunks do not cross section boundaries. Small tables stay intact; larger tables
+are split into complete rows with repeated headers. PDF headers require a clear
+font-style/size difference; otherwise generated column names preserve the first
+row as data. The current character budgets (800 normally, 1600/400 for optional
+parent/child chunks) include repeated section titles and table headers. An
+indivisible row, code line, or heading context can exceed the budget and is
+marked `oversized`. Overlap is used for sentence-split prose within a paragraph;
+table data rows and code lines are not overlapped.
+
+Source offsets refer to **normalized extracted text**, not PDF bytes or original
+Markdown file bytes. `content_body_start/end` identify the source slice inside
+the rendered chunk; surrounding titles, headers, and fences are context.
+Section paths, PDF pages, table row ranges, and the chunking version survive
+both vector and keyword retrieval, including parent expansion.
+
+Set `CHUNKING_STRATEGY=sentence` to use the legacy sentence splitter. Plain text
+and image captions continue to use that splitter. Startup still skips already
+indexed files: changing this setting does not automatically re-embed them.
+
+From `fastapi_demo`, preview selected files without calling embedding or writing
+an index (paths are relative to `INGEST_PATH`, and `--path` is repeatable):
+
+```powershell
+python -m software_recommend_system.ingestion.rechunk --path guide.md --path manuals/setup.pdf
+```
+
+Pause ingestion writers before applying the replacement:
+
+```powershell
+python -m software_recommend_system.ingestion.rechunk --path guide.md --apply
+```
+
+The command preserves existing source identities, rejects cross-file ID
+collisions, and cleans up obsolete child/parent records. Parsing or embedding
+failure leaves existing records intact. Chroma and Elasticsearch writes are not
+atomic: a write/sync failure returns a nonzero exit code; rerun `--apply` to finish
+the replacement. The existing `sync_keyword_index` command can repair the ES
+mirror, but does not finish an interrupted rechunk cleanup. No database-wide
+delete or automatic migration is performed.
+
+Parser dependencies are included in the Python requirements. The PDF fixture
+tests additionally use the `reportlab` development dependency. Run the focused
+checks with `python -m pytest tests/test_structural_chunking.py tests/test_rechunk.py`.
 
 ## Manual Startup
 

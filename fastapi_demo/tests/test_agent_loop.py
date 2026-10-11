@@ -252,6 +252,17 @@ class RetrieveNodeIntegrationTests(unittest.TestCase):
 
         return AgentState(user_query="kafka", sub_questions=["kafka partitions"])
 
+    def _invoke(self, nodes):
+        from langgraph.graph import END, StateGraph
+
+        from software_recommend_system.state import AgentState
+
+        graph = StateGraph(AgentState)
+        graph.add_node("retrieve", nodes.retrieve_node)
+        graph.set_entry_point("retrieve")
+        graph.add_edge("retrieve", END)
+        return graph.compile().invoke(self._state())
+
     def test_disabled_by_default(self) -> None:
         from software_recommend_system import nodes
 
@@ -263,10 +274,10 @@ class RetrieveNodeIntegrationTests(unittest.TestCase):
         with (
             patch.object(nodes.settings, "AGENT_LOOP_ENABLE", False),
             patch.object(nodes, "run_agent_loop") as loop,
-            patch.object(nodes, "retrieve_with_search") as static,
+            patch.object(nodes, "retrieve") as static,
         ):
-            static.return_value = SimpleNamespace(result=lambda: [_doc("static-1")])
-            result = nodes.retrieve_node(self._state())
+            static.return_value = [_doc("static-1")]
+            result = self._invoke(nodes)
 
         loop.assert_not_called()
         static.assert_called_once()
@@ -278,9 +289,9 @@ class RetrieveNodeIntegrationTests(unittest.TestCase):
         with (
             patch.object(nodes.settings, "AGENT_LOOP_ENABLE", True),
             patch.object(nodes, "run_agent_loop", return_value=[_doc("agent-1")]) as loop,
-            patch.object(nodes, "retrieve_with_search") as static,
+            patch.object(nodes, "retrieve") as static,
         ):
-            result = nodes.retrieve_node(self._state())
+            result = self._invoke(nodes)
 
         loop.assert_called_once()
         static.assert_not_called()
@@ -292,10 +303,10 @@ class RetrieveNodeIntegrationTests(unittest.TestCase):
         with (
             patch.object(nodes.settings, "AGENT_LOOP_ENABLE", True),
             patch.object(nodes, "run_agent_loop", return_value=None) as loop,
-            patch.object(nodes, "retrieve_with_search") as static,
+            patch.object(nodes, "retrieve") as static,
         ):
-            static.return_value = SimpleNamespace(result=lambda: [_doc("static-1")])
-            result = nodes.retrieve_node(self._state())
+            static.return_value = [_doc("static-1")]
+            result = self._invoke(nodes)
 
         loop.assert_called_once()
         static.assert_called_once()

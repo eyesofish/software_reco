@@ -137,7 +137,18 @@ def _run_in_worker(control: RunControl, operation: Callable[[], _T]) -> _T:
         control.check()
         return result
     finally:
-        _CURRENT_CONTROL.reset(token)
+        try:
+            _release_run(control)
+        finally:
+            _CURRENT_CONTROL.reset(token)
+
+
+def _release_run(control: RunControl) -> None:
+    from .performance import span
+
+    # A node can finish before checkpoint/executor teardown. Emit completion
+    # only after the session and worker capacity have actually been released.
+    with span("execution.cleanup", session_id=control.session_id, stop_reason=control.stop_reason):
         _finish_run(control)
         _CAPACITY.release()
 
@@ -147,7 +158,9 @@ async def run_controlled(
 ) -> tuple[_T, RunControl]:
     control = _begin_run(session_id, timeout_seconds)
     try:
-        worker_future = _POOL.submit(_run_in_worker, control, lambda: operation(control))
+        worker_future = _POOL.submit(
+            contextvars.copy_context().run, _run_in_worker, control, lambda: operation(control)
+        )
     except BaseException:
         _finish_run(control)
         _CAPACITY.release()
@@ -207,14 +220,15 @@ async def stream_controlled(
                 control.cancel("recursion_limit")
             publish(("error", exc))
         finally:
-            _CURRENT_CONTROL.reset(token)
-            _finish_run(control)
-            _CAPACITY.release()
+            try:
+                _release_run(control)
+            finally:
+                _CURRENT_CONTROL.reset(token)
 
     completed = False
     try:
         try:
-            _POOL.submit(produce)
+            _POOL.submit(contextvars.copy_context().run, produce)
         except BaseException:
             _finish_run(control)
             _CAPACITY.release()

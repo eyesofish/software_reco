@@ -45,6 +45,8 @@ def log_event(
     payload: dict[str, Any] = {"event": event}
     payload.update({key: value for key, value in fields.items() if value is not None})
     logger.log(level, _serialize_payload(payload))
+    from .performance import record_elapsed_event
+    record_elapsed_event(event, fields)
 
 
 def log_exception(
@@ -55,3 +57,5 @@ def log_exception(
     payload: dict[str, Any] = {"event": event}
     payload.update({key: value for key, value in fields.items() if value is not None})
     logger.exception(_serialize_payload(payload))
+    from .performance import record_elapsed_event
+    record_elapsed_event(event, fields)

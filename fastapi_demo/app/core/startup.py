@@ -1,4 +1,5 @@
 import logging
+import os
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
@@ -75,7 +76,7 @@ def _add_rotating_file_handler(
 
 def configure_runtime_file_logging() -> Path:
     project_root = Path(__file__).resolve().parents[2]
-    runtime_dir = project_root / ".runtime"
+    runtime_dir = Path(os.environ.get("PERFORMANCE_RUNTIME_DIR", str(project_root / ".runtime")))
     runtime_dir.mkdir(parents=True, exist_ok=True)
     embedding_log_path = runtime_dir / "embedding.log"
     tavily_log_path = runtime_dir / "tavily_search.log"

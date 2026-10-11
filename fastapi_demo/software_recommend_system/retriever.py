@@ -1,7 +1,9 @@
+import contextvars
 import hashlib
 import logging
 import math
 import re
+import time
 from collections.abc import Iterable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from concurrent.futures import TimeoutError as FuturesTimeoutError
@@ -12,8 +14,10 @@ from typing import Any
 
 from .config import settings
 from .document_schema import Document
-from .logging_utils import log_event, new_trace_id, text_preview
+from .execution_control import check_current_run, current_request_timeout
+from .logging_utils import elapsed_ms, log_event, new_trace_id, text_preview
 from .observability import traceable
+from .performance import span, timed
 from .retrieval_channels import (
     recall_image_vector,
     recall_keyword,
@@ -132,14 +136,16 @@ def _load_cross_encoder() -> Any:
             return None
 
         try:
-            from sentence_transformers import CrossEncoder
+            with span("retrieval.rerank.model_load", model=settings.RERANK_MODEL_NAME,
+                      device=settings.RERANK_MODEL_DEVICE):
+                from sentence_transformers import CrossEncoder
 
-            _CROSS_ENCODER_MODEL = CrossEncoder(
-                model_name_or_path=settings.RERANK_MODEL_NAME,
-                device=settings.RERANK_MODEL_DEVICE,
-                max_length=settings.RERANK_MODEL_MAX_LENGTH,
-                local_files_only=settings.RERANK_MODEL_LOCAL_FILES_ONLY,
-            )
+                _CROSS_ENCODER_MODEL = CrossEncoder(
+                    model_name_or_path=settings.RERANK_MODEL_NAME,
+                    device=settings.RERANK_MODEL_DEVICE,
+                    max_length=settings.RERANK_MODEL_MAX_LENGTH,
+                    local_files_only=settings.RERANK_MODEL_LOCAL_FILES_ONLY,
+                )
             log_event(
                 logger,
                 logging.INFO,
@@ -177,11 +183,12 @@ def _score_with_cross_encoder(query: str, docs: list[Document]) -> list[float] |
 
     pairs = [(query_text, str(_get_field(doc, "content", "") or "")) for doc in docs]
     try:
-        raw_scores = model.predict(
-            pairs,
-            batch_size=settings.RERANK_MODEL_BATCH_SIZE,
-            show_progress_bar=False,
-        )
+        with span("retrieval.rerank.predict", model=settings.RERANK_MODEL_NAME, docs=len(pairs)):
+            raw_scores = model.predict(
+                pairs,
+                batch_size=settings.RERANK_MODEL_BATCH_SIZE,
+                show_progress_bar=False,
+            )
     except Exception as exc:
         log_event(
             logger,
@@ -213,6 +220,8 @@ def _resolve_doc_id(metadata: Any, content: str, source: str, index: int) -> str
 
 
 def _normalize_documents(documents: Iterable[Document], source_hint: str, channel: str) -> list[Document]:
+    from .document_schema import STRUCTURE_METADATA_FIELDS
+
     normalized: list[Document] = []
     for index, doc in enumerate(documents):
         content = str(_get_field(doc, "content", "") or "")
@@ -230,6 +239,8 @@ def _normalize_documents(documents: Iterable[Document], source_hint: str, channe
             Document(
                 content=content,
                 metadata={
+                    **{key: _get_field(metadata, key) for key in STRUCTURE_METADATA_FIELDS
+                       if _get_field(metadata, key) is not None},
                     "doc_id": doc_id,
                     "source": source,
                     "retrieval_source": source_hint,
@@ -609,6 +620,7 @@ def _resolve_channel_timeout(override: float | None = None) -> float | None:
 
 
 @traceable(name="rerank_documents")
+@timed("retrieval.rerank")
 def rerank_documents(
     query: str,
     docs: list[Document],
@@ -616,9 +628,11 @@ def rerank_documents(
     *,
     selected_skill: str | None = None,
     session_id: str | None = None,
+    use_model: bool | None = None,
 ) -> list[Document]:
     """Rerank merged documents and keep top_n with normalized metadata.score."""
 
+    started_at = time.perf_counter()
     if not docs:
         return []
 
@@ -628,7 +642,7 @@ def rerank_documents(
     weights = _normalize_weights()
     query_tokens = _tokenize(query)
 
-    cross_encoder_scores = _score_with_cross_encoder(query, scored_docs)
+    cross_encoder_scores = _score_with_cross_encoder(query, scored_docs) if use_model is not False else None
     if cross_encoder_scores is not None and len(cross_encoder_scores) == len(scored_docs):
         mode = "cross_encoder_hybrid"
         for doc, ce_score in zip(scored_docs, cross_encoder_scores, strict=True):
@@ -706,6 +720,7 @@ def rerank_documents(
         query=text_preview(query),
         docs=len(scored_docs),
         top_n=limit,
+        elapsed_ms=elapsed_ms(started_at),
     )
 
     ranked_docs = sorted(
@@ -716,71 +731,41 @@ def rerank_documents(
     return ranked_docs[:limit]
 
 
-@traceable(name="retrieve_shared")
-def retrieve(
-    query: str,
-    top_k: int = 5,
-    *,
-    session_id: str | None = None,
-    selected_skill: str | None = None,
-    memory_context: list[dict[str, Any]] | None = None,
-    query_image_candidates: list[Document] | None = None,
-    channel_timeout_seconds: float | None = None,
-) -> list[Document]:
-    """Run shared hybrid retrieval and return normalized documents."""
+def _web_request_reason(query: str) -> str:
+    if re.search(r"不要联网|禁止联网|离线|\boffline\b|do not (?:search|use).*\b(?:web|internet)\b", query, re.I):
+        return "user_opt_out"
+    if re.search(r"最新|实时|今天|目前|官网|联网|网上|搜索网页|当前价格|最新版本|"
+                 r"\b(?:latest|current|today|online|internet|web|pricing)\b", query, re.I):
+        return "external_information"
+    return "local_first"
 
-    trace_id = new_trace_id("search")
-    query_hint = text_preview(query)
-    vector_k = max(1, int(getattr(settings, "RECALL_VECTOR_TOP_K", top_k)))
-    image_vector_k = max(1, int(getattr(settings, "RECALL_IMAGE_VECTOR_TOP_K", top_k)))
-    web_k = max(1, int(getattr(settings, "RECALL_WEB_TOP_K", top_k)))
-    keyword_k = max(1, int(getattr(settings, "RECALL_KEYWORD_TOP_K", top_k)))
-    memory_k = max(1, int(getattr(settings, "RECALL_MEMORY_TOP_K", top_k)))
-    rerank_top_n = max(int(top_k), int(getattr(settings, "RERANK_FINAL_TOP_N", top_k)))
 
-    recall_tasks: list[tuple[str, Any]] = []
-    if getattr(settings, "RECALL_ENABLE_VECTOR", True):
-        recall_tasks.append(("vector", lambda: recall_vector(query=query, top_k=vector_k, trace_id=trace_id)))
-    if getattr(settings, "RECALL_ENABLE_IMAGE_VECTOR", False):
-        recall_tasks.append(
-            (
-                "image_vector",
-                lambda: recall_image_vector(
-                    query=query,
-                    top_k=image_vector_k,
-                    seed_documents=query_image_candidates,
-                    trace_id=trace_id,
-                ),
-            )
-        )
-    if getattr(settings, "RECALL_ENABLE_WEB", True):
-        recall_tasks.append(("web", lambda: recall_web(query=query, top_k=web_k, trace_id=trace_id)))
-    if getattr(settings, "RECALL_ENABLE_KEYWORD", True):
-        recall_tasks.append(("keyword", lambda: recall_keyword(query=query, top_k=keyword_k, trace_id=trace_id)))
-    if getattr(settings, "RECALL_ENABLE_MEMORY", True):
-        recall_tasks.append(
-            (
-                "memory",
-                lambda: recall_memory(
-                    query=query,
-                    session_id=session_id,
-                    top_k=memory_k,
-                    memory_context=memory_context,
-                ),
-            )
-        )
+def _local_evidence_sufficient(channel_docs: dict[str, list[Document]]) -> bool:
+    # Memory recalls are personal context, not independent factual evidence.
+    docs = []
+    for channel in ("vector", "image_vector", "keyword"):
+        docs.extend(_normalize_documents(channel_docs.get(channel, []), channel, channel))
+    docs = _deduplicate_documents(docs)
+    strong = [doc for doc in docs if _safe_float(_get_field(doc, "score", 0.0))
+              >= settings.RECALL_WEB_MIN_LOCAL_SCORE]
+    return len(strong) >= settings.RECALL_WEB_MIN_LOCAL_DOCS
 
+
+def _run_recall_tasks(recall_tasks: list[tuple[str, Any]], timeout: float | None,
+                      trace_id: str, query_hint: str) -> tuple[dict[str, list[Document]], list[str]]:
     channel_docs: dict[str, list[Document]] = {}
     timed_out_channels: list[str] = []
     if recall_tasks:
-        channel_timeout = _resolve_channel_timeout(channel_timeout_seconds)
+        channel_timeout = timeout
         # Deliberately not using `with`: ThreadPoolExecutor.__exit__ calls
         # shutdown(wait=True), which would block on the slowest channel and
         # negate the timeout. Straggler threads are abandoned instead so the
         # request returns on budget; they finish and exit on their own.
         executor = ThreadPoolExecutor(max_workers=min(5, len(recall_tasks)))
         try:
-            future_map = {executor.submit(run): channel for channel, run in recall_tasks}
+            future_map = {
+                executor.submit(contextvars.copy_context().run, run): channel for channel, run in recall_tasks
+            }
             pending = set(future_map)
             try:
                 for future in as_completed(future_map, timeout=channel_timeout):
@@ -832,6 +817,97 @@ def retrieve(
             completed_channels=sorted(set(channel_docs) - set(timed_out_channels)),
         )
 
+    return channel_docs, timed_out_channels
+
+
+@traceable(name="retrieve_shared")
+def retrieve(
+    query: str,
+    top_k: int = 5,
+    *,
+    session_id: str | None = None,
+    selected_skill: str | None = None,
+    memory_context: list[dict[str, Any]] | None = None,
+    query_image_candidates: list[Document] | None = None,
+    channel_timeout_seconds: float | None = None,
+    defer_rerank: bool = False,
+    web_query_hint: str | None = None,
+) -> list[Document]:
+    """Run shared hybrid retrieval and return normalized documents."""
+
+    trace_id = new_trace_id("search")
+    query_hint = text_preview(query)
+    vector_k = max(1, int(getattr(settings, "RECALL_VECTOR_TOP_K", top_k)))
+    image_vector_k = max(1, int(getattr(settings, "RECALL_IMAGE_VECTOR_TOP_K", top_k)))
+    web_k = max(1, int(getattr(settings, "RECALL_WEB_TOP_K", top_k)))
+    keyword_k = max(1, int(getattr(settings, "RECALL_KEYWORD_TOP_K", top_k)))
+    memory_k = max(1, int(getattr(settings, "RECALL_MEMORY_TOP_K", top_k)))
+    rerank_top_n = max(int(top_k), int(getattr(settings, "RERANK_FINAL_TOP_N", top_k)))
+
+    recall_tasks: list[tuple[str, Any]] = []
+    if getattr(settings, "RECALL_ENABLE_VECTOR", True):
+        recall_tasks.append(("vector", lambda: recall_vector(query=query, top_k=vector_k, trace_id=trace_id)))
+    if getattr(settings, "RECALL_ENABLE_IMAGE_VECTOR", False):
+        recall_tasks.append(
+            (
+                "image_vector",
+                lambda: recall_image_vector(
+                    query=query,
+                    top_k=image_vector_k,
+                    seed_documents=query_image_candidates,
+                    trace_id=trace_id,
+                ),
+            )
+        )
+    web_reason = _web_request_reason(" ".join([web_query_hint or "", query]))
+    web_enabled = settings.RECALL_ENABLE_WEB and settings.RECALL_WEB_POLICY != "never" and web_reason != "user_opt_out"
+    if not web_enabled:
+        web_reason = "user_opt_out" if web_reason == "user_opt_out" else "disabled"
+    elif settings.RECALL_WEB_POLICY == "always":
+        web_reason = "always"
+    if web_enabled and web_reason != "local_first":
+        recall_tasks.append(("web", lambda: recall_web(query=query, top_k=web_k, trace_id=trace_id)))
+    if getattr(settings, "RECALL_ENABLE_KEYWORD", True):
+        recall_tasks.append(("keyword", lambda: recall_keyword(query=query, top_k=keyword_k, trace_id=trace_id)))
+    if getattr(settings, "RECALL_ENABLE_MEMORY", True):
+        recall_tasks.append(
+            (
+                "memory",
+                lambda: recall_memory(
+                    query=query,
+                    session_id=session_id,
+                    top_k=memory_k,
+                    memory_context=memory_context,
+                ),
+            )
+        )
+
+    budget = _resolve_channel_timeout(channel_timeout_seconds)
+    if budget is not None:
+        budget = current_request_timeout(budget)
+    deadline = time.monotonic() + budget if budget is not None else None
+    channel_docs, timed_out_channels = _run_recall_tasks(recall_tasks, budget, trace_id, query_hint)
+    check_current_run()
+    if web_enabled and web_reason == "local_first":
+        if _local_evidence_sufficient(channel_docs):
+            web_reason = "sufficient_local_evidence"
+        else:
+            web_reason = "insufficient_local_evidence"
+            remaining = max(0.0, deadline - time.monotonic()) if deadline is not None else None
+            if remaining is not None and remaining <= 0:
+                web_reason = "channel_budget_exhausted"
+            else:
+                if remaining is not None:
+                    remaining = current_request_timeout(remaining)
+                web_docs, web_timeouts = _run_recall_tasks(
+                    [("web", lambda: recall_web(query=query, top_k=web_k, trace_id=trace_id))],
+                    remaining, trace_id, query_hint,
+                )
+                channel_docs.update(web_docs)
+                timed_out_channels.extend(web_timeouts)
+    log_event(logger, logging.INFO, "search.web.policy", component="search", trace_id=trace_id,
+              policy=settings.RECALL_WEB_POLICY, reason=web_reason, requested="web" in channel_docs)
+
     merged_docs: list[Document] = []
     normalized_vector_docs = _normalize_documents(
         channel_docs.get("vector", []),
@@ -865,7 +941,7 @@ def retrieve(
             }
         )
 
-    if not settings.RETRIEVAL_ENABLE_RERANK:
+    if defer_rerank or not settings.RETRIEVAL_ENABLE_RERANK:
         log_event(
             logger,
             logging.INFO,

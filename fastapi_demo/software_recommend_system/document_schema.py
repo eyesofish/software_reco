@@ -21,6 +21,22 @@ class Metadata(BaseModel):
     modality: str | None = None
     asset_path: str | None = None
     asset_url: str | None = None
+    section_path: str | None = None
+    section_id: int | None = None
+    page_start: int | None = None
+    page_end: int | None = None
+    block_kind: str | None = None
+    table_id: str | None = None
+    table_row_start: int | None = None
+    table_row_end: int | None = None
+    chunk_start: int | None = None
+    chunk_end: int | None = None
+    content_body_start: int | None = None
+    content_body_end: int | None = None
+    oversized: bool = False
+    chunking_strategy: str | None = None
+    chunking_version: str | None = None
+    fallback_reason: str | None = None
     tags: list[str] = Field(default_factory=list)
     skill_tags: list[str] = Field(default_factory=list)
     memory_level: str | None = None
@@ -42,3 +58,10 @@ class Document(BaseModel):
     score: float
     freshness_score: float = 0.0
     authority_score: float = 0.0
+
+
+STRUCTURE_METADATA_FIELDS = (
+    "section_path", "section_id", "page_start", "page_end", "block_kind", "table_id",
+    "table_row_start", "table_row_end", "chunk_start", "chunk_end", "content_body_start",
+    "content_body_end", "oversized", "chunking_strategy", "chunking_version", "fallback_reason",
+)

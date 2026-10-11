@@ -97,6 +97,9 @@ pnpm-debug.log*
 !.claude/**/*.md
 !CLAUDE.md
 !/plan/agent-reliability/*.md
+!/plan/local-performance/*.md
+!/plan/agent-latency/*.md
+!/fastapi_demo/evaluation/PERFORMANCE.md
 !/story/2026-09-24-agent-reliability-evidence.md
 langsmith_tracing_evaluation_minimal_changes.md
 langsmith_tracing_evaluation_minimal_changes.md

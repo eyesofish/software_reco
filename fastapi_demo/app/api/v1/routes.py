@@ -20,6 +20,7 @@ from app.api.v1.models import (
 )
 from app.core.config import settings
 from software_recommend_system.document_schema import Document
+from software_recommend_system.execution_control import RunStopped
 from software_recommend_system.image_embedder import ImageEmbeddingError
 from software_recommend_system.multimodal import (
     IMAGE_MEDIA_TYPE_BY_SUFFIX,
@@ -32,7 +33,6 @@ from software_recommend_system.multimodal import (
 )
 from software_recommend_system.retrieval_channels import recall_image_vector
 from software_recommend_system.state import AgentState
-from software_recommend_system.execution_control import RunStopped
 from software_recommend_system.utils import initialize_vector_store
 
 from .handlers._agent import AGENT

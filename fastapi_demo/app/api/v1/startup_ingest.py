@@ -42,8 +42,15 @@ def _safe_doc_id(relative_path: str) -> str:
     return re.sub(r"[^A-Za-z0-9._/-]", "_", normalized)
 
 
+def _stable_text_doc_id(relative_path: str) -> str:
+    safe = _safe_doc_id(relative_path)
+    if safe != relative_path:
+        safe += "-" + hashlib.sha256(relative_path.encode("utf-8")).hexdigest()[:12]
+    return safe
+
+
 def _read_plain_text(file_path: Path) -> str:
-    encodings = ("utf-8", "utf-8-sig", "gb18030")
+    encodings = ("utf-8-sig", "utf-8", "gb18030")
     for encoding in encodings:
         try:
             return file_path.read_text(encoding=encoding).strip()
@@ -55,9 +62,9 @@ def _read_plain_text(file_path: Path) -> str:
 
 def _read_pdf_text(file_path: Path) -> str:
     try:
-        from PyPDF2 import PdfReader
+        from pypdf import PdfReader
     except Exception:
-        logger.warning("PyPDF2 not installed, skipping pdf file: %s", file_path)
+        logger.warning("pypdf not installed, skipping pdf file: %s", file_path)
         return ""
 
     try:
@@ -78,6 +85,15 @@ def _read_pdf_text(file_path: Path) -> str:
 def _read_file_content(file_path: Path) -> tuple[str, dict[str, object]]:
     suffix = file_path.suffix.lower()
     if suffix == ".pdf":
+        if rag_settings.CHUNKING_STRATEGY == "structure":
+            from software_recommend_system.ingestion.structure import parse_pdf
+
+            try:
+                content, blocks, warnings = parse_pdf(file_path)
+            except Exception as exc:
+                raise ValueError(f"Failed to parse PDF {file_path.name}: {type(exc).__name__}") from exc
+            return content, {"modality": "text", "_structure_blocks": blocks,
+                             "parse_warnings": ";".join(warnings)}
         return _read_pdf_text(file_path), {"modality": "text"}
     if suffix in SUPPORTED_IMAGE_EXTENSIONS:
         image = describe_local_image(file_path)
@@ -114,7 +130,7 @@ def _build_raw_document(
 ) -> dict[str, object]:
     relative = file_path.relative_to(ingest_root).as_posix()
     is_image = file_path.suffix.lower() in SUPPORTED_IMAGE_EXTENSIONS
-    preferred_doc_id = _safe_doc_id(relative if is_image else file_path.name)
+    preferred_doc_id = _safe_doc_id(relative) if is_image else _stable_text_doc_id(relative)
     doc_id = preferred_doc_id or _safe_doc_id(relative) or f"doc_{len(used_doc_ids) + 1}"
     if doc_id in used_doc_ids:
         base_doc_id = doc_id
@@ -138,10 +154,12 @@ def _build_raw_document(
     }
     if is_image:
         metadata["asset_path"] = relative
+    blocks = metadata.pop("_structure_blocks", None)
     return {
         "id": doc_id,
         "content": content,
         "metadata": metadata,
+        **({"blocks": blocks} if blocks is not None else {}),
     }
 
 
@@ -315,6 +333,9 @@ def _read_indexed_content(collection: Any, relative_path: str) -> str:
         metadata = metadatas[index] if index < len(metadatas) else {}
         if not isinstance(metadata, dict):
             metadata = {}
+        # Context prefixes (section names, repeated table headers/fences) are not source text.
+        if "content_body_start" in metadata and "content_body_end" in metadata:
+            content = content[int(metadata["content_body_start"]):int(metadata["content_body_end"])]
         try:
             chunk_start = int(metadata["chunk_start"])
             chunk_end = int(metadata["chunk_end"])
@@ -599,6 +620,9 @@ def run_startup_ingestion_if_needed() -> None:
                 ImageEmbeddingError,
                 MultimodalInputError,
                 VisionProcessingError,
+                ImportError,
+                OSError,
+                ValueError,
             ) as exc:
                 logger.warning(
                     "startup ingest caption route failed file=%s error=%s",

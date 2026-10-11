@@ -1,0 +1,86 @@
+name: Manual performance evaluation
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: Record a new three-round baseline or compare one real round
+        type: choice
+        options: [real, baseline]
+        default: real
+      baseline_run_id:
+        description: Run ID containing the performance-baseline artifact (required for real)
+        type: string
+        required: false
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: software-reco-performance
+  cancel-in-progress: false
+
+jobs:
+  performance:
+    # Use the same provisioned machine, Python environment and model endpoints
+    # as the baseline. Hosted CI machines cannot share a local-machine baseline.
+    runs-on: [self-hosted, software-reco-performance]
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          clean: false
+      - name: Validate baseline selection
+        if: inputs.mode == 'real'
+        shell: pwsh
+        env:
+          BASELINE_RUN_ID: ${{ inputs.baseline_run_id }}
+        run: |
+          if ($env:BASELINE_RUN_ID -notmatch '^\d+$') {
+            throw 'Real mode requires the numeric run ID of an explicit baseline artifact.'
+          }
+      - uses: actions/download-artifact@v4
+        if: inputs.mode == 'real'
+        with:
+          name: performance-baseline
+          path: .runtime/performance-baseline
+          run-id: ${{ inputs.baseline_run_id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Run performance evaluation
+        shell: pwsh
+        env:
+          EVALUATION_MODE: ${{ inputs.mode }}
+          PERFORMANCE_PYTHON: ${{ vars.PERFORMANCE_PYTHON }}
+          CONFIGURED_OPENAI_API_KEY: ${{ secrets.PERFORMANCE_OPENAI_API_KEY }}
+          CONFIGURED_DASHSCOPE_API_KEY: ${{ secrets.PERFORMANCE_DASHSCOPE_API_KEY }}
+          CONFIGURED_OPENAI_BASE_URL: ${{ vars.PERFORMANCE_OPENAI_BASE_URL }}
+        run: |
+          if ($env:CONFIGURED_OPENAI_API_KEY) { $env:OPENAI_API_KEY = $env:CONFIGURED_OPENAI_API_KEY }
+          if ($env:CONFIGURED_DASHSCOPE_API_KEY) { $env:DASHSCOPE_API_KEY = $env:CONFIGURED_DASHSCOPE_API_KEY }
+          if ($env:CONFIGURED_OPENAI_BASE_URL) { $env:OPENAI_BASE_URL = $env:CONFIGURED_OPENAI_BASE_URL }
+          $taskOutput = "fastapi_demo/evaluation/reports/performance/$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
+          $taskArgs = @{ Mode = $env:EVALUATION_MODE; Python = $env:PERFORMANCE_PYTHON; Output = $taskOutput }
+          if ($env:EVALUATION_MODE -eq 'real') {
+            $taskBaselines = @(Get-ChildItem -LiteralPath '.runtime/performance-baseline' -Recurse -Filter baseline.json)
+            if ($taskBaselines.Count -ne 1) { throw 'The selected artifact must contain exactly one baseline.json.' }
+            $taskArgs.Baseline = $taskBaselines[0].FullName
+          }
+          & ./scripts/run_checks.ps1 @taskArgs
+          exit $LASTEXITCODE
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: performance-report
+          path: |
+            fastapi_demo/evaluation/reports/performance/${{ github.run_id }}-${{ github.run_attempt }}/**
+            !fastapi_demo/evaluation/reports/performance/${{ github.run_id }}-${{ github.run_attempt }}/**/chroma/**
+          include-hidden-files: true
+          retention-days: 30
+      - uses: actions/upload-artifact@v4
+        if: success() && inputs.mode == 'baseline'
+        with:
+          name: performance-baseline
+          path: fastapi_demo/evaluation/reports/performance/${{ github.run_id }}-${{ github.run_attempt }}/baseline.json
+          if-no-files-found: error
+          retention-days: 90

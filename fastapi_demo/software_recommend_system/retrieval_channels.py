@@ -380,6 +380,8 @@ def recall_image_vector(
 
 
 def recall_web(query: str, top_k: int, trace_id: str | None = None) -> list[Document]:
+    if not settings.RECALL_ENABLE_WEB or settings.RECALL_WEB_POLICY == "never" or not query.strip():
+        return []
     limit = max(1, int(top_k))
     return _tavily_search(query=query, trace_id=trace_id)[:limit]
 

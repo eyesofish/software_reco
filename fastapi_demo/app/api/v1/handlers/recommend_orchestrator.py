@@ -11,6 +11,11 @@ import asyncio
 import logging
 from typing import Any
 
+from software_recommend_system.execution_control import (
+    RunCapacityExceeded,
+    RunStopped,
+    SessionRunConflict,
+)
 from software_recommend_system.observability import traceable
 
 from ..models import RecommendationResponse
@@ -21,11 +26,6 @@ from ..session_store import (
     _safe_write_turn_memories,
 )
 from ..stream_utils import run_agent_async
-from software_recommend_system.execution_control import (
-    RunCapacityExceeded,
-    RunStopped,
-    SessionRunConflict,
-)
 from ._agent import AGENT
 from .normalizers import (
     _build_human_confirmation_ack,
@@ -244,7 +244,7 @@ async def execute_recommend_turn(
             session_id=session_id,
             stop_reason=stop_reason,
         )
-    except Exception as exc:
+    except Exception:
         logger.exception(
             "RECOMMEND_TURN_FAILED session_id=%s source=%s query=%r",
             session_id,

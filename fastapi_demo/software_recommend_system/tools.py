@@ -8,8 +8,8 @@ import chromadb
 import openai
 
 from .config import settings
-from .execution_control import current_request_timeout
 from .document_schema import Document
+from .execution_control import current_request_timeout
 from .ingestion.embedder import embed_texts
 from .ingestion.indexer import get_parent_documents_by_ids
 from .logging_utils import elapsed_ms, error_fields, log_event, log_exception, new_trace_id, text_preview
@@ -39,7 +39,10 @@ def _get_openai_client() -> openai.OpenAI:
 
 
 def _metadata_obj(doc_metadata: dict[str, Any]) -> dict[str, Any]:
+    from .document_schema import STRUCTURE_METADATA_FIELDS
+
     return {
+        **{key: doc_metadata[key] for key in STRUCTURE_METADATA_FIELDS if key in doc_metadata},
         "source": doc_metadata.get("source", ""),
         # Preserve the upstream source document id so recall eval can
         # match retrieved ids with dataset gold_doc_ids.

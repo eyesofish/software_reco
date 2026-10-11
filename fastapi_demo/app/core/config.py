@@ -1,3 +1,6 @@
+from typing import Literal
+
+from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -64,6 +67,7 @@ class Settings(BaseSettings):
     EMBEDDING_MODEL: str = "Qwen/Qwen3-Embedding-0.6B"
     CHUNK_SIZE: int = 800
     CHUNK_OVERLAP: int = 120
+    CHUNKING_STRATEGY: Literal["structure", "sentence"] = "structure"
     ENABLE_PARENT_CHILD_CHUNKING: bool = False
     PARENT_CHUNK_SIZE: int = 1600
     PARENT_CHUNK_OVERLAP: int = 200
@@ -94,6 +98,9 @@ class Settings(BaseSettings):
     RECALL_ENABLE_VECTOR: bool = True
     RECALL_ENABLE_IMAGE_VECTOR: bool = False
     RECALL_ENABLE_WEB: bool = True
+    RECALL_WEB_POLICY: Literal["auto", "always", "never"] = "auto"
+    RECALL_WEB_MIN_LOCAL_DOCS: int = Field(default=2, ge=1)
+    RECALL_WEB_MIN_LOCAL_SCORE: float = Field(default=0.5, ge=0, le=1)
     RECALL_ENABLE_KEYWORD: bool = True
     RECALL_ENABLE_MEMORY: bool = True
     RECALL_VECTOR_TOP_K: int = 20
@@ -144,6 +151,7 @@ class Settings(BaseSettings):
     QA_PLAN_QUERY_MAX_CHARS: int = 220
     SUB_QUESTION_MIN_COUNT: int = 2
     SUB_QUESTION_MAX_COUNT: int = 3
+    SUBQUERY_MAX_CONCURRENCY: int = Field(default=3, ge=1, le=8)
     QUERY_NORMALIZATION_USE_LLM: bool = True
     QUERY_NORMALIZATION_MAX_CHARS_FOR_LLM: int = 320
 

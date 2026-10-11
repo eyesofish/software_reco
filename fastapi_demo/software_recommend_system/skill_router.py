@@ -15,6 +15,40 @@ from .skill_registry import DEFAULT_SKILL_ID, SkillSpec, get_skill, list_skills,
 
 logger = logging.getLogger(__name__)
 
+# Used only by the optional LLM path; rule matching remains unchanged.
+_SKILL_EXAMPLES = (
+    (
+        "Redis 和 Memcached 哪个更适合做缓存？请比较优缺点。",
+        "software_compare",
+        0.97,
+        "The main request is a comparison to select software.",
+    ),
+    (
+        "如何设计一个支持故障切换的高可用缓存架构？",
+        "architecture_design",
+        0.96,
+        "Requests a system architecture, even though phrased as a question.",
+    ),
+    (
+        "Redis 已经选好了，请给出 Spring Boot 接入 Redis 的代码和步骤。",
+        "implementation_guidance",
+        0.97,
+        "The product is selected; the user needs integration instructions.",
+    ),
+    (
+        "What is a cache hit rate?",
+        "quick_fact_qa",
+        0.98,
+        "Requests a single concept definition.",
+    ),
+    (
+        "我想咨询软件方面的问题，暂时还没有具体需求。",
+        "generic_rag",
+        0.90,
+        "No specific comparison, architecture, implementation, or fact question is given.",
+    ),
+)
+
 
 def _tokenize(text: str) -> set[str]:
     normalized = str(text or "").lower()
@@ -247,15 +281,39 @@ def _build_llm_messages(
         [
             "You are a strict skill router for software recommendation pipeline.",
             "Choose one selected_skill from allowed_skills.",
+            "Classify the main task, not just keywords or question marks; rule_candidates are only hints.",
             "Return JSON only with keys: selected_skill, confidence, reason.",
             "confidence must be in [0,1].",
+            "Use the labeled examples below as guidance; assess confidence for the actual input independently.",
             "No markdown.",
         ]
     )
-    return [
-        {"role": "system", "content": system_prompt},
-        {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
-    ]
+    messages = [{"role": "system", "content": system_prompt}]
+    for query, skill, confidence, reason in _SKILL_EXAMPLES:
+        messages.extend(
+            [
+                {
+                    "role": "user",
+                    "content": json.dumps(
+                        {
+                            "user_query": query,
+                            "normalized_query": "",
+                            "allowed_skills": allowed,
+                            "rule_candidates": [],
+                        },
+                        ensure_ascii=False,
+                    ),
+                },
+                {
+                    "role": "assistant",
+                    "content": json.dumps(
+                        {"selected_skill": skill, "confidence": confidence, "reason": reason}, ensure_ascii=False
+                    ),
+                },
+            ]
+        )
+    messages.append({"role": "user", "content": json.dumps(payload, ensure_ascii=False)})
+    return messages
 
 
 def _llm_route(

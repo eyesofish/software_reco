@@ -127,17 +127,15 @@ def _build_chunks(
     while cursor < total:
         start_idx = cursor
         end_exclusive = start_idx
-        current_len = 0
 
         # Greedy pack by sentences until adding the next sentence would exceed chunk_size.
         while end_exclusive < total:
-            sentence_len = len(spans[end_exclusive].text)
-            if current_len + sentence_len > chunk_size and end_exclusive > start_idx:
+            sentence_len = spans[end_exclusive].end - spans[start_idx].start
+            if sentence_len > chunk_size and end_exclusive > start_idx:
                 break
-            if current_len + sentence_len > chunk_size:
+            if sentence_len > chunk_size:
                 # Defensive fallback: should be rare because oversized spans are pre-split.
                 break
-            current_len += sentence_len
             end_exclusive += 1
 
         end_idx = max(start_idx, end_exclusive - 1)
@@ -186,16 +184,20 @@ def chunk_documents(
     documents: list[dict[str, Any]],
     chunk_size: int,
     chunk_overlap: int,
+    *,
+    strategy: str | None = None,
 ) -> list[dict[str, Any]]:
-    """Split normalized docs into semantic-aware overlapping chunks.
+    """Split normalized docs by structure when available, otherwise by sentences.
 
-    Algorithm:
+    Structural spans preserve sections, tables, code, and original source offsets.
+    Sentence fallback:
     1) Split by sentence boundaries (Chinese/English punctuation first).
     2) Greedily group sentences into chunks up to chunk_size.
     3) Carry tail sentences into next chunk for overlap.
     4) If a single sentence is longer than chunk_size, fallback to fixed-length split.
     """
     _validate_chunk_params(chunk_size, chunk_overlap)
+    strategy = _resolve_strategy(strategy)
 
     chunks: list[dict[str, Any]] = []
 
@@ -215,6 +217,24 @@ def chunk_documents(
         if not isinstance(base_metadata, dict):
             base_metadata = {}
 
+        if strategy == "structure" and doc.get("blocks"):
+            from .structural_chunker import structural_pieces
+
+            for index, piece in enumerate(structural_pieces(doc, chunk_size, chunk_overlap)):
+                chunks.append(
+                    {
+                        "id": f"{source_doc_id}:{index}",
+                        "content": piece["content"],
+                        "metadata": {
+                            **base_metadata,
+                            **piece["metadata"],
+                            "source_doc_id": source_doc_id,
+                            "chunk_index": index,
+                        },
+                    }
+                )
+            continue
+
         chunk_spans = _chunk_content_spans(
             content=content,
             chunk_size=chunk_size,
@@ -229,6 +249,10 @@ def chunk_documents(
                 "chunk_index": chunk_index,
                 "chunk_start": chunk_span.start,
                 "chunk_end": chunk_span.end,
+                "chunking_strategy": "sentence",
+                "chunking_version": "sentence-v1",
+                "chunk_size": chunk_size,
+                "chunk_overlap": chunk_overlap,
             }
             chunks.append(
                 {
@@ -247,10 +271,13 @@ def chunk_documents_parent_child(
     parent_chunk_overlap: int,
     child_chunk_size: int,
     child_chunk_overlap: int,
+    *,
+    strategy: str | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    """Split docs into parent chunks and child chunks with parent linkage metadata."""
+    """Split docs with shared structural boundaries and parent linkage metadata."""
     _validate_chunk_params(parent_chunk_size, parent_chunk_overlap)
     _validate_chunk_params(child_chunk_size, child_chunk_overlap)
+    strategy = _resolve_strategy(strategy)
 
     parent_chunks: list[dict[str, Any]] = []
     child_chunks: list[dict[str, Any]] = []
@@ -271,6 +298,40 @@ def chunk_documents_parent_child(
         if not isinstance(base_metadata, dict):
             base_metadata = {}
 
+        if strategy == "structure" and doc.get("blocks"):
+            from .structural_chunker import structural_pieces
+
+            for parent_index, piece in enumerate(structural_pieces(doc, parent_chunk_size, parent_chunk_overlap)):
+                parent_id = f"{source_doc_id}:p:{parent_index}"
+                meta = {
+                    **base_metadata,
+                    **piece["metadata"],
+                    "source_doc_id": source_doc_id,
+                    "parent_id": parent_id,
+                    "parent_index": parent_index,
+                    "parent_start": piece["metadata"]["chunk_start"],
+                    "parent_end": piece["metadata"]["chunk_end"],
+                }
+                parent_chunks.append({"id": parent_id, "content": piece["content"], "metadata": meta})
+                children = structural_pieces(
+                    doc, child_chunk_size, child_chunk_overlap, (meta["parent_start"], meta["parent_end"])
+                )
+                for child_index, child in enumerate(children):
+                    child_chunks.append(
+                        {
+                            "id": f"{parent_id}:c:{child_index}",
+                            "content": child["content"],
+                            "metadata": {
+                                **base_metadata,
+                                **child["metadata"],
+                                "source_doc_id": source_doc_id,
+                                "parent_id": parent_id,
+                                "child_index": child_index,
+                            },
+                        }
+                    )
+            continue
+
         parent_spans = _chunk_content_spans(
             content=content,
             chunk_size=parent_chunk_size,
@@ -286,6 +347,10 @@ def chunk_documents_parent_child(
                 "parent_index": parent_index,
                 "parent_start": parent_span.start,
                 "parent_end": parent_span.end,
+                "chunking_strategy": "sentence",
+                "chunking_version": "sentence-v1",
+                "chunk_size": parent_chunk_size,
+                "chunk_overlap": parent_chunk_overlap,
             }
             parent_chunks.append(
                 {
@@ -309,6 +374,10 @@ def chunk_documents_parent_child(
                     "child_index": child_index,
                     "chunk_start": parent_span.start + child_span.start,
                     "chunk_end": parent_span.start + child_span.end,
+                    "chunking_strategy": "sentence",
+                    "chunking_version": "sentence-v1",
+                    "chunk_size": child_chunk_size,
+                    "chunk_overlap": child_chunk_overlap,
                 }
                 child_chunks.append(
                     {
@@ -319,3 +388,13 @@ def chunk_documents_parent_child(
                 )
 
     return parent_chunks, child_chunks
+
+
+def _resolve_strategy(strategy: str | None) -> str:
+    if strategy is None:
+        from ..config import settings
+
+        strategy = settings.CHUNKING_STRATEGY
+    if strategy not in {"structure", "sentence"}:
+        raise ValueError("chunking strategy must be structure or sentence")
+    return strategy

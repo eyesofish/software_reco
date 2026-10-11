@@ -13,6 +13,7 @@ from starlette.status import HTTP_422_UNPROCESSABLE_ENTITY
 
 from app.core.config import settings
 from app.core.startup import configure_runtime_file_logging, startup_event_handler
+from software_recommend_system.performance import TimingMiddleware
 
 # Configure file handlers before importing routes so module-import-time Tavily logs are persisted.
 configure_runtime_file_logging()
@@ -45,8 +46,11 @@ app.add_middleware(
     allow_origins=settings.allowed_origins_list,
     allow_credentials=True,
     allow_methods=["GET", "POST", "PUT", "OPTIONS"],
-    allow_headers=["X-API-Key", "Content-Type", "Authorization"],
+    allow_headers=["X-API-Key", "Content-Type", "Authorization", "X-Request-Id"],
+    expose_headers=["X-Request-Id"],
 )
+
+app.add_middleware(TimingMiddleware)
 
 app.include_router(v1_router, prefix="/api/v1")
 

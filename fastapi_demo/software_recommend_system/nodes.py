@@ -4,6 +4,7 @@ import logging
 import os
 import re
 import time
+from concurrent.futures import TimeoutError as FutureTimeoutError
 from typing import Any
 
 from langgraph.func import task
@@ -12,8 +13,8 @@ from langgraph.types import interrupt
 from .agent_loop import run_agent_loop
 from .config import settings
 from .document_schema import Document
-from .execution_control import check_current_run, current_request_timeout
 from .evidence_evaluator import evaluate_evidence
+from .execution_control import check_current_run, current_request_timeout
 from .llm_governance import governed_chat_completion
 from .llm_utils import (
     _build_retrieval_record,
@@ -34,7 +35,7 @@ from .llm_utils import (
 from .logging_utils import elapsed_ms, error_fields, log_event, new_trace_id, text_preview
 from .observability import traceable
 from .planner import build_execution_plan
-from .retriever import rerank_documents, retrieve
+from .retriever import _web_request_reason, rerank_documents, retrieve
 from .router import route_query
 from .skill_router import route_skill
 from .state import AgentState, CandidateSolution
@@ -779,6 +780,9 @@ def query_normalization_node(state: AgentState) -> dict[str, Any]:
     ])
 
     use_llm_normalization = bool(getattr(settings, "QUERY_NORMALIZATION_USE_LLM", True))
+    if (_is_chat_first_query(user_query) and not _has_rag_intent(user_query)
+            and not _collect_tech_hits(user_query) and not _is_drawing_request(user_query)):
+        use_llm_normalization = False
     max_chars_for_llm = max(0, int(getattr(settings, "QUERY_NORMALIZATION_MAX_CHARS_FOR_LLM", 320)))
     if max_chars_for_llm > 0 and len(str(user_query or "")) > max_chars_for_llm:
         use_llm_normalization = False
@@ -895,6 +899,8 @@ def retrieve_with_search(
     selected_skill: str = "",
     memory_context: list[dict[str, Any]] | None = None,
     query_image_candidates: list[Document] | None = None,
+    defer_rerank: bool = False,
+    web_query_hint: str | None = None,
 ):
     return retrieve(
         query,
@@ -903,6 +909,8 @@ def retrieve_with_search(
         selected_skill=selected_skill or None,
         memory_context=memory_context,
         query_image_candidates=query_image_candidates,
+        defer_rerank=defer_rerank,
+        web_query_hint=web_query_hint,
     )
 
 
@@ -1388,7 +1396,8 @@ def retrieve_node(state: AgentState) -> dict[str, Any]:
         has_memory_context=bool(memory_context),
     )
 
-    for index, question in enumerate(sub_questions, start=1):
+    @task
+    def retrieve_question(index: int, question: str) -> tuple[list[Document], str, int]:
         check_current_run()
         question_started_at = time.perf_counter()
         question_hint = text_preview(question)
@@ -1407,7 +1416,7 @@ def retrieve_node(state: AgentState) -> dict[str, Any]:
         )
         search_results: list[Document] | None = None
         retrieval_strategy = "static"
-        if bool(getattr(settings, "AGENT_LOOP_ENABLE", False)):
+        if settings.AGENT_LOOP_ENABLE and _web_request_reason(global_query) != "user_opt_out":
             # Model-driven tool selection. Returns None on any failure so the
             # deterministic pipeline below stays the safety net.
             agent_docs = run_agent_loop(
@@ -1421,51 +1430,75 @@ def retrieve_node(state: AgentState) -> dict[str, Any]:
                 retrieval_strategy = "agent_loop"
 
         if search_results is None:
-            search_results_future = retrieve_with_search(
+            search_results = retrieve(
                 question,
                 top_k=settings.TOP_K,
                 session_id=session_id,
                 selected_skill=selected_skill,
                 memory_context=memory_context,
                 query_image_candidates=query_image_candidates,
+                defer_rerank=True,
+                web_query_hint=global_query,
             )
-            search_results = search_results_future.result()
         check_current_run()
-        all_docs.extend(search_results)
-        subquery_id = f"sq_{index}"
-        retrieval_record = _build_retrieval_record(
-            subquery_id=subquery_id,
-            subquery=question,
-            docs=search_results,
-        )
-        retrieval_record["selected_skill"] = selected_skill
-        retrieval_record["skill_used"] = selected_skill
-        retrieval_record["retrieval_strategy"] = retrieval_strategy
-        rerank_mode = ""
-        for candidate in search_results:
-            metadata = _get_field(candidate, "metadata", {}) or {}
-            rerank_features = _get_field(metadata, "rerank_features", {}) or {}
-            mode = str(_get_field(rerank_features, "mode", "") or "").strip()
-            if mode:
-                rerank_mode = mode
-                break
-        retrieval_record["rerank_mode"] = rerank_mode or "unknown"
-        retrieval_records.append(retrieval_record)
-        log_event(
-            logger,
-            logging.INFO,
-            "search.retrieve.question.done",
-            component="search",
-            trace_id=trace_id,
-            scene="retrieve_node",
-            iteration=iteration_count,
-            question_index=index,
-            question_count=len(sub_questions),
-            query=question_hint,
-            docs=len(search_results),
-            cumulative_docs=len(all_docs),
-            elapsed_ms=elapsed_ms(question_started_at),
-        )
+        return search_results, retrieval_strategy, elapsed_ms(question_started_at)
+
+    concurrency = max(1, int(settings.SUBQUERY_MAX_CONCURRENCY))
+    # Register durable tasks on the node thread in input order so replay IDs are stable.
+    futures = []
+    try:
+        for offset in range(0, len(sub_questions), concurrency):
+            batch = sub_questions[offset:offset + concurrency]
+            check_current_run()
+            futures = [retrieve_question(offset + i, question) for i, question in enumerate(batch, start=1)]
+            for index, (question, future) in enumerate(zip(batch, futures, strict=True), start=offset + 1):
+                while True:
+                    check_current_run()
+                    try:
+                        search_results, retrieval_strategy, question_elapsed_ms = future.result(timeout=0.05)
+                        break
+                    except FutureTimeoutError:
+                        if future.done():
+                            raise
+                all_docs.extend(search_results)
+                subquery_id = f"sq_{index}"
+                retrieval_record = _build_retrieval_record(
+                    subquery_id=subquery_id,
+                    subquery=question,
+                    docs=search_results,
+                )
+                retrieval_record["selected_skill"] = selected_skill
+                retrieval_record["skill_used"] = selected_skill
+                retrieval_record["retrieval_strategy"] = retrieval_strategy
+                rerank_mode = ""
+                for candidate in search_results:
+                    metadata = _get_field(candidate, "metadata", {}) or {}
+                    rerank_features = _get_field(metadata, "rerank_features", {}) or {}
+                    mode = str(_get_field(rerank_features, "mode", "") or "").strip()
+                    if mode:
+                        rerank_mode = mode
+                        break
+                retrieval_record["rerank_mode"] = rerank_mode or "unknown"
+                retrieval_records.append(retrieval_record)
+                log_event(
+                    logger,
+                    logging.INFO,
+                    "search.retrieve.question.done",
+                    component="search",
+                    trace_id=trace_id,
+                    scene="retrieve_node",
+                    iteration=iteration_count,
+                    question_index=index,
+                    question_count=len(sub_questions),
+                    query=text_preview(question),
+                    docs=len(search_results),
+                    cumulative_docs=len(all_docs),
+                    elapsed_ms=question_elapsed_ms,
+                )
+
+    finally:
+        for future in futures:
+            future.cancel()
 
     seen_doc_ids: set[str] = set()
     unique_docs: list[Document] = []
@@ -1490,6 +1523,7 @@ def retrieve_node(state: AgentState) -> dict[str, Any]:
         top_n=rerank_top_n,
         selected_skill=selected_skill,
         session_id=session_id,
+        use_model=settings.RETRIEVAL_ENABLE_RERANK,
     )
     final_docs = ranked_docs[:max_evidence]
     retrieved_images = _build_retrieved_images(final_docs)
@@ -1686,7 +1720,9 @@ def candidate_generation_node(state: AgentState) -> dict[str, Any]:
         )
 
     llm_candidates: list[CandidateSolution] = []
-    should_skip_llm = selected_skill == "quick_fact_qa"
+    # Both QA paths answer directly from evidence, so model-generated candidates
+    # are unused on success. Keep the deterministic candidates for fallback.
+    should_skip_llm = selected_skill in {"quick_fact_qa", "generic_rag"}
     if not should_skip_llm:
         try:
             trace_id, started_at = _llm_invoke_start(

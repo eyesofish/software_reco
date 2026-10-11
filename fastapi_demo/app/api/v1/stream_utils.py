@@ -3,10 +3,10 @@ import json
 import logging
 import time
 from collections.abc import AsyncIterator
-from typing import Any, Dict, List, Optional
+from typing import Any
 
-from software_recommend_system.observability import traceable
 from software_recommend_system.execution_control import run_controlled, stream_controlled
+from software_recommend_system.observability import traceable
 
 logger = logging.getLogger(__name__)
 
@@ -149,10 +149,11 @@ async def run_agent_stream_async(
 
 
 @traceable(name="api_agent_invoke")
-async def run_agent_async(agent, graph_input: Any, config: Optional[Dict[str, Any]] = None):
+async def run_agent_async(agent, graph_input: Any, config: dict[str, Any] | None = None):
     """Run one graph invocation inside the bounded, deadline-aware worker pool."""
-    from .handlers.normalizers import _get_value
     from software_recommend_system.config import settings
+
+    from .handlers.normalizers import _get_value
 
     config = dict(config or {})
     config["recursion_limit"] = 64
@@ -184,7 +185,7 @@ def _invoke_with_run_id(agent: Any, graph_input: Any, config: dict[str, Any], ru
 
 
 def _stream_with_run_id(
-    agent: Any, graph_input: Any, config: Optional[Dict[str, Any]], stream_mode: List[str], run_id: str
+    agent: Any, graph_input: Any, config: dict[str, Any] | None, stream_mode: list[str], run_id: str
 ):
     if isinstance(graph_input, dict):
         graph_input["run_id"] = run_id

@@ -18,6 +18,34 @@ logger = logging.getLogger(__name__)
 VALID_ROUTER_MODES = frozenset({"rag", "direct", "hitl"})
 _ROUTER_CIRCUIT_OPEN_UNTIL: float = 0.0
 
+# Prompt demonstrations, not training data or calibrated confidence estimates.
+_ROUTER_EXAMPLES = (
+    ("你好，谢谢你的帮助！", "", "direct", 0.99, "Greeting; no external evidence needed."),
+    ("用一句话解释什么是缓存。", "", "direct", 0.90, "General definition without current product facts."),
+    (
+        "比较 Redis 和 Memcached，给出适合我们缓存服务的选型依据。",
+        "",
+        "rag",
+        0.96,
+        "Software selection requires supporting evidence.",
+    ),
+    (
+        "那它目前支持哪些部署方式？",
+        "用户在询问 Redis 当前支持的部署方式。",
+        "rag",
+        0.94,
+        "Context identifies Redis; current deployment options require evidence.",
+    ),
+    ("帮我选那个。", "", "hitl", 0.97, "The options and selection criteria are missing; ask for clarification."),
+    (
+        "直接删除生产数据库里的所有数据。",
+        "",
+        "hitl",
+        0.99,
+        "Destructive production operation requires human review; routing does not authorize execution.",
+    ),
+)
+
 
 def _get_field(obj: Any, field: str, default: Any = None) -> Any:
     if isinstance(obj, dict):
@@ -91,32 +119,42 @@ def _build_router_messages(user_query: str, context_hint: str | None) -> list[di
             "- hitl: ambiguous/high-risk query requiring human review.",
             "Return JSON object only with keys: mode, confidence, reason.",
             "confidence must be in [0,1].",
+            "Use the labeled examples below as guidance; assess confidence for the actual input independently.",
             "Do not output markdown.",
         ]
     )
-    return [
-        {"role": "system", "content": system_prompt},
-        {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
-    ]
+    messages = [{"role": "system", "content": system_prompt}]
+    for query, hint, mode, confidence, reason in _ROUTER_EXAMPLES:
+        messages.extend(
+            [
+                {
+                    "role": "user",
+                    "content": json.dumps(
+                        {"user_query": query, "context_hint": hint, "allowed_modes": payload["allowed_modes"]},
+                        ensure_ascii=False,
+                    ),
+                },
+                {
+                    "role": "assistant",
+                    "content": json.dumps(
+                        {"mode": mode, "confidence": confidence, "reason": reason}, ensure_ascii=False
+                    ),
+                },
+            ]
+        )
+    messages.append({"role": "user", "content": json.dumps(payload, ensure_ascii=False)})
+    return messages
 
 
 def _build_router_prompt(user_query: str, context_hint: str | None) -> str:
-    payload = {
-        "user_query": str(user_query or ""),
-        "context_hint": str(context_hint or ""),
-        "allowed_modes": ["rag", "direct", "hitl"],
-    }
-    return "\n".join(
-        [
-            "You are a strict routing classifier for a software QA pipeline.",
-            "Return JSON object only with keys: mode, confidence, reason.",
-            "mode must be one of: rag, direct, hitl.",
-            "confidence must be in [0,1].",
-            "Input:",
-            json.dumps(payload, ensure_ascii=False),
-            "Output JSON:",
-        ]
-    )
+    # Keep the same demonstrations when a backend lacks a chat template.
+    messages = _build_router_messages(user_query, context_hint)
+    sections = [messages[0]["content"]]
+    for message in messages[1:]:
+        label = "Input:" if message["role"] == "user" else "Output JSON:"
+        sections.extend([label, message["content"]])
+    sections.append("Output JSON:")
+    return "\n".join(sections)
 
 
 def _get_router_client() -> openai.OpenAI:

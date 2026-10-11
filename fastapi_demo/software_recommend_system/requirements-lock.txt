@@ -8,3 +8,6 @@ clickhouse-connect==0.10.0
 pydantic==2.12.5
 python-dotenv==1.0.0
 Pillow>=10.0.0
+markdown-it-py==4.0.0
+pdfplumber==0.11.10
+pypdf==6.19.0
