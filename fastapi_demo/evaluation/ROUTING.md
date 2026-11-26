@@ -10,6 +10,12 @@ Spring checks ownership and conflicts among `conversation_id`, `session_id`, and
 
 For an unbound target, Jev accepts a decision at probability >=0.90. Probability >=0.60 and <0.90 receives one review by the existing router LLM, whose acceptance threshold is 0.80. Lower scores or unresolved labels ask the user. Review calls share a maximum of three per task. Transport failure is recorded separately: unknown attribution asks for a target; a known target uses conservative RAG. Structured targets cannot be changed by either model.
 
+## Bounded dynamic execution
+
+Set `DYNAMIC_ROUTING_ENABLE=true` only for the admitted live candidate cohort. Decision nodes checkpoint before interrupt nodes. Jev selects only an allowed step after planning or evidence assessment: retrieve, refine, answer, or clarify. The graph restricts answering to adequate evidence except at a hard limit, where the response explicitly marks incomplete evidence. Fact QA goes directly to answering; comparison and analysis can generate candidates.
+
+Coverage counts distinct supported objectives, not retrieved documents. Refinement searches uncovered objectives and retains already supported evidence. Bounds are one refinement, two execution clarifications, and the request's retrieval-round limit (default three). Active elapsed time includes preflight, multimodal preparation, models, retrieval, and previous executions; user waiting time is excluded. Resume receives only the remaining time budget. Disabling rollout does not prevent an already waiting task from resuming.
+
 ## Query expansion
 
 The canonical query stays intact. A strict JSON proposal supplies `original_query`, `preserved_constraints`, `additions`, and `confidence`; every addition has `text`, `kind`, and `source_span`. Validation rejects malformed output, extra fields, low confidence, changed original text, conflicting entities/numbers, ungrounded assertions, and positive expansions of negated terms. Synonyms use a conservative vocabulary; contextual references require a referent in supplied prior context.

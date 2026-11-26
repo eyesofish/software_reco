@@ -6,6 +6,7 @@ from .document_schema import Document
 
 
 class EvidenceItem(BaseModel):
+    subquery_id: str = ""
     question: str
     documents: list[Document]
     search_results: list[dict[str, Any]]
@@ -69,3 +70,19 @@ class AgentState(BaseModel):
     kb_snapshot_id: str = ""
     run_id: str | None = None
     routing_decision: dict[str, Any] | None = None
+    dynamic_routing_enabled: bool = False
+    route_stage: str = "planning"
+    next_step: str = "retrieve"
+    route_decisions: list[dict[str, Any]] = Field(default_factory=list)
+    routing_reviews_used: int = 0
+    refinement_count: int = 0
+    clarification_count: int = 0
+    pending_input: dict[str, Any] | None = None
+    execution_cancelled: bool = False
+    active_elapsed_ms: int = 0
+    uncovered_subqueries: list[str] = Field(default_factory=list)
+    subquery_ids: dict[str, str] = Field(default_factory=dict)
+    retrieval_queries: dict[str, str] = Field(default_factory=dict)
+    attempted_queries: list[str] = Field(default_factory=list)
+    evidence_incomplete: bool = False
+    dynamic_stop_reason: str = ""
