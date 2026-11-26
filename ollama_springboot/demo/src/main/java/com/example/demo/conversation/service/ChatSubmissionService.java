@@ -176,6 +176,7 @@ public class ChatSubmissionService {
                 yield "awaiting_confirmation";
             }
             case "DONE", "INCOMPLETE" -> {
+                data.putAll(task.getResultMetadata());
                 data.put("status", "DONE".equals(task.getStatus()) ? "success" : "incomplete");
                 data.put("final_answer", task.getFinalResult());
                 yield "final";

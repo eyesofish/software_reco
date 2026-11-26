@@ -529,7 +529,7 @@ public class ChatController {
             switch (state.getStatus()) {
                 case "DONE", "INCOMPLETE" -> {
                     committedType = "final";
-                    result.putAll(payload);
+                    result.putAll(state.getResultMetadata());
                     result.put("status", "DONE".equals(state.getStatus()) ? "success" : "incomplete");
                     result.put("final_answer", state.getFinalResult());
                 }

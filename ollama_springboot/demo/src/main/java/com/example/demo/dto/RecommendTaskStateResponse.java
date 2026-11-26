@@ -24,6 +24,10 @@ public class RecommendTaskStateResponse {
     private List<String> subQuestions;
     @JsonProperty("final_result")
     private String finalResult;
+    @JsonProperty("result_metadata")
+    private Map<String, Object> resultMetadata = Map.of();
+    public Map<String, Object> getResultMetadata() { return resultMetadata; }
+    public void setResultMetadata(Map<String, Object> value) { resultMetadata = value; }
     @JsonProperty("error_message")
     private String errorMessage;
     private Integer progress;

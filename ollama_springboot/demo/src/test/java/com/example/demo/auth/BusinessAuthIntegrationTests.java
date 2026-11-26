@@ -156,7 +156,9 @@ class BusinessAuthIntegrationTests {
         String taskId = database.queryForObject("SELECT task_id FROM chat_submissions WHERE request_id=?", String.class, key);
         String conversationId = database.queryForObject("SELECT conversation_id FROM recommend_tasks WHERE id=?", String.class, taskId);
         assertThat(sendChat(token, null, "normal question", key).getBody())
-                .contains("event:final", taskId, conversationId, "Hello world");
+                .contains("event:final", taskId, conversationId, "Hello world", "/api/v1/assets/example.png");
+        assertThat(json(call(HttpMethod.GET, "/api/v1/tasks/" + taskId, token, null)).path("result_metadata")
+                .path("retrieved_doc_ids").get(0).asText()).isEqualTo("doc-1");
         assertThat(sendChat(token, null, "changed question", key).getStatusCode().value()).isEqualTo(409);
         assertThat(conversations.count()).isEqualTo(initialConversations + 1);
         assertThat(tasks.count()).isEqualTo(initialTasks + 1);
