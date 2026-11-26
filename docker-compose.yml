@@ -59,6 +59,7 @@ services:
       - fastapi_chat:/data/chat
       - ./.runtime/legacy-agent:/data/legacy:ro
       - ./fastapi_demo/ingest_docs:/data/ingest:ro
+      - fastapi_versioned_assets:/data/ingest/.versions
     restart: unless-stopped
 
   spring-boot:
@@ -98,6 +99,7 @@ volumes:
   postgres_data:
   fastapi_chat:
   fastapi_chroma:
+  fastapi_versioned_assets:
   elasticsearch_data:
 
 secrets:
