@@ -1,3 +1,4 @@
+import { getSession, setSession } from '~/services/auth'
 import { useNavigate } from 'react-router-dom'
 
 import ROUTES from '~/constants/routes'
@@ -77,7 +78,9 @@ export default function Menu ({ onDeleteChat, scrollRef } : MenuProps) {
           >+</Chat>
         )}
       </ChatsContainer>
+      <p style={{ padding: '8px', fontSize: '12px' }}>{getSession()?.user.username}</p>
       <ButtonsContainer>
+        <Button onClick={() => setSession(null)}>退出 / Sign out</Button>
         <Button
           style={{ padding: '6px', paddingBottom: '3px' }}
           onClick={() => navigate(ROUTES.CONFIG)}

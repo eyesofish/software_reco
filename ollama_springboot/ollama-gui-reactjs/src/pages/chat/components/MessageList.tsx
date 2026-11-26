@@ -1,3 +1,4 @@
+import AuthenticatedImage from './AuthenticatedImage'
 import ReactMarkdown from 'react-markdown'
 
 import { Message } from '~/entities/messages'
@@ -28,16 +29,13 @@ export default function MessageList ({ messages, apiBaseUrl } : MessageListProps
               {message.retrievedImages && message.retrievedImages.length > 0 && (
                 <div className='retrievedImageGrid'>
                   {message.retrievedImages.map((image) => (
-                    <a
-                      href={resolveImageUrl(image.url, apiBaseUrl)}
+                    <div
                       key={`${image.doc_id}-${image.url}`}
-                      rel='noreferrer'
-                      target='_blank'
                     >
-                      <img alt={image.filename} src={resolveImageUrl(image.url, apiBaseUrl)} />
+                      <AuthenticatedImage filename={image.filename} url={resolveImageUrl(image.url, apiBaseUrl)} />
                       <strong>{image.filename}</strong>
                       {image.caption && <span>{image.caption}</span>}
-                    </a>
+                    </div>
                   ))}
                 </div>
               )}

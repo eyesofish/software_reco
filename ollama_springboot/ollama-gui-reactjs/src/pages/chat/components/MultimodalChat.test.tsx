@@ -1,7 +1,8 @@
 import '@testing-library/jest-dom'
 
 import { createRef } from 'react'
-import { fireEvent, render, screen } from '@testing-library/react'
+import { fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { setSession } from '~/services/auth'
 
 import { ImageAttachment, Message } from '~/entities/messages'
 import { AppThemeProvider } from '~/theme'
@@ -39,7 +40,11 @@ test('shows selected image previews and removes them', () => {
   expect(onImageRemoved).toHaveBeenCalledWith(0)
 })
 
-test('renders user attachments and retrieved image evidence', () => {
+test('renders user attachments and authenticated retrieved image evidence', async () => {
+  setSession({ access_token: 'test-token', token_type: 'Bearer', expires_in: 1800, user: { id: 'user-a', username: 'alice' } })
+  global.fetch = jest.fn().mockResolvedValue({ ok: true, status: 200, blob: async () => new Blob(['image']) })
+  URL.createObjectURL = jest.fn().mockReturnValue('blob:knowledge-image')
+  URL.revokeObjectURL = jest.fn()
   const messages : Message[] = [
     {
       role: 'user',
@@ -64,12 +69,16 @@ test('renders user attachments and retrieved image evidence', () => {
     }
   ]
 
-  renderWithTheme(<MessageList apiBaseUrl='http://localhost:8080' messages={messages} />)
+  const mounted = renderWithTheme(<MessageList apiBaseUrl='http://localhost:8080' messages={messages} />)
 
   expect(screen.getByAltText('error.png')).toBeInTheDocument()
-  expect(screen.getByAltText('knowledge-error.png')).toHaveAttribute(
+  await waitFor(() => expect(screen.getByAltText('knowledge-error.png')).toHaveAttribute(
     'src',
-    'http://localhost:8080/api/v1/assets/screens/error.png'
-  )
+    'blob:knowledge-image'
+  ))
   expect(screen.getByText('A terminal showing connection refused.')).toBeInTheDocument()
+  expect((fetch as jest.Mock).mock.calls[0][1].headers.get('Authorization')).toBe('Bearer test-token')
+  mounted.unmount()
+  expect(URL.revokeObjectURL).toHaveBeenCalledWith('blob:knowledge-image')
+  setSession(null)
 })

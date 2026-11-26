@@ -1,5 +1,7 @@
+import RequireAuth from '~/components/RequireAuth'
+import Login from '~/pages/login'
 import { lazy } from 'react'
-import { createBrowserRouter } from 'react-router-dom'
+import { createBrowserRouter, Navigate, Outlet } from 'react-router-dom'
 
 import ROUTES from '~/constants/routes'
 
@@ -9,10 +11,12 @@ const NotFound = lazy(() => import('~/pages/notFound'))
 const SplashScreen = lazy(() => import('~/pages/splashScreen'))
 
 const router = createBrowserRouter([
+  { path: '/login', element: <Login /> },
+  { element: <RequireAuth><Outlet /></RequireAuth>, children: [
   {
     path: '/',
     errorElement: <SplashScreen><NotFound /></SplashScreen>,
-    element: <SplashScreen><NotFound /></SplashScreen>
+    element: <Navigate replace to={ROUTES.ROOT} />
   },
   {
     path: ROUTES.ROOT,
@@ -30,6 +34,7 @@ const router = createBrowserRouter([
     path: ROUTES.CONFIG,
     element: <SplashScreen><Config /></SplashScreen>
   }
+  ] }
 ])
 
 export default router

@@ -1,3 +1,4 @@
+import { authenticatedFetch } from '~/services/auth'
 import {
   ChatStreamEvent,
   ConversationCreateRequest,
@@ -72,12 +73,12 @@ async function requestJson<T> (
   url : string,
   init : RequestInit = {}
 ) : Promise<T> {
-  const response = await fetch(url, {
+  const response = await authenticatedFetch(url, {
+    ...init,
     headers: {
       'Content-Type': 'application/json',
       ...(init.headers || {})
-    },
-    ...init
+    }
   })
 
   if (!response.ok) {
@@ -350,7 +351,7 @@ async function streamSseRequester (
   onEvent : (event : ChatStreamEvent) => void,
   signal ?: AbortSignal
 ) : Promise<void> {
-  const response = await fetch(url, {
+  const response = await authenticatedFetch(url, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
