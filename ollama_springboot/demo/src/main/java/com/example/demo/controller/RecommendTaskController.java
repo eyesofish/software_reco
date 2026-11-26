@@ -1,5 +1,8 @@
 package com.example.demo.controller;
 
+import org.springframework.security.core.annotation.AuthenticationPrincipal;
+import org.springframework.security.oauth2.jwt.Jwt;
+import com.example.demo.auth.BusinessAccess;
 import com.example.demo.client.FastApiClient;
 import com.example.demo.conversation.service.RecommendTaskStateService;
 import com.example.demo.dto.ConversationCreateRequest;
@@ -42,29 +45,32 @@ public class RecommendTaskController {
 
     private final RecommendTaskStateService recommendTaskStateService;
     private final FastApiClient fastApiClient;
+    private final BusinessAccess access;
 
     public RecommendTaskController(
             RecommendTaskStateService recommendTaskStateService,
-            FastApiClient fastApiClient
+            FastApiClient fastApiClient,
+            BusinessAccess access
     ) {
         this.recommendTaskStateService = recommendTaskStateService;
         this.fastApiClient = fastApiClient;
+        this.access = access;
     }
 
     @PostMapping("/conversations")
     @ResponseStatus(HttpStatus.CREATED)
     public ConversationCreateResponse createConversation(
             @RequestBody(required = false) ConversationCreateRequest request
-    ) {
+    , @AuthenticationPrincipal Jwt jwt) {
         String title = request == null ? null : request.getTitle();
         String modelName = request == null ? null : request.getModelName();
-        ConversationCreateResponse response = recommendTaskStateService.createConversation(title, modelName);
+        ConversationCreateResponse response = recommendTaskStateService.createConversation(jwt.getSubject(), title, modelName);
         logger.info("v1 conversation created conversation_id={}", response.getConversationId());
         return response;
     }
 
     @PostMapping("/recommend")
-    public RecommendTaskStateResponse recommend(@RequestBody RecommendTaskCreateRequest request) {
+    public RecommendTaskStateResponse recommend(@RequestBody RecommendTaskCreateRequest request, @AuthenticationPrincipal Jwt jwt) {
         if (request == null) {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "request is required");
         }
@@ -74,9 +80,10 @@ public class RecommendTaskController {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "query or image is required");
         }
 
-        String conversationId = firstNonBlank(request.getConversationId(), request.getSessionId());
+        String conversationId = access.matchingConversation(jwt.getSubject(), request.getConversationId(), request.getSessionId());
 
         RecommendTaskStateService.RecommendTaskCreateOutcome outcome = recommendTaskStateService.createRecommendTask(
+                jwt.getSubject(),
                 conversationId,
                 query,
                 request.getTimeout(),
@@ -97,7 +104,7 @@ public class RecommendTaskController {
     }
 
     @PostMapping(value = "/recommend/stream", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
-    public SseEmitter recommendStream(@RequestBody RecommendTaskCreateRequest request) {
+    public SseEmitter recommendStream(@RequestBody RecommendTaskCreateRequest request, @AuthenticationPrincipal Jwt jwt) {
         if (request == null) {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "request is required");
         }
@@ -107,8 +114,9 @@ public class RecommendTaskController {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "query or image is required");
         }
 
-        String conversationId = firstNonBlank(request.getConversationId(), request.getSessionId());
+        String conversationId = access.matchingConversation(jwt.getSubject(), request.getConversationId(), request.getSessionId());
         RecommendTaskStateResponse taskState = recommendTaskStateService.createStreamingTask(
+                jwt.getSubject(),
                 conversationId,
                 query,
                 request.getTimeout(),
@@ -169,7 +177,8 @@ public class RecommendTaskController {
             @RequestParam("taskId") String taskId,
             @RequestParam(name = "action", defaultValue = "confirm") String action,
             @RequestBody(required = false) RecommendTaskConfirmRequest request
-    ) {
+    , @AuthenticationPrincipal Jwt jwt) {
+        access.task(jwt.getSubject(), taskId);
         List<String> subQuestions = request == null ? List.of() : request.getSubQuestions();
         String comment = request == null ? null : request.getComment();
 
@@ -236,7 +245,8 @@ public class RecommendTaskController {
             @RequestParam("taskId") String taskId,
             @RequestParam(name = "action", defaultValue = "confirm") String action,
             @RequestBody(required = false) RecommendTaskConfirmRequest request
-    ) {
+    , @AuthenticationPrincipal Jwt jwt) {
+        access.task(jwt.getSubject(), taskId);
         List<String> subQuestions = request == null ? List.of() : request.getSubQuestions();
         String comment = request == null ? null : request.getComment();
 
@@ -259,17 +269,20 @@ public class RecommendTaskController {
     }
 
     @GetMapping("/tasks/{taskId}")
-    public RecommendTaskStateResponse getTaskState(@PathVariable String taskId) {
+    public RecommendTaskStateResponse getTaskState(@PathVariable String taskId, @AuthenticationPrincipal Jwt jwt) {
+        access.task(jwt.getSubject(), taskId);
         return recommendTaskStateService.getTaskState(taskId);
     }
 
     @GetMapping("/conversations/{conversationId}/tasks")
-    public List<RecommendTaskStateResponse> listConversationTasks(@PathVariable String conversationId) {
+    public List<RecommendTaskStateResponse> listConversationTasks(@PathVariable String conversationId, @AuthenticationPrincipal Jwt jwt) {
+        access.conversation(jwt.getSubject(), conversationId);
         return recommendTaskStateService.listConversationTasks(conversationId);
     }
 
     @GetMapping("/recommend/task/{taskId}")
-    public RecommendTaskStateResponse getTaskStateCompatibility(@PathVariable String taskId) {
+    public RecommendTaskStateResponse getTaskStateCompatibility(@PathVariable String taskId, @AuthenticationPrincipal Jwt jwt) {
+        access.task(jwt.getSubject(), taskId);
         return recommendTaskStateService.getTaskState(taskId);
     }
 

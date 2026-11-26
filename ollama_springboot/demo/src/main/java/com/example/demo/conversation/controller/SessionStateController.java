@@ -1,5 +1,8 @@
 package com.example.demo.conversation.controller;
 
+import org.springframework.security.core.annotation.AuthenticationPrincipal;
+import org.springframework.security.oauth2.jwt.Jwt;
+
 import com.example.demo.conversation.dto.SessionStateApiModels;
 import com.example.demo.conversation.entity.ConversationEntity;
 import com.example.demo.conversation.entity.ConversationMessageEntity;
@@ -34,17 +37,18 @@ public class SessionStateController {
     }
 
     @GetMapping("/{conversationId}")
-    public SessionStateApiModels.Response get(@PathVariable String conversationId) {
-        ConversationEntity conversation = conversationService.findActiveConversation(conversationId);
+    public SessionStateApiModels.Response get(@PathVariable String conversationId, @AuthenticationPrincipal Jwt jwt) {
+        ConversationEntity conversation = conversationService.ensureOwnedConversation(jwt.getSubject(), conversationId, null, null);
         return toResponse(conversation, conversationService.getFacts(conversationId));
     }
 
     @PutMapping("/{conversationId}")
     public SessionStateApiModels.Response upsert(
             @PathVariable String conversationId,
-            @Valid @RequestBody SessionStateApiModels.UpsertRequest request
+            @Valid @RequestBody SessionStateApiModels.UpsertRequest request,
+            @AuthenticationPrincipal Jwt jwt
     ) {
-        ConversationEntity conversation = conversationService.ensureConversation(conversationId, "New Conversation", null);
+        ConversationEntity conversation = conversationService.ensureOwnedConversation(jwt.getSubject(), conversationId, "New Conversation", null);
         Map<String, String> updates = new LinkedHashMap<>();
         if (request.facts() != null) {
             updates.putAll(request.facts());

@@ -21,11 +21,16 @@ spring:
     locations: classpath:db/migration
   h2:
     console:
-      enabled: true
+      enabled: false
       path: /h2-console
 
 app:
+  auth:
+    jwt-secret: ${JWT_SECRET:}
+    alice-password: ${DEMO_ALICE_PASSWORD:}
+    bob-password: ${DEMO_BOB_PASSWORD:}
   fastapi:
+    api-key: ${AGENT_API_KEY:}
     base-url: http://127.0.0.1:8000
     recommend-path: /api/v1/recommend
     recommend-stream-path: /api/v1/recommend/stream
@@ -45,6 +50,9 @@ spring:
     username: ${DB_USER:postgres}
     password: ${DB_PASSWORD:postgres}
     driver-class-name: org.postgresql.Driver
+    hikari:
+      data-source-properties:
+        logServerErrorDetail: false
   jpa:
     properties:
       hibernate:
