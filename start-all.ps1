@@ -47,6 +47,16 @@ Get-Content -LiteralPath (Join-Path $RepoRoot ".runtime/auth-demo.env") | ForEac
     }
 }
 
+# Share rollout controls between the business service and the agent service.
+$routingEnvPath = Join-Path $RepoRoot ".runtime/routing.env"
+if (Test-Path -LiteralPath $routingEnvPath) {
+    Get-Content -LiteralPath $routingEnvPath | ForEach-Object {
+        if ($_ -match '^(ROUTING_DEPLOYMENT_MODE|ROUTING_AUTO_SESSION_APPROVED|ROUTING_TRAFFIC_PERCENT|ROUTING_GATE_REPORT|DYNAMIC_ROUTING_ENABLE|JEV_MODEL)=(.*)$') {
+            [Environment]::SetEnvironmentVariable($Matches[1], $Matches[2], 'Process')
+        }
+    }
+}
+
 $frontendPm = $null
 if (-not $SkipFrontend) {
     if (Get-Command "yarn" -ErrorAction SilentlyContinue) {
