@@ -2,6 +2,7 @@ import logging
 import threading
 import time
 from dataclasses import dataclass
+from typing import Any
 
 import openai
 
@@ -10,10 +11,13 @@ from ..execution_control import check_current_run, current_request_timeout
 from ..logging_utils import elapsed_ms, error_fields, log_event, log_exception, new_trace_id
 from ..observability import wrap_openai
 
-try:
-    from sentence_transformers import SentenceTransformer
-except Exception:  # pragma: no cover - optional dependency
-    SentenceTransformer = None
+
+def _lazy_sentence_transformer(*args: Any, **kwargs: Any) -> Any:
+    from sentence_transformers import SentenceTransformer as model_class
+    return model_class(*args, **kwargs)
+
+
+SentenceTransformer: Any = _lazy_sentence_transformer
 
 logger = logging.getLogger(__name__)
 
@@ -29,7 +33,7 @@ _DASHSCOPE_MODEL_ALIASES = {
 _LOCAL_BGE_CACHE_DIR_NAME = "models--baai--bge-small-zh"
 _LOCAL_BGE_MODEL_NAME = "BAAI/bge-small-zh"
 
-_LOCAL_ST_MODELS: dict[str, "SentenceTransformer"] = {}
+_LOCAL_ST_MODELS: dict[str, Any] = {}
 _LOCAL_ST_LOCK = threading.Lock()
 
 
@@ -126,7 +130,7 @@ def _normalize_local_model_name(model_name: str) -> str:
     return normalized
 
 
-def _get_local_sentence_model(model_name: str, trace_id: str) -> "SentenceTransformer":
+def _get_local_sentence_model(model_name: str, trace_id: str) -> Any:
     if SentenceTransformer is None:
         raise RuntimeError(
             "sentence-transformers is not installed; cannot use local embedding provider"

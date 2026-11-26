@@ -19,13 +19,13 @@ except Exception:  # pragma: no cover - optional until image-vector recall is en
 else:
     Image = PILImage
 
-SentenceTransformerClass: Any = None
-try:
-    from sentence_transformers import SentenceTransformer as _SentenceTransformer
-except Exception:  # pragma: no cover - optional until image-vector recall is enabled
-    pass
-else:
-    SentenceTransformerClass = _SentenceTransformer
+def _lazy_sentence_transformer(*args: Any, **kwargs: Any) -> Any:
+    # Loading a routing-only API must not initialize torch/sklearn or native DLLs.
+    from sentence_transformers import SentenceTransformer
+    return SentenceTransformer(*args, **kwargs)
+
+
+SentenceTransformerClass: Any = _lazy_sentence_transformer
 
 logger = logging.getLogger(__name__)
 
