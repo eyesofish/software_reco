@@ -3,7 +3,7 @@ import React, { forwardRef } from 'react'
 import { StyledTextArea } from './style'
 
 
-interface TextAreaProps {
+interface TextAreaProps extends React.TextareaHTMLAttributes<HTMLTextAreaElement> {
   placeholder : string
 }
 

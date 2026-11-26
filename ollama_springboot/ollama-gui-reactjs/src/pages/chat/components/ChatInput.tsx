@@ -3,7 +3,7 @@ import { ChangeEvent, RefObject, useRef, useState } from 'react'
 import { AppLanguage } from '~/services/language'
 import Button from '~/components/button'
 import TextArea from '~/components/textarea'
-import { ImageAttachment } from '~/entities/messages'
+import { ImageAttachment, RoutingMode } from '~/entities/messages'
 import {
   AttachButton,
   ComposerError,
@@ -42,7 +42,10 @@ interface ChatInputProps {
   onSend : () => void,
   images : ImageAttachment[],
   onImagesSelected : (images : ImageAttachment[]) => void,
-  onImageRemoved : (index : number) => void
+  onImageRemoved : (index : number) => void,
+  routingMode ?: RoutingMode,
+  onRoutingModeChange ?: (mode : RoutingMode) => void,
+  disabled ?: boolean
 }
 
 export default function ChatInput ({
@@ -51,7 +54,10 @@ export default function ChatInput ({
   onSend,
   images,
   onImagesSelected,
-  onImageRemoved
+  onImageRemoved,
+  routingMode = 'explicit',
+  onRoutingModeChange,
+  disabled = false
 } : ChatInputProps) {
   const fileInputRef = useRef<HTMLInputElement>(null)
   const [imageError, setImageError] = useState<string>()
@@ -88,6 +94,20 @@ export default function ChatInput ({
 
   return (
     <InputContainer>
+      {onRoutingModeChange && (
+        <label className='routingMode'>
+          {language === 'zh' ? '会话归属' : 'Conversation'}
+          <select
+            aria-label={language === 'zh' ? '会话归属' : 'Conversation routing'}
+            disabled={disabled}
+            onChange={(event) => onRoutingModeChange(event.target.value as RoutingMode)}
+            value={routingMode}
+          >
+            <option value='explicit'>{language === 'zh' ? '继续当前会话' : 'Continue current conversation'}</option>
+            <option value='auto'>{language === 'zh' ? '自动判断' : 'Decide automatically'}</option>
+          </select>
+        </label>
+      )}
       {images.length > 0 && (
         <ImagePreviewList>
           {images.map((image, index) => (
@@ -110,6 +130,7 @@ export default function ChatInput ({
           accept='image/png,image/jpeg,image/webp'
           hidden
           multiple
+          disabled={disabled}
           onChange={handleFilesSelected}
           ref={fileInputRef}
           type='file'
@@ -119,6 +140,7 @@ export default function ChatInput ({
           onClick={() => fileInputRef.current?.click()}
           title={language === 'zh' ? '添加图片' : 'Attach images'}
           type='button'
+          disabled={disabled}
         >
           <svg aria-hidden='true' height='22' viewBox='0 0 24 24' width='22'>
             <path d='M16.5 6.5 8.9 14.1a3 3 0 1 0 4.2 4.2l7.1-7.1a5 5 0 0 0-7.1-7.1L5.7 11.5a7 7 0 1 0 9.9 9.9l5.2-5.2' fill='none' stroke='currentColor' strokeLinecap='round' strokeWidth='2' />
@@ -127,8 +149,9 @@ export default function ChatInput ({
         <TextArea
           placeholder={language === 'zh' ? '\u6709\u95ee\u9898\uff0c\u5c3d\u7ba1\u95ee' : 'ask any questions'}
           ref={textAreaRef}
+          disabled={disabled}
         />
-        <Button onClick={onSend}>
+        <Button onClick={onSend} disabled={disabled} ariaLabel={language === 'zh' ? '发送' : 'Send'}>
           <svg width='24' height='24' viewBox='0 0 14 16'><path fill='currentColor' d='m6.2 0.9q0.2-0.2 0.4-0.2 0.2-0.1 0.4-0.1 0.2 0 0.4 0.1 0.2 0 0.4 0.2l5.2 5.1c0.2 0.3 0.3 0.6 0.3 0.9 0 0.2-0.2 0.5-0.4 0.7-0.2 0.3-0.5 0.4-0.8 0.4-0.3 0-0.5-0.1-0.8-0.3l-3.2-3.2v9.8c0 0.3-0.1 0.6-0.3 0.8-0.2 0.2-0.5 0.3-0.8 0.3-0.3 0-0.6-0.1-0.8-0.3-0.2-0.2-0.3-0.5-0.3-0.8v-9.8l-3.2 3.2c-0.2 0.2-0.5 0.3-0.8 0.3-0.4 0-0.7-0.1-0.9-0.3-0.2-0.2-0.3-0.5-0.3-0.8 0-0.3 0.1-0.6 0.3-0.9z' /></svg>
         </Button>
       </ComposerRow>
