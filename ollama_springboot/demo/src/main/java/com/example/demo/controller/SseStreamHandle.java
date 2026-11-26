@@ -74,8 +74,9 @@ final class SseStreamHandle {
         if (terminal.get()) {
             return;
         }
-        String message = error == null ? "stream failed" : String.valueOf(error.getMessage());
-        if (send("error", Map.of("type", "error", "message", message))) {
+        String reference = java.util.UUID.randomUUID().toString();
+        logger.warn("stream.failed request_id={} cause={}", reference, error == null ? "unknown" : error.getClass().getName());
+        if (send("error", Map.of("type", "error", "request_id", reference, "message", "Stream failed. Reference: " + reference))) {
             complete();
         }
     }

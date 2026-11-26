@@ -4,6 +4,10 @@ import org.springframework.security.core.annotation.AuthenticationPrincipal;
 import org.springframework.security.oauth2.jwt.Jwt;
 import com.example.demo.auth.BusinessAccess;
 import com.example.demo.routing.RoutingPreflight;
+import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.support.TransactionTemplate;
+
 import com.example.demo.client.FastApiClient;
 import com.example.demo.client.FastApiClient.RecommendStreamEvent;
 import com.example.demo.conversation.entity.ConversationEntity;
@@ -38,8 +42,7 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
-import java.util.concurrent.CompletableFuture;
-import reactor.core.Disposable;
+import java.util.UUID;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -79,21 +82,26 @@ public class ChatController {
     private final RoutingPreflight routing;
     private final ConversationService conversationService;
     private final RecommendTaskStateService recommendTaskStateService;
+    private final TransactionTemplate transactions;
 
     public ChatController(
             FastApiClient fastApiClient,
             BusinessAccess access,
             RoutingPreflight routing,
             ConversationService conversationService,
-            RecommendTaskStateService recommendTaskStateService
+            RecommendTaskStateService recommendTaskStateService,
+            PlatformTransactionManager transactionManager
     ) {
         this.fastApiClient = fastApiClient;
         this.access = access;
         this.routing = routing;
         this.conversationService = conversationService;
         this.recommendTaskStateService = recommendTaskStateService;
+        this.transactions = new TransactionTemplate(transactionManager);
+        this.transactions.setTimeout(15);
     }
 
+    @Transactional
     @PostMapping("/api/chat")
     public OllamaChatResponse chat(@RequestBody OllamaChatRequest request, @AuthenticationPrincipal Jwt jwt) {
         logIncomingMessages(request);
@@ -121,6 +129,7 @@ public class ChatController {
             return response;
         }
         requestConversationId = route.conversationId();
+        if (requestConversationId != null) recommendTaskStateService.assertConversationAvailable(jwt.getSubject(), requestConversationId);
         ConversationEntity conversation = conversationService.ensureOwnedConversation(
                 jwt.getSubject(),
                 requestConversationId,
@@ -218,140 +227,108 @@ public class ChatController {
                 pendingSubQuestions,
                 taskOutcome.retrievedImages()
         );
+        response.setPendingInput(taskState.getPendingInput());
         return response;
     }
 
     @PostMapping(value = "/api/chat/stream", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
     public SseEmitter chatStream(@RequestBody OllamaChatRequest request, @AuthenticationPrincipal Jwt jwt) {
-        logIncomingMessages(request);
+        String owner = jwt.getSubject();
+        String correlationId = UUID.randomUUID().toString();
+        ChatPreparation result = routeAndPrepare(owner, correlationId, request);
+        SseEmitter emitter = new SseEmitter(0L);
+        if (result instanceof RoutingPrompt prompt) {
+            sendSseEvent(emitter, "routing_clarification", prompt.payload());
+            emitter.complete();
+            return emitter;
+        }
+        PreparedChat chat = (PreparedChat) result;
+        String conversationId = chat.conversationId();
+        String taskId = chat.taskId();
+        logger.info("chat.committed request_id={} conversation_id={} task_id={} stage=accept",
+                correlationId, conversationId, taskId);
+        sendSseEvent(emitter, "meta", normalizeStreamPayload("meta", Map.of("status", "GENERATING"),
+                taskId, conversationId, conversationId));
+        if (chat.localEvent() != null) {
+            RecommendStreamEvent event = chat.localEvent();
+            logger.info("chat.committed request_id={} conversation_id={} task_id={} stage=local_reply event={}",
+                    correlationId, conversationId, taskId, event.type());
+            sendSseEvent(emitter, event.type(), normalizeStreamPayload(event.type(), event.payload(),
+                    taskId, conversationId, conversationId));
+            emitter.complete();
+            return emitter;
+        }
 
+        try {
+            fastApiClient.upsertSessionState(conversationId, chat.facts());
+        } catch (RuntimeException error) {
+            // The request also carries its fact snapshot in the prompt.
+            logChatFailure(correlationId, conversationId, taskId, "sync_facts", error);
+        }
+        ChatRelay relay = new ChatRelay(emitter, correlationId, conversationId, taskId, conversationId);
+        try {
+            relay.handle.attach(fastApiClient.streamRecommendCancellable(chat.agentRequest(),
+                    relay::onEvent, relay::upstreamFailure, relay::upstreamClosed));
+        } catch (RuntimeException error) {
+            relay.upstreamFailure(error);
+        }
+        return emitter;
+    }
+
+    private sealed interface ChatPreparation permits PreparedChat, RoutingPrompt { }
+    private record RoutingPrompt(Map<String, Object> payload) implements ChatPreparation { }
+    private record PreparedChat(String taskId, String conversationId, Map<String, String> facts,
+            RecommendRequest agentRequest, RecommendStreamEvent localEvent) implements ChatPreparation { }
+
+    private ChatPreparation routeAndPrepare(String owner, String correlationId, OllamaChatRequest request) {
         List<ImageAttachment> images = normalizeImages(request.getImages());
         String rawQuery = extractLastUserMessage(request.getMessages());
         String query = MultimodalSupport.queryOrDefault(rawQuery, images);
-        if (query.isBlank()) {
-            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "user message or image is required");
-        }
-
-        RoutingPreflight.Outcome route = routing.resolve(jwt.getSubject(), rawQuery, !images.isEmpty(),
+        if (query.isBlank()) throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "user message or image is required");
+        RoutingPreflight.Outcome route = routing.resolve(owner, rawQuery, !images.isEmpty(),
                 request.getRoutingMode(), request.getConversationId(), request.getSessionId(), request.getThreadId(),
                 request.getCurrentConversationId(), 60);
-        if (route.needsClarification()) {
-            SseEmitter emitter = new SseEmitter(0L);
-            sendSseEvent(emitter, "routing_clarification", route.clarificationPayload());
-            emitter.complete();
-            return emitter;
-        }
-        String requestConversationId = route.conversationId();
-        ConversationEntity conversation = conversationService.ensureOwnedConversation(
-                jwt.getSubject(),
-                requestConversationId,
-                query,
-                request.getModel()
-        );
-
-        String persistedUserMessage = MultimodalSupport.summarizeUserMessage(query, images);
-        ConversationMessageEntity userMessage = conversationService.appendMessage(
-                conversation,
-                "user",
-                persistedUserMessage
-        );
-        Map<String, String> extractedFacts = extractFactsForSessionUpdate(query);
-        for (Map.Entry<String, String> fact : extractedFacts.entrySet()) {
-            conversationService.upsertFact(
-                    conversation.getId(),
-                    fact.getKey(),
-                    fact.getValue(),
-                    userMessage.getId(),
-                    0.99d
-            );
-        }
-
-        Map<String, String> facts = conversationService.getFacts(conversation.getId());
-        String knownName = facts.get("user_name");
-        boolean memoryReply = !MultimodalSupport.hasAttachments(images)
-                && isAskingUserName(query) && knownName != null && !knownName.isBlank();
-        boolean confirmOnly = !MultimodalSupport.hasAttachments(images) && isConfirmOnlyInput(query);
-        String streamTaskId = memoryReply || confirmOnly
-                ? firstNonBlank(request.getSessionId(), requestConversationId, conversation.getId())
-                : recommendTaskStateService.createStreamingTask(jwt.getSubject(), conversation.getId(), query, 60, 3, request.getModel()).getTaskId();
-
-        SseEmitter emitter = new SseEmitter(0L);
-        Map<String, Object> bootstrap = normalizeStreamPayload(
-                "meta",
-                Map.of("status", "GENERATING"),
-                streamTaskId,
-                conversation.getId(),
-                conversation.getId()
-        );
-        sendSseEvent(emitter, "meta", bootstrap);
-
-        if (memoryReply) {
-            String memoryAnswer = "你叫" + knownName + "。";
-            conversationService.appendMessage(conversation, "assistant", memoryAnswer);
-            Map<String, Object> finalPayload = normalizeStreamPayload(
-                    "final",
-                    Map.of(
-                            "status", "success",
-                            "final_answer", memoryAnswer
-                    ),
-                    streamTaskId,
-                    conversation.getId(),
-                    conversation.getId()
-            );
-            sendSseEvent(emitter, "final", finalPayload);
-            emitter.complete();
-            return emitter;
-        }
-
-        if (confirmOnly) {
-            String blockedMessage = "Detected confirmation text. Please use the UI confirm button instead of sending a new question.";
-            conversationService.appendMessage(conversation, "assistant", blockedMessage);
-            Map<String, Object> errorPayload = normalizeStreamPayload(
-                    "error",
-                    Map.of("message", blockedMessage),
-                    streamTaskId,
-                    conversation.getId(),
-                    conversation.getId()
-            );
-            sendSseEvent(emitter, "error", errorPayload);
-            emitter.complete();
-            return emitter;
-        }
-
-        String enrichedQuery = buildQueryWithContext(
-                query,
-                facts,
-                conversationService.getRecentMessages(conversation.getId(), 6)
-        );
-
+        if (route.needsClarification()) return new RoutingPrompt(route.clarificationPayload());
         try {
-            fastApiClient.upsertSessionState(conversation.getId(), facts);
-        } catch (Exception ex) {
-            logger.warn("FastAPI session-state sync failed: {}", ex.getMessage());
+            return transactions.execute(tx -> prepareChat(owner, request, route, query, images));
+        } catch (RuntimeException error) {
+            logChatFailure(correlationId, route.conversationId(), null, "accept", error);
+            if (error instanceof ResponseStatusException statusError) throw statusError;
+            throw new ResponseStatusException(HttpStatus.INTERNAL_SERVER_ERROR, "Could not accept chat. Reference: " + correlationId);
         }
+    }
 
-        SseStreamHandle stream = SseStreamHandle.start(emitter, () -> {
-            Map<String, Object> disconnected = normalizeStreamPayload(
-                    "error",
-                    Map.of("message", "client disconnected; generation cancelled", "stop_reason", "cancelled"),
-                    streamTaskId,
-                    conversation.getId(),
-                    conversation.getId()
-            );
-            recommendTaskStateService.applyStreamEvent(streamTaskId, "error", disconnected);
-        });
-        StringBuilder tokenBuffer = new StringBuilder();
-        Disposable subscription = fastApiClient.streamRecommendCancellable(
-                new RecommendRequest(enrichedQuery, 60, 3, conversation.getId(), images).routed(route.decision(), route.remainingSeconds()),
-                event -> forwardChatStreamEvent(
-                        stream, event, streamTaskId, conversation, conversation.getId(), tokenBuffer
-                ),
-                stream::fail,
-                stream::complete
-        );
-        stream.attach(subscription);
-
-        return emitter;
+    private ChatPreparation prepareChat(String owner, OllamaChatRequest request,
+            RoutingPreflight.Outcome route, String query, List<ImageAttachment> images) {
+        RecommendTaskStateResponse task = recommendTaskStateService.createStreamingTask(owner, route.conversationId(), query,
+                60, 3, request.getModel());
+        String conversationId = task.getConversationId();
+        String taskId = task.getTaskId();
+        ConversationMessageEntity message = conversationService.appendMessage(conversationId, "user",
+                MultimodalSupport.summarizeUserMessage(query, images));
+        extractFactsForSessionUpdate(query).forEach((factKey, value) ->
+                conversationService.upsertFact(conversationId, factKey, value, message.getId(), 0.99d));
+        Map<String, String> facts = conversationService.getFacts(conversationId);
+        RecommendStreamEvent local = null;
+        String knownName = facts.get("user_name");
+        if (images.isEmpty() && isAskingUserName(query) && knownName != null && !knownName.isBlank()) {
+            local = new RecommendStreamEvent("final", Map.of("status", "success", "final_answer", "你叫" + knownName + "。"));
+        } else if (images.isEmpty() && isConfirmOnlyInput(query)) {
+            String hint = "Detected confirmation text. Please use the UI confirm button instead of sending a new question.";
+            conversationService.appendMessage(conversationId, "assistant", hint);
+            local = new RecommendStreamEvent("error", Map.of("message", hint));
+        }
+        if (local != null) {
+            RecommendTaskStateResponse committed = recommendTaskStateService.applyStreamEvent(taskId, local.type(), local.payload());
+            if ("final".equals(local.type()) && !"DONE".equals(committed.getStatus())) {
+                local = new RecommendStreamEvent("error", Map.of("message", "Chat could not complete. Reference: " + taskId));
+            }
+            return new PreparedChat(taskId, conversationId, facts, null, local);
+        }
+        String agentQuery = buildQueryWithContext(query, facts, conversationService.getRecentMessages(conversationId, 6));
+        RecommendRequest agentRequest = new RecommendRequest(agentQuery, 60, 3, conversationId, images)
+                .routed(route.decision(), route.remainingSeconds());
+        return new PreparedChat(taskId, conversationId, facts, agentRequest, null);
     }
 
     @PostMapping("/api/chat/confirm")
@@ -471,72 +448,153 @@ public class ChatController {
         String streamTaskId = resolvedTask;
         final String authorizedSessionId = preparation.sessionId();
 
-        ConversationEntity conversation = conversationService.findActiveConversation(conversationId);
         SseEmitter emitter = new SseEmitter(0L);
-        Map<String, Object> bootstrap = normalizeStreamPayload(
-                "meta",
-                Map.of("status", "GENERATING"),
-                streamTaskId,
-                conversation.getId(),
-                authorizedSessionId
-        );
-        sendSseEvent(emitter, "meta", bootstrap);
-
-        SseStreamHandle stream = SseStreamHandle.start(emitter, () -> {
-            Map<String, Object> disconnected = normalizeStreamPayload(
-                    "error",
-                    Map.of("message", "client disconnected; generation cancelled", "stop_reason", "cancelled"),
-                    streamTaskId,
-                    conversation.getId(),
-                    authorizedSessionId
-            );
-            recommendTaskStateService.applyStreamEvent(streamTaskId, "error", disconnected);
-        });
-        StringBuilder tokenBuffer = new StringBuilder();
-        Disposable subscription = fastApiClient.streamConfirmCancellable(
-                authorizedSessionId,
-                preparation.action(),
-                preparation.subQuestions(),
-                preparation.comment(),
-                event -> forwardChatStreamEvent(stream, event, streamTaskId, conversation, authorizedSessionId, tokenBuffer),
-                stream::fail,
-                stream::complete
-        );
-        stream.attach(subscription);
-
+        sendSseEvent(emitter, "meta", normalizeStreamPayload("meta", Map.of("status", "GENERATING"),
+                streamTaskId, conversationId, authorizedSessionId));
+        ChatRelay relay = new ChatRelay(emitter, UUID.randomUUID().toString(), conversationId, streamTaskId, authorizedSessionId);
+        try {
+            relay.handle.attach(fastApiClient.streamConfirmCancellable(authorizedSessionId, preparation.action(),
+                    preparation.subQuestions(), preparation.comment(), relay::onEvent, relay::upstreamFailure, relay::upstreamClosed));
+        } catch (RuntimeException error) {
+            relay.upstreamFailure(error);
+        }
         return emitter;
     }
 
-    private void forwardChatStreamEvent(
-            SseStreamHandle stream,
-            RecommendStreamEvent event,
-            String taskId,
-            ConversationEntity conversation,
-            String sessionId,
-            StringBuilder tokenBuffer
-    ) {
-        Map<String, Object> payload = normalizeStreamPayload(
-                event.type(), event.payload(), taskId, conversation.getId(), sessionId
-        );
-        String eventType = firstNonBlank(asText(payload.get("type")), "state");
-        if ("token".equals(eventType)) {
-            String delta = asText(payload.get("delta"));
-            if (delta != null) tokenBuffer.append(delta);
+    private final class ChatRelay {
+        private final String requestId;
+        private final String conversationId;
+        private final String taskId;
+        private final String sessionId;
+        private final SseStreamHandle handle;
+        private final StringBuilder tokens = new StringBuilder();
+        private long lastProgressWrite = System.nanoTime();
+        private boolean finished;
+
+        private ChatRelay(SseEmitter emitter, String requestId, String conversationId, String taskId, String sessionId) {
+            this.requestId = requestId;
+            this.conversationId = conversationId;
+            this.taskId = taskId;
+            this.sessionId = sessionId;
+            this.handle = SseStreamHandle.start(emitter, this::disconnected);
         }
-        if ("final".equals(eventType)) {
-            String finalAnswer = firstNonBlank(asText(payload.get("final_answer")), tokenBuffer.toString());
-            if (finalAnswer != null && !finalAnswer.isBlank()) {
-                conversationService.appendMessage(conversation, "assistant", finalAnswer);
-                payload.put("final_answer", finalAnswer);
+
+        private synchronized void onEvent(RecommendStreamEvent event) {
+            if (finished) return;
+            String type = normalizeEventType(event.type());
+            try {
+                Map<String, Object> payload = normalizeStreamPayload(type, event.payload(), taskId, conversationId, sessionId);
+                if ("token".equals(type)) {
+                    tokens.append(payload.get("delta"));
+                    // Progress and heartbeat need a checkpoint, not a transaction per token.
+                    long now = System.nanoTime();
+                    if (now - lastProgressWrite < java.util.concurrent.TimeUnit.SECONDS.toNanos(4)) {
+                        handle.send(type, payload);
+                        return;
+                    }
+                    lastProgressWrite = now;
+                } else if ("final".equals(type)) {
+                    payload.put("final_answer", firstNonBlank(asText(payload.get("final_answer")), tokens.toString()));
+                } else if ("error".equals(type)) {
+                    payload.put("message", "Agent reported a generation error");
+                }
+                commitAndSend(type, payload);
+            } catch (RuntimeException error) {
+                fail("persist_" + type, error);
             }
         }
-        RecommendTaskStateResponse state = recommendTaskStateService.applyStreamEvent(taskId, eventType, payload);
-        if ("final".equals(eventType) && "FAILED".equals(state.getStatus())) {
-            stream.send("error", normalizeStreamPayload("error", Map.of("message", state.getErrorMessage()),
-                    taskId, conversation.getId(), sessionId));
+
+        private void commitAndSend(String type, Map<String, Object> payload) {
+            RecommendTaskStateResponse state = recommendTaskStateService.applyStreamEvent(taskId, type, payload);
+            String committedType;
+            Map<String, Object> result = new LinkedHashMap<>();
+            switch (state.getStatus()) {
+                case "DONE", "INCOMPLETE" -> {
+                    committedType = "final";
+                    result.putAll(payload);
+                    result.put("status", "DONE".equals(state.getStatus()) ? "success" : "incomplete");
+                    result.put("final_answer", state.getFinalResult());
+                }
+                case "PENDING_CONFIRM" -> {
+                    committedType = "awaiting_confirmation";
+                    result.put("sub_questions", state.getSubQuestions());
+                }
+                case "PENDING_INPUT" -> {
+                    committedType = "awaiting_input";
+                    result.put("pending_input", state.getPendingInput());
+                }
+                case "FAILED", "CANCELLED", "EXPIRED" -> {
+                    committedType = "error";
+                    result.put("message", "Chat could not complete. Reference: " + requestId);
+                    result.put("stop_reason", state.getStatus().toLowerCase(Locale.ROOT));
+                    if ("error".equals(type)) {
+                        for (String key : List.of("stop_reason", "run_id", "elapsed_ms")) {
+                            if (payload.get(key) != null) result.put(key, payload.get(key));
+                        }
+                    }
+                }
+                default -> {
+                    handle.send(type, payload);
+                    return;
+                }
+            }
+            finished = true;
+            logger.info("chat.committed request_id={} conversation_id={} task_id={} stage={} status={}",
+                    requestId, conversationId, taskId, type, state.getStatus());
+            Map<String, Object> response = normalizeStreamPayload(committedType, result, taskId, conversationId, sessionId);
+            response.put("request_id", requestId);
+            handle.send(committedType, response);
+            handle.complete();
+        }
+
+        private synchronized void upstreamClosed() {
+            if (finished) return;
+            try {
+                commitAndSend("final", Map.of("status", "incomplete", "final_answer", tokens.toString(),
+                        "stop_reason", "upstream_closed"));
+            } catch (RuntimeException error) {
+                fail("persist_eof", error);
+            }
+        }
+
+        private synchronized void upstreamFailure(Throwable error) {
+            fail("upstream", error);
+        }
+
+        private synchronized void disconnected() {
+            fail("disconnect", null);
+        }
+
+        private void fail(String stage, Throwable error) {
+            if (finished) return;
+            logChatFailure(requestId, conversationId, taskId, stage, error);
+            try {
+                commitAndSend("error", Map.of("message", "Chat failed at " + stage + " (request " + requestId + ")"));
+            } catch (RuntimeException recordError) {
+                finished = true;
+                logChatFailure(requestId, conversationId, taskId, "persist_failure", recordError);
+                handle.send("error", Map.of("type", "error", "task_id", taskId, "conversation_id", conversationId,
+                        "request_id", requestId, "message", "Could not verify chat status. Reference: " + requestId));
+                handle.complete();
+            }
+        }
+    }
+
+    private void logChatFailure(String requestId, String conversationId, String taskId, String stage, Throwable error) {
+        // HTTP and SQL exception messages may contain user text or upstream response bodies.
+        if (error instanceof ResponseStatusException rejected && rejected.getStatusCode().is4xxClientError()) {
+            logger.info("chat.rejected request_id={} conversation_id={} task_id={} stage={} status={}",
+                    requestId, conversationId, taskId, stage, rejected.getStatusCode().value());
             return;
         }
-        stream.send(eventType, payload);
+        String cause = error == null ? "client_disconnected" : error.getClass().getName();
+        String sqlState = null;
+        for (Throwable detail = error; detail != null; detail = detail.getCause()) {
+            if (detail instanceof java.sql.SQLException sql) { sqlState = sql.getSQLState(); break; }
+        }
+        logger.warn("chat.failed request_id={} conversation_id={} task_id={} stage={} cause={} sql_state={} stack={}",
+                requestId, conversationId, taskId, stage, cause, sqlState,
+                error == null ? "" : java.util.Arrays.toString(error.getStackTrace()));
     }
 
     private void logIncomingMessages(OllamaChatRequest request) {
@@ -897,6 +955,13 @@ public class ChatController {
                 normalized.put("delta", delta == null ? "" : String.valueOf(delta));
                 normalized.put("node", firstNonBlank(asText(source.get("node")), ""));
             }
+            case "routing_clarification", "awaiting_input", "route_decision" -> {
+                normalized.putAll(source);
+                normalized.put("type", eventType);
+                normalized.put("task_id", taskId);
+                normalized.put("conversation_id", resolvedConversationId);
+                normalized.put("session_id", resolvedSessionId);
+            }
             case "awaiting_confirmation" -> normalized.put(
                     "sub_questions",
                     normalizeStringList(
@@ -965,7 +1030,7 @@ public class ChatController {
     private String normalizeEventType(String rawType) {
         String normalized = firstNonBlank(rawType, "state").toLowerCase(Locale.ROOT);
         return switch (normalized) {
-            case "meta", "node", "token", "state", "awaiting_confirmation", "final", "error" -> normalized;
+            case "meta", "node", "token", "state", "awaiting_confirmation", "awaiting_input", "routing_clarification", "route_decision", "final", "error" -> normalized;
             default -> "state";
         };
     }

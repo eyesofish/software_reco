@@ -26,6 +26,7 @@ class BusinessAuthIntegrationTests {
     static final ObjectMapper JSON = new ObjectMapper();
     static final List<String> CALLS = new CopyOnWriteArrayList<>();
     static final List<String> KEYS = new CopyOnWriteArrayList<>();
+    static final Map<String, Integer> CLARIFICATION_REJECTIONS = new java.util.concurrent.ConcurrentHashMap<>();
     static final HttpServer AGENT = createAgent();
     @Autowired TestRestTemplate http;
     @Autowired JdbcTemplate database;
@@ -34,6 +35,7 @@ class BusinessAuthIntegrationTests {
     @Autowired com.example.demo.conversation.repository.ConversationRepository conversations;
     @Autowired com.example.demo.conversation.repository.RecommendTaskRepository tasks;
     @Autowired com.example.demo.conversation.repository.ConversationMessageRepository messages;
+    @Autowired com.example.demo.conversation.service.RecommendTaskStateService taskStates;
 
     @DynamicPropertySource
     static void properties(DynamicPropertyRegistry registry) {
@@ -54,6 +56,11 @@ class BusinessAuthIntegrationTests {
                 }
                 JsonNode request = JSON.readTree(exchange.getRequestBody().readAllBytes());
                 String session = request == null ? "" : request.path("session_id").asText();
+                Integer rejection = path.contains("clarify") ? CLARIFICATION_REJECTIONS.remove(session) : null;
+                if (rejection != null) {
+                    if (rejection > 0) exchange.sendResponseHeaders(rejection, -1);
+                    exchange.close(); return;
+                }
                 String result;
                 if (path.contains("assets")) {
                     byte[] image = Base64.getDecoder().decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jk1sAAAAASUVORK5CYII=");
@@ -63,7 +70,12 @@ class BusinessAuthIntegrationTests {
                 } else if (path.endsWith("stream")) {
                     boolean pending = !path.contains("confirm") && request.path("query").asText().contains("needs confirmation");
                     result = "event: meta\ndata: {\"type\":\"meta\",\"session_id\":\"" + session + "\"}\n\n";
-                    if (pending) result += "event: awaiting_confirmation\ndata: {\"type\":\"awaiting_confirmation\",\"sub_questions\":[\"Which database?\"]}\n\n";
+                    if (path.contains("clarify")) result = "event: resume_accepted\ndata: " + JSON.writeValueAsString(Map.of(
+                            "session_id", session, "kind", "clarification", "clarification_id", request.path("clarification_id").asText())) + "\n\n" + result;
+                    if (request.path("query").asText().contains("end before final")) {
+                        result += "event: token\ndata: {\"type\":\"token\",\"delta\":\"Partial\"}\n\n";
+                    } else if (request.path("query").asText().contains("needs input")) result += "event: awaiting_input\ndata: {\"type\":\"awaiting_input\",\"pending_input\":{\"clarification_id\":\"input-1\",\"kind\":\"execution\",\"prompt\":\"Which deployment?\"}}\n\n";
+                    else if (pending) result += "event: awaiting_confirmation\ndata: {\"type\":\"awaiting_confirmation\",\"sub_questions\":[\"Which database?\"]}\n\n";
                     else {
                         result += "event: token\ndata: {\"type\":\"token\",\"delta\":\"Hello\"}\n\nevent: token\ndata: {\"type\":\"token\",\"delta\":\" \"}\n\nevent: token\ndata: {\"type\":\"token\",\"delta\":\"world\"}\n\n";
                         result += "event: final\ndata: " + JSON.writeValueAsString(Map.of("type", "final", "status", "success",
@@ -74,6 +86,12 @@ class BusinessAuthIntegrationTests {
                 } else {
                     boolean pending = path.endsWith("recommend") && request.path("query").asText().contains("needs confirmation");
                     result = "{\"status\":\"success\",\"session_id\":\"" + session + "\",\"final_answer\":\"Hello world\",\"awaiting_human_confirmation\":" + pending + ",\"pending_sub_questions\":[\"Which database?\"]}";
+                    if (request.path("query").asText().contains("partial evidence")) result = JSON.writeValueAsString(Map.of(
+                            "status", "incomplete", "session_id", session, "final_answer", "Only one requirement has evidence."));
+                    if (request.path("query").asText().contains("needs input")) result = JSON.writeValueAsString(Map.of(
+                            "status", "awaiting_input", "session_id", session,
+                            "pending_input", Map.of("clarification_id", "input-1", "kind", "execution", "prompt", "Which deployment?")));
+                    if (path.contains("clarify")) result = JSON.writeValueAsString(Map.of("status", "success", "session_id", session, "final_answer", "Clarified answer"));
                     exchange.getResponseHeaders().set("Content-Type", "application/json");
                 }
                 byte[] bytes = result.getBytes(StandardCharsets.UTF_8);
@@ -251,6 +269,138 @@ class BusinessAuthIntegrationTests {
         assertThat(response.getBody()).contains("event:final", id).doesNotContain("routing_clarification");
     }
 
+    @Test void waitingInputPersistsBlocksOverwriteAndResumesExactTask() throws Exception {
+        String alice = login("alice"), bob = login("bob"), id = conversation(alice);
+        var created = call(HttpMethod.POST, "/api/v1/recommend/stream", alice,
+                Map.of("conversation_id", id, "query", "needs input"));
+        assertThat(created.getBody()).contains("event:awaiting_input", "input-1");
+        String task = json(call(HttpMethod.GET, "/api/v1/conversations/" + id + "/tasks", alice, null)).get(0).path("task_id").asText();
+        var state = json(call(HttpMethod.GET, "/api/v1/tasks/" + task, alice, null));
+        assertThat(state.path("status").asText()).isEqualTo("PENDING_INPUT");
+        assertThat(state.path("pending_input").path("clarification_id").asText()).isEqualTo("input-1");
+        int calls = CALLS.size(); long count = messages.count();
+        assertThat(call(HttpMethod.POST, "/api/chat/stream", alice, Map.of("conversation_id", id,
+                "messages", List.of(Map.of("role", "user", "content", "overwrite")))).getStatusCode().value()).isEqualTo(409);
+        assertThat(call(HttpMethod.POST, "/api/v1/recommend/clarify", bob,
+                Map.of("task_id", task, "clarification_id", "input-1", "answer", "local")).getStatusCode().value()).isEqualTo(404);
+        assertThat(call(HttpMethod.POST, "/api/v1/recommend/clarify", alice,
+                Map.of("task_id", task, "clarification_id", "stale", "answer", "local")).getStatusCode().value()).isEqualTo(409);
+        assertThat(CALLS).hasSize(calls); assertThat(messages.count()).isEqualTo(count);
+        var resumed = call(HttpMethod.POST, "/api/v1/recommend/clarify/stream", alice,
+                Map.of("task_id", task, "clarification_id", "input-1", "answer", "local"));
+        assertThat(resumed.getStatusCode().value()).isEqualTo(200);
+        assertThat(resumed.getBody()).contains("event:final", task);
+        assertThat(json(call(HttpMethod.GET, "/api/v1/tasks/" + task, alice, null)).path("status").asText()).isEqualTo("DONE");
+        assertThat(call(HttpMethod.POST, "/api/v1/recommend/clarify", alice,
+                Map.of("task_id", task, "clarification_id", "input-1", "answer", "duplicate")).getStatusCode().value()).isEqualTo(409);
+    }
+
+    @Test void cancelWaitingInputRejectsOldResumeAndAllowsNewTask() throws Exception {
+        String alice = login("alice"), id = conversation(alice);
+        var created = call(HttpMethod.POST, "/api/v1/recommend", alice, Map.of("conversation_id", id, "query", "needs input"));
+        assertThat(json(created).path("status").asText()).isEqualTo("PENDING_INPUT");
+        String task = json(created).path("task_id").asText();
+        var cancelled = call(HttpMethod.POST, "/api/v1/recommend/tasks/" + task + "/cancel", alice, Map.of());
+        assertThat(json(cancelled).path("status").asText()).isEqualTo("CANCELLED");
+        assertThat(call(HttpMethod.POST, "/api/v1/recommend/clarify", alice,
+                Map.of("task_id", task, "clarification_id", "input-1", "answer", "late")).getStatusCode().value()).isEqualTo(409);
+        assertThat(call(HttpMethod.POST, "/api/v1/recommend/stream", alice,
+                Map.of("conversation_id", id, "query", "test")).getBody()).contains("event:final");
+    }
+
+    @Test void rejectedClarificationBeforeExecutionKeepsWaitingAndRetriesWithoutDuplicateAnswers() throws Exception {
+        String alice = login("alice");
+        for (String suffix : List.of("", "/stream")) {
+            for (int rejection : List.of(409, 422, 503)) {
+                String id = conversation(alice);
+                var created = json(call(HttpMethod.POST, "/api/v1/recommend", alice,
+                        Map.of("conversation_id", id, "query", "needs input")));
+                String task = created.path("task_id").asText();
+                Map<String, String> answer = Map.of("task_id", task, "clarification_id", "input-1", "answer", "Linux");
+                long before = messages.count();
+                CLARIFICATION_REJECTIONS.put(id, rejection);
+                var rejected = call(HttpMethod.POST, "/api/v1/recommend/clarify" + suffix, alice, answer);
+                if (suffix.isEmpty()) assertThat(rejected.getStatusCode().value()).isEqualTo(502);
+                else assertThat(rejected.getBody()).contains("event:error").doesNotContain("event:meta");
+                var waiting = json(call(HttpMethod.GET, "/api/v1/tasks/" + task, alice, null));
+                assertThat(waiting.path("status").asText()).isEqualTo("PENDING_INPUT");
+                assertThat(waiting.path("pending_input").path("clarification_id").asText()).isEqualTo("input-1");
+                assertThat(messages.count()).isEqualTo(before);
+                assertThat(call(HttpMethod.POST, "/api/v1/recommend", alice,
+                        Map.of("conversation_id", id, "query", "overwrite")).getStatusCode().value()).isEqualTo(409);
+                var retried = call(HttpMethod.POST, "/api/v1/recommend/clarify" + suffix, alice, answer);
+                assertThat(retried.getStatusCode().value()).isEqualTo(200);
+                assertThat(json(call(HttpMethod.GET, "/api/v1/tasks/" + task, alice, null)).path("status").asText()).isEqualTo("DONE");
+                assertThat(messages.findByConversation_IdOrderByCreatedAtDesc(id, org.springframework.data.domain.PageRequest.of(0, 50))
+                        .getContent().stream().filter(message -> "user".equals(message.getRole()) && "Linux".equals(message.getContent())).count()).isEqualTo(1);
+            }
+        }
+    }
+
+    @Test void disconnectedResumeAndOversizedAnswersKeepTheTaskCancellable() throws Exception {
+        String alice = login("alice"), id = conversation(alice);
+        String task = json(call(HttpMethod.POST, "/api/v1/recommend", alice,
+                Map.of("conversation_id", id, "query", "needs input"))).path("task_id").asText();
+        long count = messages.count(); int calls = CALLS.size();
+        for (String suffix : List.of("", "/stream")) {
+            assertThat(call(HttpMethod.POST, "/api/v1/recommend/clarify" + suffix, alice,
+                    Map.of("task_id", task, "clarification_id", "input-1", "answer", "x".repeat(4001))).getStatusCode().value()).isEqualTo(400);
+        }
+        assertThat(CALLS).hasSize(calls); assertThat(messages.count()).isEqualTo(count);
+        CLARIFICATION_REJECTIONS.put(id, 0);
+        var disconnected = call(HttpMethod.POST, "/api/v1/recommend/clarify/stream", alice,
+                Map.of("task_id", task, "clarification_id", "input-1", "answer", "Linux"));
+        assertThat(disconnected.getBody()).contains("event:error").doesNotContain("event:meta");
+        assertThat(messages.count()).isEqualTo(count);
+        assertThat(json(call(HttpMethod.POST, "/api/v1/recommend/tasks/" + task + "/cancel", alice, Map.of()))
+                .path("status").asText()).isEqualTo("CANCELLED");
+    }
+
+    @Test void staleResumeFailureCannotReleaseTheNextReservation() throws Exception {
+        String alice = login("alice"), id = conversation(alice);
+        String task = json(call(HttpMethod.POST, "/api/v1/recommend", alice,
+                Map.of("conversation_id", id, "query", "needs input"))).path("task_id").asText();
+        var first = taskStates.prepareClarification(task, "input-1", "Linux");
+        assertThat(taskStates.restoreClarification(first)).isTrue();
+        var second = taskStates.prepareClarification(task, "input-1", "Windows");
+        assertThat(taskStates.restoreClarification(first)).isFalse();
+        assertThat(taskStates.acceptClarification(first)).isFalse();
+        assertThat(json(call(HttpMethod.GET, "/api/v1/tasks/" + task, alice, null)).path("status").asText()).isEqualTo("GENERATING");
+        assertThat(taskStates.restoreClarification(second)).isTrue();
+        assertThat(json(call(HttpMethod.POST, "/api/v1/recommend/tasks/" + task + "/cancel", alice, Map.of()))
+                .path("status").asText()).isEqualTo("CANCELLED");
+    }
+
+    @Test void incompleteAnswerRemainsTerminalAndKeepsPartialResult() throws Exception {
+        String alice = login("alice"), id = conversation(alice);
+        var created = json(call(HttpMethod.POST, "/api/v1/recommend", alice,
+                Map.of("conversation_id", id, "query", "partial evidence")));
+        assertThat(created.path("status").asText()).isEqualTo("INCOMPLETE");
+        assertThat(created.path("final_result").asText()).contains("Only one requirement");
+        var refreshed = json(call(HttpMethod.GET, "/api/v1/tasks/" + created.path("task_id").asText(), alice, null));
+        assertThat(refreshed.path("status").asText()).isEqualTo("INCOMPLETE");
+        assertThat(refreshed.path("final_result").asText()).contains("Only one requirement");
+        assertThat(call(HttpMethod.POST, "/api/v1/recommend/stream", alice,
+                Map.of("conversation_id", id, "query", "test")).getStatusCode().value()).isEqualTo(200);
+    }
+
+    @Test void concurrentMessagesCannotReserveTheSameConversationThread() throws Exception {
+        String alice = login("alice"), id = conversation(alice);
+        var pool = java.util.concurrent.Executors.newFixedThreadPool(2);
+        var start = new java.util.concurrent.CountDownLatch(1);
+        try {
+            java.util.concurrent.Callable<Integer> submit = () -> {
+                start.await();
+                return call(HttpMethod.POST, "/api/v1/recommend/stream", alice,
+                        Map.of("conversation_id", id, "query", "needs input")).getStatusCode().value();
+            };
+            var first = pool.submit(submit); var second = pool.submit(submit); start.countDown();
+            assertThat(List.of(first.get(20, java.util.concurrent.TimeUnit.SECONDS), second.get(20, java.util.concurrent.TimeUnit.SECONDS)))
+                    .containsExactlyInAnyOrder(200, 409);
+            assertThat(tasks.findByConversation_IdOrderByCreatedAtDesc(id)).hasSize(1);
+        } finally { pool.shutdownNow(); }
+    }
+
     @Test void preflightAndHealthRemainAvailable() {
         HttpHeaders headers = new HttpHeaders();
         headers.set("Origin", "http://localhost:3000"); headers.set("Access-Control-Request-Method", "POST");
@@ -261,4 +411,21 @@ class BusinessAuthIntegrationTests {
         assertThat(call(HttpMethod.GET, "/actuator/health", null, null).getStatusCode().value()).isEqualTo(200);
     }
 
+    @Test void v1StreamAndLocalMemoryShortcutFinishTheirTasks() throws Exception {
+        String alice = login("alice"), id = conversation(alice);
+        var stream = call(HttpMethod.POST, "/api/v1/recommend/stream", alice,
+                Map.of("conversation_id", id, "query", "test"));
+        assertThat(stream.getStatusCode().value()).isEqualTo(200);
+        assertThat(stream.getBody()).contains("\"delta\":\" \"", "event:final");
+        var tasks = json(call(HttpMethod.GET, "/api/v1/conversations/" + id + "/tasks", alice, null));
+        assertThat(tasks.get(0).path("status").asText()).isEqualTo("DONE");
+        call(HttpMethod.PUT, "/api/session-state/" + id, alice, Map.of("facts", Map.of("user_name", "Alice")));
+        int before = CALLS.size();
+        var local = call(HttpMethod.POST, "/api/chat/stream", alice,
+                Map.of("conversation_id", id, "messages", List.of(Map.of("role", "user", "content", "what is my name?"))));
+        assertThat(local.getBody()).contains("event:final", "Alice");
+        assertThat(CALLS).hasSize(before);
+        tasks = json(call(HttpMethod.GET, "/api/v1/conversations/" + id + "/tasks", alice, null));
+        assertThat(tasks.get(0).path("status").asText()).isEqualTo("DONE");
+    }
 }

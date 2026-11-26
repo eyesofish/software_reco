@@ -149,7 +149,7 @@ public class ConversationService {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "At least one field is required");
         }
 
-        ConversationEntity conversation = findActiveConversation(id);
+        ConversationEntity conversation = lockActiveConversation(id);
 
         if (request.title() != null) {
             conversation.setTitle(resolveTitle(request.title(), conversation.getPreview()));
@@ -173,7 +173,7 @@ public class ConversationService {
 
     @Transactional
     public ConversationApiModels.DeleteResponse delete(String id, boolean hard) {
-        ConversationEntity conversation = findActiveConversation(id);
+        ConversationEntity conversation = lockActiveConversation(id);
 
         Instant deletedAt = Instant.now();
         if (hard) {
@@ -209,6 +209,25 @@ public class ConversationService {
         return conversationRepository.findByIdAndDeletedFalse(id)
                 .filter(c -> c.getOwnerUserId() != null)
                 .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Conversation not found"));
+    }
+
+    @Transactional
+    public ConversationEntity lockOwnedConversation(String owner, String id) {
+        ConversationEntity conversation = lockActiveConversation(id);
+        if (!owner.equals(conversation.getOwnerUserId()))
+            throw new ResponseStatusException(HttpStatus.NOT_FOUND, "Conversation not found");
+        return conversation;
+    }
+
+    private ConversationEntity lockActiveConversation(String id) {
+        return conversationRepository.lockById(id)
+                .filter(c -> !c.isDeleted() && c.getOwnerUserId() != null)
+                .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Conversation not found"));
+    }
+
+    @Transactional
+    public java.util.Optional<ConversationEntity> lockTaskConversation(String taskId) {
+        return conversationRepository.lockForTask(taskId);
     }
 
     @Transactional
