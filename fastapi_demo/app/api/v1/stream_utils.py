@@ -5,10 +5,60 @@ import time
 from collections.abc import AsyncIterator
 from typing import Any
 
+from langgraph.types import Command
+
 from software_recommend_system.execution_control import run_controlled, stream_controlled
 from software_recommend_system.observability import traceable
 
 logger = logging.getLogger(__name__)
+
+
+def _execution_budget(agent: Any, graph_input: Any, config: dict[str, Any]) -> tuple[float, int]:
+    from software_recommend_system.execution_control import RunControl, RunStopped
+
+    values = (
+        graph_input
+        if isinstance(graph_input, dict)
+        else (graph_input.model_dump() if hasattr(graph_input, "model_dump") else {})
+    )
+    if isinstance(graph_input, Command):
+        snapshot = agent.get_state(config)
+        values = snapshot.values if isinstance(getattr(snapshot, "values", None), dict) else {}
+        if values.get("execution_cancelled"):
+            raise ValueError("Task has been cancelled")
+    spent = int(values.get("active_elapsed_ms", 0))
+    total = float(values.get("timeout_budget", 60))
+    remaining = total - spent / 1000
+    if remaining <= 0:
+        control = RunControl(str(config.get("configurable", {}).get("thread_id", "")), 0)
+        raise RunStopped("timeout", control)
+    return remaining, spent
+
+
+def _persist_execution_time(agent: Any, config: dict[str, Any], spent: int) -> None:
+    """Include orchestration time; interrupted wall-clock waiting is never charged."""
+    if not callable(getattr(agent, "get_state", None)) or not callable(getattr(agent, "update_state", None)):
+        return
+    snapshot = agent.get_state(config)
+    values = getattr(snapshot, "values", {})
+    if isinstance(values, dict) and values:
+        updates: dict[str, Any] = {"active_elapsed_ms": max(spent, int(values.get("active_elapsed_ms", 0)))}
+        # update_state preserves the next node but may clear its task-local
+        # interrupt object. Persist the waiting payload before that happens.
+        for task in getattr(snapshot, "tasks", ()):
+            for item in getattr(task, "interrupts", ()):
+                payload = getattr(item, "value", None)
+                if not isinstance(payload, dict):
+                    continue
+                if payload.get("type") == "awaiting_input":
+                    updates["pending_input"] = payload.get("pending_input")
+                    updates["awaiting_human_confirmation"] = False
+                elif payload.get("type") == "human_confirmation":
+                    updates["pending_input"] = None
+                    updates["awaiting_human_confirmation"] = True
+                    updates["human_confirmation_done"] = False
+                    updates["pending_sub_questions"] = payload.get("sub_questions", [])
+        agent.update_state(config, updates)
 
 
 def _sse(event: str, payload: dict[str, Any] | None = None) -> str:
@@ -18,11 +68,7 @@ def _sse(event: str, payload: dict[str, Any] | None = None) -> str:
 
 
 def _to_stream_mode_chunk(item: Any) -> tuple[str, Any]:
-    if (
-        isinstance(item, tuple)
-        and len(item) == 2
-        and isinstance(item[0], str)
-    ):
+    if isinstance(item, tuple) and len(item) == 2 and isinstance(item[0], str):
         return item[0], item[1]
     return "updates", item
 
@@ -120,12 +166,10 @@ async def run_agent_stream_async(
     mode_list = list(stream_mode or ["updates", "custom"])
 
     session_id = str((config or {}).get("configurable", {}).get("thread_id", ""))
-    timeout_seconds = 60.0
+    timeout_seconds, prior_spent = await asyncio.to_thread(_execution_budget, agent, graph_input, config or {})
     if isinstance(graph_input, dict):
-        timeout_seconds = float(graph_input.get("timeout_budget", timeout_seconds))
         session_id = str(graph_input.get("session_id", session_id) or session_id)
     else:
-        timeout_seconds = float(getattr(graph_input, "timeout_budget", timeout_seconds))
         session_id = str(getattr(graph_input, "session_id", session_id) or session_id)
 
     logger.info(
@@ -136,29 +180,26 @@ async def run_agent_stream_async(
         mode_list,
     )
     async for item, _control in stream_controlled(
-        lambda control: _stream_with_run_id(
-            agent, graph_input, config, mode_list, control.run_id
-        ),
+        lambda control: _stream_with_run_id(agent, graph_input, config, mode_list, control.run_id),
         session_id=session_id,
         timeout_seconds=timeout_seconds,
     ):
         if item is None:
+            await asyncio.to_thread(_persist_execution_time, agent, config or {}, prior_spent + _control.elapsed_ms)
             yield ("__execution__", {"run_id": _control.run_id, "elapsed_ms": _control.elapsed_ms})
         else:
             yield item
 
 
 @traceable(name="api_agent_invoke")
-async def run_agent_async(agent, graph_input: Any, config: dict[str, Any] | None = None):
+async def run_agent_async(agent: Any, graph_input: Any, config: dict[str, Any] | None = None) -> Any:
     """Run one graph invocation inside the bounded, deadline-aware worker pool."""
-    from software_recommend_system.config import settings
-
     from .handlers.normalizers import _get_value
 
     config = dict(config or {})
     config["recursion_limit"] = 64
     session_id = str(config.get("configurable", {}).get("thread_id", ""))
-    timeout_seconds = float(_get_value(graph_input, "timeout_budget", settings.TIMEOUT_BUDGET))
+    timeout_seconds, prior_spent = await asyncio.to_thread(_execution_budget, agent, graph_input, config)
     session_id = str(_get_value(graph_input, "session_id", session_id) or session_id)
     started_at = time.perf_counter()
     result, control = await run_controlled(
@@ -166,6 +207,7 @@ async def run_agent_async(agent, graph_input: Any, config: dict[str, Any] | None
         session_id=session_id,
         timeout_seconds=timeout_seconds,
     )
+    await asyncio.to_thread(_persist_execution_time, agent, config, prior_spent + control.elapsed_ms)
     logger.info(
         "AGENT_INVOKE_DONE run_id=%s elapsed_ms=%d",
         control.run_id,
@@ -176,21 +218,27 @@ async def run_agent_async(agent, graph_input: Any, config: dict[str, Any] | None
     return result
 
 
-def _invoke_with_run_id(agent: Any, graph_input: Any, config: dict[str, Any], run_id: str):
+def _invoke_with_run_id(agent: Any, graph_input: Any, config: dict[str, Any], run_id: str) -> Any:
     if isinstance(graph_input, dict):
         graph_input["run_id"] = run_id
     elif hasattr(graph_input, "run_id"):
         graph_input.run_id = run_id
+    if not isinstance(graph_input, Command) and hasattr(graph_input, "model_dump"):
+        # Include explicit defaults on every new turn; Pydantic fields-set alone
+        # could leave a cancelled flag or old routing decision in a shared thread.
+        graph_input = graph_input.model_dump()
     return agent.invoke(graph_input, config=config)
 
 
 def _stream_with_run_id(
     agent: Any, graph_input: Any, config: dict[str, Any] | None, stream_mode: list[str], run_id: str
-):
+) -> Any:
     if isinstance(graph_input, dict):
         graph_input["run_id"] = run_id
     elif hasattr(graph_input, "run_id"):
         graph_input.run_id = run_id
+    if not isinstance(graph_input, Command) and hasattr(graph_input, "model_dump"):
+        graph_input = graph_input.model_dump()
     return agent.stream(
         graph_input,
         config={**(config or {}), "recursion_limit": 64},

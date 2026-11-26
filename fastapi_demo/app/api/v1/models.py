@@ -108,6 +108,9 @@ class RecommendationResponse(BaseModel):
     status: str = Field(..., description="Request status")
     final_answer: str = Field(..., description="Final answer")
     clarification: dict[str, Any] | None = None
+    pending_input: dict[str, Any] | None = None
+    route_decisions: list[dict[str, Any]] = Field(default_factory=list)
+    evidence_incomplete: bool = False
     candidates: list[dict[str, Any]] | None = Field(
         default=None,
         description="Candidate recommendations",
@@ -155,6 +158,17 @@ class RecommendationResponse(BaseModel):
 
 class SessionStateUpdateRequest(BaseModel):
     facts: dict[str, str] = Field(default_factory=dict, description="Structured session facts")
+
+
+class ClarificationRequest(BaseModel):
+    session_id: str = Field(min_length=1)
+    clarification_id: str = Field(min_length=1)
+    answer: str = Field(min_length=1, max_length=4000)
+
+
+class CancelWaitingRequest(BaseModel):
+    session_id: str = Field(min_length=1)
+    clarification_id: str | None = None
 
 
 class SessionStateResponse(BaseModel):
