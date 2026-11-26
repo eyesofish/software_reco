@@ -1,10 +1,12 @@
 """Actual usage accounting, stream completion and per-request isolation without providers."""
 
+from types import SimpleNamespace
 from unittest.mock import Mock
 
 import pytest
 
 from software_recommend_system import llm_governance as gov
+from software_recommend_system import llm_utils
 from software_recommend_system.execution_control import run_controlled
 from software_recommend_system.performance import TimingMiddleware
 
@@ -63,6 +65,76 @@ def test_success_after_unobserved_retry_has_only_a_known_subtotal(monkeypatch):
     assert record["cost_usd"] is None
     assert record["known_cost_usd"] == 0.02
     assert not record["usage_complete"]
+
+
+def stream_call(monkeypatch, chunks):
+    create = Mock(return_value=iter(chunks))
+    client = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=create)))
+    writer = Mock()
+    monkeypatch.setattr(llm_utils, "_get_openai_client", lambda: client)
+    monkeypatch.setattr(llm_utils, "_safe_get_stream_writer", lambda: writer)
+    return create, writer
+
+
+def invoke_stream():
+    return llm_utils._stream_chat_completion_text(
+        scene="answer",
+        model="m",
+        messages=[],
+        temperature=0,
+        stream_node="answer",
+    )
+
+
+def test_stream_counts_final_usage_chunk_with_no_choices(monkeypatch):
+    priced(monkeypatch)
+    create, writer = stream_call(
+        monkeypatch,
+        [
+            {"choices": [{"delta": {"content": "hello"}}]},
+            response(),
+        ],
+    )
+    assert invoke_stream() == "hello"
+    assert create.call_args.kwargs["stream_options"] == {"include_usage": True}
+    writer.assert_called_once_with({"type": "token", "node": "answer", "delta": "hello"})
+    assert gov.usage_snapshot()["overall"]["cost_usd"] == 0.02
+    assert gov.usage_snapshot()["overall"]["calls"] == 1
+
+
+def test_interrupted_stream_never_reports_complete_cost(monkeypatch):
+    priced(monkeypatch)
+
+    def interrupted():
+        yield {"choices": [{"delta": {"content": "partial"}}]}
+        raise ConnectionError("lost before usage")
+
+    create, _writer = stream_call(monkeypatch, [])
+    create.return_value = interrupted()
+    with pytest.raises(ConnectionError):
+        invoke_stream()
+    record = gov.usage_snapshot()["records"][0]
+    assert record["failed"]
+    assert record["cost_usd"] is None
+    assert record["total_tokens"] is None
+    assert create.call_count == 1
+
+
+def test_empty_stream_and_nonstream_fallback_count_both_calls(monkeypatch):
+    priced(monkeypatch)
+    create, _writer = stream_call(monkeypatch, [])
+    create.side_effect = [
+        iter([response(2, 0)]),
+        SimpleNamespace(
+            choices=[SimpleNamespace(message=SimpleNamespace(content="fallback"))],
+            usage=SimpleNamespace(prompt_tokens=1000, completion_tokens=500, total_tokens=1500),
+        ),
+    ]
+    assert invoke_stream() == "fallback"
+    assert "stream_options" not in create.call_args.kwargs
+    total = gov.usage_snapshot()["overall"]
+    assert total["calls"] == 2
+    assert total["cost_usd"] == pytest.approx(0.02002)
 
 
 @pytest.mark.asyncio

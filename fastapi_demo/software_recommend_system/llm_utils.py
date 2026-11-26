@@ -11,7 +11,7 @@ from langgraph.config import get_stream_writer
 from .config import settings
 from .document_schema import Document
 from .execution_control import check_current_run, current_request_timeout
-from .llm_governance import request_timeout_seconds
+from .llm_governance import record_response_usage, request_timeout_seconds
 from .logging_utils import elapsed_ms, error_fields, log_event, log_exception, new_trace_id
 from .observability import wrap_openai
 
@@ -114,7 +114,7 @@ def _prepare_messages_for_small_context(messages: list[dict[str, str]]) -> list[
 
     if len(normalized) > max_messages:
         if normalized and normalized[0].get("role") == "system":
-            normalized = [normalized[0]] + normalized[-(max_messages - 1):]
+            normalized = [normalized[0]] + normalized[-(max_messages - 1) :]
         else:
             normalized = normalized[-max_messages:]
 
@@ -158,15 +158,10 @@ def _build_retrieved_images(docs: list[Document]) -> list[dict[str, Any]]:
 
         doc_id = _extract_doc_id(doc, fallback_prefix="image", index=index)
         filename = str(
-            _get_field(metadata, "filename", "")
-            or (asset_path.rsplit("/", 1)[-1] if asset_path else doc_id)
+            _get_field(metadata, "filename", "") or (asset_path.rsplit("/", 1)[-1] if asset_path else doc_id)
         ).strip()
         media_type = str(_get_field(metadata, "media_type", "") or "").strip()
-        url = str(
-            _get_field(metadata, "asset_url", "")
-            or _get_field(metadata, "url", "")
-            or ""
-        ).strip()
+        url = str(_get_field(metadata, "asset_url", "") or _get_field(metadata, "url", "") or "").strip()
         if not url and asset_path:
             url = f"/api/v1/assets/{quote(asset_path, safe='/')}"
         if not url:
@@ -245,11 +240,11 @@ def _build_retrieval_record(
             retrieved_contexts.append(content[:280] + "..." if len(content) > 280 else content)
 
         metadata = _get_field(doc, "metadata", {}) or {}
-        channel = str(
-            _get_field(metadata, "channel", "")
-            or _get_field(metadata, "retrieval_source", "")
-            or "unknown"
-        ).strip().lower()
+        channel = (
+            str(_get_field(metadata, "channel", "") or _get_field(metadata, "retrieval_source", "") or "unknown")
+            .strip()
+            .lower()
+        )
         if channel:
             channel_counts[channel] = channel_counts.get(channel, 0) + 1
 
@@ -333,16 +328,23 @@ def _stream_chat_completion_text(
         "messages": messages,
         "temperature": temperature,
         "stream": True,
+        "stream_options": {"include_usage": True},
         "timeout": current_request_timeout(60.0),
     }
     if max_tokens is not None:
         kwargs["max_tokens"] = max_tokens
 
+    usage_chunk = None
+    accounted = False
+    active_call_id = trace_id
+    stream = None
     try:
         stream = client.chat.completions.create(**kwargs)
         parts: list[str] = []
         for chunk in stream:
             check_current_run()
+            if _get_field(chunk, "usage") is not None:
+                usage_chunk = chunk
             delta = _extract_stream_delta_text(chunk)
             if not delta:
                 continue
@@ -351,9 +353,21 @@ def _stream_chat_completion_text(
                 writer({"type": "token", "node": stream_node, "delta": delta})
 
         response_text = "".join(parts).strip()
+        record_response_usage(
+            scene=scene, model=model, response=usage_chunk, call_id=active_call_id, elapsed_ms=elapsed_ms(started_at)
+        )
+        accounted = True
         if not response_text:
             kwargs["stream"] = False
+            kwargs.pop("stream_options", None)
+            active_call_id = new_trace_id("llm")
+            accounted = False
+            usage_chunk = None
             fallback = client.chat.completions.create(**kwargs)
+            record_response_usage(
+                scene=scene, model=model, response=fallback, call_id=active_call_id, elapsed_ms=elapsed_ms(started_at)
+            )
+            accounted = True
             if hasattr(fallback, "choices") and fallback.choices:
                 first_choice = fallback.choices[0]
                 if isinstance(first_choice, dict):
@@ -361,15 +375,30 @@ def _stream_chat_completion_text(
                     response_text = str(message.get("content") or "").strip()
                 else:
                     message = getattr(first_choice, "message", None)
-                    response_text = str(
-                        getattr(message, "content", "") if message else ""
-                    ).strip()
+                    response_text = str(getattr(message, "content", "") if message else "").strip()
 
         _llm_invoke_done(scene, model, trace_id, started_at, {"choices": [1]})
         return response_text
     except Exception as exc:
+        if not accounted:
+            record_response_usage(
+                scene=scene,
+                model=model,
+                response=usage_chunk,
+                call_id=active_call_id,
+                failed=True,
+                elapsed_ms=elapsed_ms(started_at),
+            )
         _llm_invoke_failed(
-            scene=scene, model=model, trace_id=trace_id, exc=exc,
-            started_at=started_at, with_stack=True,
+            scene=scene,
+            model=model,
+            trace_id=trace_id,
+            exc=exc,
+            started_at=started_at,
+            with_stack=True,
         )
         raise
+    finally:
+        close = getattr(stream, "close", None)
+        if callable(close):
+            close()

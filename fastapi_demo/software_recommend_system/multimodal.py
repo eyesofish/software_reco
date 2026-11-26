@@ -11,6 +11,7 @@ import openai
 
 from .config import settings
 from .image_embedder import embed_image_bytes
+from .llm_governance import accounted_completion
 from .logging_utils import elapsed_ms, error_fields, log_event, new_trace_id
 from .observability import wrap_openai
 
@@ -22,9 +23,7 @@ ALLOWED_IMAGE_MEDIA_TYPES = {
     "image/webp": (".webp",),
 }
 IMAGE_MEDIA_TYPE_BY_SUFFIX = {
-    suffix: media_type
-    for media_type, suffixes in ALLOWED_IMAGE_MEDIA_TYPES.items()
-    for suffix in suffixes
+    suffix: media_type for media_type, suffixes in ALLOWED_IMAGE_MEDIA_TYPES.items() for suffix in suffixes
 }
 
 
@@ -67,7 +66,7 @@ def decode_image_data_url(
     if not normalized.startswith(prefix):
         raise MultimodalInputError("Image data_url does not match its declared media_type")
 
-    encoded = normalized[len(prefix):]
+    encoded = normalized[len(prefix) :]
     if not encoded:
         raise MultimodalInputError("Image data_url is empty")
 
@@ -79,15 +78,11 @@ def decode_image_data_url(
     if not raw:
         raise MultimodalInputError("Decoded image is empty")
     if len(raw) > max_bytes:
-        raise MultimodalInputError(
-            f"Image exceeds the {max_bytes}-byte attachment limit"
-        )
+        raise MultimodalInputError(f"Image exceeds the {max_bytes}-byte attachment limit")
 
     detected = _detect_image_media_type(raw)
     if detected != expected:
-        raise MultimodalInputError(
-            f"Image bytes are {detected or 'unknown'}, not {expected}"
-        )
+        raise MultimodalInputError(f"Image bytes are {detected or 'unknown'}, not {expected}")
     return raw
 
 
@@ -97,18 +92,8 @@ def image_bytes_to_data_url(raw: bytes, media_type: str) -> str:
 
 
 def _get_vision_client() -> openai.OpenAI:
-    api_key = (
-        settings.VISION_API_KEY
-        or settings.DASHSCOPE_API_KEY
-        or settings.OPENAI_API_KEY
-        or "LOCAL_DUMMY_KEY"
-    )
-    base_url = (
-        settings.VISION_BASE_URL
-        or settings.BASE_URL
-        or settings.OPENAI_BASE_URL
-        or None
-    )
+    api_key = settings.VISION_API_KEY or settings.DASHSCOPE_API_KEY or settings.OPENAI_API_KEY or "LOCAL_DUMMY_KEY"
+    base_url = settings.VISION_BASE_URL or settings.BASE_URL or settings.OPENAI_BASE_URL or None
     return wrap_openai(
         openai.OpenAI(
             api_key=api_key,
@@ -181,14 +166,14 @@ def caption_image_data_url(
         media_type=media_type,
     )
     try:
-        response = client.chat.completions.create(
+        response = accounted_completion(
+            create=client.chat.completions.create,
+            scene="vision_caption",
             model=model,
             messages=[
                 {
                     "role": "system",
-                    "content": (
-                        "You are a precise visual document analyst for a multimodal RAG system."
-                    ),
+                    "content": ("You are a precise visual document analyst for a multimodal RAG system."),
                 },
                 {
                     "role": "user",
@@ -235,9 +220,7 @@ def caption_image_data_url(
             elapsed_ms=elapsed_ms(started_at),
             **error_fields(exc),
         )
-        raise VisionProcessingError(
-            f"Vision model failed to process {name}: {exc}"
-        ) from exc
+        raise VisionProcessingError(f"Vision model failed to process {name}: {exc}") from exc
 
 
 def describe_image_attachments(
@@ -267,9 +250,7 @@ def describe_image_attachments(
         )
         total_bytes += len(raw)
         if total_bytes > max_total_bytes:
-            raise MultimodalInputError(
-                f"Combined image attachments exceed {max_total_bytes} bytes"
-            )
+            raise MultimodalInputError(f"Combined image attachments exceed {max_total_bytes} bytes")
 
         description = caption_image_data_url(
             name=name,
@@ -311,9 +292,7 @@ def embed_image_attachments(attachments: list[Any]) -> list[list[float]]:
         )
         total_bytes += len(raw)
         if total_bytes > max_total_bytes:
-            raise MultimodalInputError(
-                f"Combined image attachments exceed {max_total_bytes} bytes"
-            )
+            raise MultimodalInputError(f"Combined image attachments exceed {max_total_bytes} bytes")
         raw_images.append(raw)
     return embed_image_bytes(raw_images)
 
@@ -327,19 +306,13 @@ def describe_local_image(file_path: Path) -> dict[str, str]:
     try:
         file_size = file_path.stat().st_size
     except OSError as exc:
-        raise MultimodalInputError(
-            f"Failed to inspect image {file_path.name}: {exc}"
-        ) from exc
+        raise MultimodalInputError(f"Failed to inspect image {file_path.name}: {exc}") from exc
     if file_size > max_image_bytes:
-        raise MultimodalInputError(
-            f"Image exceeds the {max_image_bytes}-byte attachment limit"
-        )
+        raise MultimodalInputError(f"Image exceeds the {max_image_bytes}-byte attachment limit")
     try:
         raw = file_path.read_bytes()
     except OSError as exc:
-        raise MultimodalInputError(
-            f"Failed to read image {file_path.name}: {exc}"
-        ) from exc
+        raise MultimodalInputError(f"Failed to read image {file_path.name}: {exc}") from exc
     data_url = image_bytes_to_data_url(raw, media_type)
     decode_image_data_url(
         data_url,
@@ -384,8 +357,5 @@ def build_persisted_user_message(
     normalized_query = str(query or "").strip() or "Analyze the attached image."
     if not image_descriptions:
         return normalized_query
-    names = ", ".join(
-        str(item.get("name", "") or "image").strip()
-        for item in image_descriptions
-    )
+    names = ", ".join(str(item.get("name", "") or "image").strip() for item in image_descriptions)
     return f"{normalized_query}\n\n[Attached images: {names}]"

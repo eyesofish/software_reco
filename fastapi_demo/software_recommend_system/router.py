@@ -11,6 +11,7 @@ import openai
 
 from .config import settings
 from .execution_control import current_request_timeout
+from .llm_governance import accounted_completion
 from .observability import wrap_openai
 
 logger = logging.getLogger(__name__)
@@ -259,7 +260,9 @@ def route_query(
     active_client = client or _get_router_client()
     try:
         try:
-            response = active_client.chat.completions.create(
+            response = accounted_completion(
+                create=active_client.chat.completions.create,
+                scene="legacy_router",
                 model=settings.ROUTER_MODEL,
                 messages=_build_router_messages(normalized_query, context_hint=context_hint),
                 temperature=0,
@@ -271,7 +274,9 @@ def route_query(
         except Exception as chat_exc:
             if "chat template" not in str(chat_exc).lower():
                 raise
-            response = active_client.completions.create(
+            response = accounted_completion(
+                create=active_client.completions.create,
+                scene="legacy_router",
                 model=settings.ROUTER_MODEL,
                 prompt=_build_router_prompt(normalized_query, context_hint=context_hint),
                 temperature=0,
