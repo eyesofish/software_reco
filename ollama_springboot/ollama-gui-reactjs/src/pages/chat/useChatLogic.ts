@@ -36,6 +36,7 @@ import {
   streamChatRequester
 } from '~/services/requester'
 import { routingFields } from '~/services/routing'
+import { pendingSubmissionMode, prepareChatSubmission } from '~/services/chatSubmission'
 
 export type TaskStatus =
   | 'IDLE'
@@ -421,7 +422,14 @@ export default function useChatLogic () : UseChatLogicResult {
       const changedChat = currentChatIdRef.current !== chatId
       currentChatIdRef.current = chatId
       setChatState((prev) => ({ ...prev, currentChatId: chatId, conversationId: destination }))
-      appendLocal(chatId, turn.message)
+      const saved = chatsRef.current[chatId] || []
+      const existing = taskId && saved.find(message => message.role === 'user' && message.sessionId === taskId)
+      if (!existing || resumeTaskId) {
+        appendLocal(chatId, turn.message)
+      } else {
+        // A receipt can arrive again after the original stream lost its final frame.
+        assistantTime = saved.find(message => message.role === 'assistant' && message.sessionId === taskId)?.time
+      }
       setPendingTurn(undefined)
       if (changedChat) {
         internalNavigationRef.current = chatId
@@ -538,9 +546,18 @@ export default function useChatLogic () : UseChatLogicResult {
     setRoutingClarification(undefined)
     await runStream(async (onEvent, signal) => {
       const payload = { model: modelName, stream: true, messages: [{ role: 'user' as const, content: turn.text }], images: turn.images }
-      await streamChatRequester(modelUrl, { ...payload, ...routingFields(mode, destination) }, onEvent, signal)
+      const attempt = await prepareChatSubmission(turn.chatId, turn.originConversationId, modelUrl, routingMode,
+        payload, routingFields(mode, destination))
+      if (signal.aborted) return
+      await streamChatRequester(modelUrl, { ...payload, ...attempt.route }, event => {
+        if (signal.aborted) return
+        if (event.conversation_id && event.task_id) attempt.rememberDestination(event.conversation_id)
+        if (event.type === 'routing_clarification' || event.type === 'final' || event.type === 'awaiting_input'
+          || event.type === 'awaiting_confirmation' || (event.type === 'error' && event.task_id)) attempt.finish()
+        onEvent(event)
+      }, signal, attempt.id)
     }, turn)
-  }, [modelName, modelUrl, runStream])
+  }, [modelName, modelUrl, routingMode, runStream])
 
   const handleConfirmClicked = useCallback(async () => {
     const conversationId = activeConversationIdRef.current
@@ -660,7 +677,7 @@ export default function useChatLogic () : UseChatLogicResult {
     }
     currentChatIdRef.current = chatId
     const conversationId = resolveConversationIdFromMessages(chatsRef.current[chatId]) || readConversationIdsStorage()[chatId]
-    setRoutingMode('explicit')
+    setRoutingMode(pendingSubmissionMode(chatId, conversationId) || 'explicit')
     activeConversationIdRef.current = conversationId
     setChatState({ ...DEFAULT_VIEW_STATE, currentChatId: chatId, conversationId })
     if (!conversationId) return

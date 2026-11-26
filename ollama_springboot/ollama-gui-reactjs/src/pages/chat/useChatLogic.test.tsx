@@ -50,6 +50,41 @@ beforeEach(() => {
 })
 afterEach(() => { setSession(null) })
 
+test('manual retry after a lost response reuses its request ID, while a later identical send gets a new one', async () => {
+  const send = requester.streamChatRequester as jest.Mock
+  send.mockRejectedValueOnce(new Error('Connection lost'))
+    .mockImplementationOnce(async (_url, _body, emit) => readyEvents(emit, 'old', 'task-1'))
+    .mockImplementationOnce(async (_url, _body, emit) => readyEvents(emit, 'old', 'task-2'))
+  mount()
+  act(() => { logic.textAreaRef.current!.value = 'Same text'; logic.requestHandler() })
+  await waitFor(() => expect(logic.error).toBe('Connection lost'))
+  expect(logic.textAreaRef.current!.value).toBe('Same text')
+  act(() => logic.requestHandler())
+  await waitFor(() => expect(logic.taskStatus).toBe('DONE'))
+  act(() => { logic.textAreaRef.current!.value = 'Same text'; logic.requestHandler() })
+  await waitFor(() => expect(logic.taskId).toBe('task-2'))
+  const ids = send.mock.calls.map(call => call[4])
+  expect(ids[0]).toMatch(/^[0-9a-f-]{36}$/)
+  expect(ids[1]).toBe(ids[0])
+  expect(ids[2]).not.toBe(ids[0])
+})
+
+test('retry after a partial stream restores the existing local message and assistant reply', async () => {
+  const send = requester.streamChatRequester as jest.Mock
+  send.mockImplementationOnce(async (_url, _body, emit) => {
+    emit({ type: 'meta', conversation_id: 'old', task_id: 'original', status: 'GENERATING' })
+    emit({ type: 'token', conversation_id: 'old', task_id: 'original', delta: 'Par' })
+    throw new Error('Connection lost')
+  }).mockImplementationOnce(async (_url, _body, emit) => readyEvents(emit, 'old', 'original'))
+  mount()
+  act(() => { logic.textAreaRef.current!.value = 'Recover'; logic.requestHandler() })
+  await waitFor(() => expect(logic.error).toBe('Connection lost'))
+  act(() => { logic.textAreaRef.current!.value = 'Recover'; logic.requestHandler() })
+  await waitFor(() => expect(logic.taskStatus).toBe('DONE'))
+  expect(send.mock.calls[0][4]).toEqual(send.mock.calls[1][4])
+  expect(storedChats[0].filter(message => message.sessionId === 'original').map(message => message.content)).toEqual(['Recover', 'Answer'])
+})
+
 test('routing clarification retains attachments and retries one user message in the selected conversation', async () => {
   ;(requester.streamChatRequester as jest.Mock)
     .mockImplementationOnce(async (_url, _payload, emit) => {
