@@ -18,6 +18,7 @@ class MemoryRetrievalTests(unittest.TestCase):
         self._tmpdir = tempfile.TemporaryDirectory()
         self._original = {
             "MEMORY_STORE_FILE": settings.MEMORY_STORE_FILE,
+            "MEMORY_STORE_DB": settings.MEMORY_STORE_DB,
             "FEATURE_LAYERED_MEMORY": settings.FEATURE_LAYERED_MEMORY,
             "MEMORY_WORKING_TOP_K": settings.MEMORY_WORKING_TOP_K,
             "MEMORY_EPISODIC_TOP_K": settings.MEMORY_EPISODIC_TOP_K,
@@ -26,6 +27,7 @@ class MemoryRetrievalTests(unittest.TestCase):
             "MEMORY_CONTEXT_MAX_ITEMS": settings.MEMORY_CONTEXT_MAX_ITEMS,
             "MEMORY_SEMANTIC_MIN_SALIENCE": settings.MEMORY_SEMANTIC_MIN_SALIENCE,
         }
+        settings.MEMORY_STORE_DB = None
         settings.MEMORY_STORE_FILE = os.path.join(self._tmpdir.name, "memory_store.json")
         settings.FEATURE_LAYERED_MEMORY = True
         settings.MEMORY_WORKING_TOP_K = 3
@@ -38,6 +40,7 @@ class MemoryRetrievalTests(unittest.TestCase):
 
     def tearDown(self) -> None:
         reset_memory_store_for_tests()
+        settings.MEMORY_STORE_DB = self._original["MEMORY_STORE_DB"]
         settings.MEMORY_STORE_FILE = self._original["MEMORY_STORE_FILE"]
         settings.FEATURE_LAYERED_MEMORY = self._original["FEATURE_LAYERED_MEMORY"]
         settings.MEMORY_WORKING_TOP_K = self._original["MEMORY_WORKING_TOP_K"]

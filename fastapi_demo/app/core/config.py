@@ -177,6 +177,7 @@ class Settings(BaseSettings):
     FEATURE_LAYERED_MEMORY: bool = True
     MEMORY_ENABLE_WRITEBACK: bool = True
     MEMORY_STORE_FILE: str = ".runtime/layered_memory_store.json"
+    MEMORY_STORE_DB: str | None = None
     MEMORY_WORKING_TOP_K: int = 6
     MEMORY_EPISODIC_TOP_K: int = 6
     MEMORY_SEMANTIC_TOP_K: int = 4
@@ -196,7 +197,8 @@ class Settings(BaseSettings):
     TIMEOUT_BUDGET: int = 60
     MAX_ITERATIONS: int = 3
     SESSION_STATE_FILE: str = ".runtime/fastapi_session_state.json"
-    SESSION_MAX_MESSAGES: int = 30
+    SESSION_STATE_DB: str | None = None
+    SESSION_MAX_MESSAGES: int = Field(default=30, ge=1)
 
     @property
     def allowed_origins_list(self) -> list[str]:

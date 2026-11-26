@@ -19,14 +19,17 @@ class MemoryStoreTests(unittest.TestCase):
         self._tmpdir = tempfile.TemporaryDirectory()
         self._original = {
             "MEMORY_STORE_FILE": settings.MEMORY_STORE_FILE,
+            "MEMORY_STORE_DB": settings.MEMORY_STORE_DB,
             "MEMORY_SEMANTIC_MIN_SALIENCE": settings.MEMORY_SEMANTIC_MIN_SALIENCE,
         }
+        settings.MEMORY_STORE_DB = None
         settings.MEMORY_STORE_FILE = os.path.join(self._tmpdir.name, "memory_store.json")
         settings.MEMORY_SEMANTIC_MIN_SALIENCE = 0.3
         reset_memory_store_for_tests()
 
     def tearDown(self) -> None:
         reset_memory_store_for_tests()
+        settings.MEMORY_STORE_DB = self._original["MEMORY_STORE_DB"]
         settings.MEMORY_STORE_FILE = self._original["MEMORY_STORE_FILE"]
         settings.MEMORY_SEMANTIC_MIN_SALIENCE = self._original["MEMORY_SEMANTIC_MIN_SALIENCE"]
         self._tmpdir.cleanup()
@@ -51,6 +54,15 @@ class MemoryStoreTests(unittest.TestCase):
         hits = semantic_search("s1", "redis cache", top_k=2)
         self.assertGreaterEqual(len(hits), 1)
         self.assertIn("Redis", hits[0].content)
+
+    def test_private_memory_does_not_cross_sessions(self) -> None:
+        write_fact("alice-session", "user_name", "Alice")
+        write_episode("alice-session", "Alice private preference", salience=0.9)
+        write_semantic("alice-session", "private Redis cache preference", salience=0.9)
+        self.assertEqual(get_facts("bob-session"), {})
+        self.assertEqual(get_recent("bob-session", limit=5), [])
+        self.assertEqual(semantic_search("bob-session", "Redis cache", top_k=5), [])
+        self.assertEqual(get_facts("alice-session")["user_name"], "Alice")
 
 
 if __name__ == "__main__":

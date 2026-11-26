@@ -11,8 +11,10 @@ from slowapi.middleware import SlowAPIMiddleware
 from slowapi.util import get_remote_address
 from starlette.status import HTTP_422_UNPROCESSABLE_ENTITY
 
+from app.api.v1.session_store import session_rows
 from app.core.config import settings
 from app.core.startup import configure_runtime_file_logging, startup_event_handler
+from software_recommend_system.memory_store import memory_rows
 from software_recommend_system.performance import TimingMiddleware
 
 # Configure file handlers before importing routes so module-import-time Tavily logs are persisted.
@@ -25,6 +27,9 @@ from app.api.v1.routes import router as v1_router  # noqa: E402  (must follow co
 async def lifespan(app: FastAPI):
     if not settings.API_KEY:
         raise RuntimeError("API_KEY is required; run scripts/init_auth_demo.py and load .runtime/auth-demo.env")
+    session_rows()
+    if settings.FEATURE_LAYERED_MEMORY:
+        memory_rows()
     await startup_event_handler()
     yield
 
