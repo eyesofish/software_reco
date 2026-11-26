@@ -32,6 +32,7 @@ class BusinessAuthIntegrationTests {
     static final HttpServer AGENT = createAgent();
     @Autowired TestRestTemplate http;
     @Autowired JdbcTemplate database;
+    @Autowired jakarta.persistence.EntityManagerFactory entities;
     @Autowired UserRepository users;
     @Autowired JwtEncoder encoder;
     @Autowired com.example.demo.conversation.repository.ConversationRepository conversations;
@@ -246,6 +247,33 @@ class BusinessAuthIntegrationTests {
         });
         assertThat(sendChat(token, id, "recommend", UUID.randomUUID().toString()).getBody()).contains("event:final");
         assertThat(observed.get()).isTrue();
+    }
+
+    @Test void postgresChatReservationDoesNotLoadCompletedTasksFromLongHistories() throws Exception {
+        Assumptions.assumeTrue(System.getenv("CHAT_TEST_DB_URL") != null, "Uses PostgreSQL generate_series");
+        String token = login("alice");
+        var statistics = entities.unwrap(org.hibernate.SessionFactory.class).getStatistics();
+        boolean previous = statistics.isStatisticsEnabled();
+        statistics.setStatisticsEnabled(true);
+        try {
+            for (int historySize : List.of(10, 10_000)) {
+                String id = conversation(token);
+                database.update("""
+                        INSERT INTO recommend_tasks (id, conversation_id, fastapi_session_id, status, created_at, updated_at)
+                        SELECT md5(? || n::text), ?, ?, 'DONE', current_timestamp, current_timestamp
+                        FROM generate_series(1, ?) AS n
+                        """, id, id, id, historySize);
+                var loaded = statistics.getEntityStatistics(com.example.demo.conversation.entity.RecommendTaskEntity.class.getName());
+                long before = loaded.getLoadCount();
+                assertThat(sendChat(token, id, "recommend", UUID.randomUUID().toString()).getBody()).contains("event:final");
+                long taskRows = loaded.getLoadCount() - before;
+                assertThat(taskRows).as("task rows loaded by the actual chat endpoint, with %d completed", historySize)
+                        .isLessThan(10);
+                System.out.printf("Chat history benchmark: %d completed tasks, %d task rows loaded%n", historySize, taskRows);
+            }
+        } finally {
+            statistics.setStatisticsEnabled(previous);
+        }
     }
 
     @Test void loginHashesPasswordsAndRejectsAnonymousEntry() throws Exception {
