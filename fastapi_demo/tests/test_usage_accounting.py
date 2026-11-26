@@ -210,3 +210,20 @@ def test_live_routing_usage_counts_once_and_shadow_ledger_stays_separate(monkeyp
     result = routing.decide_choices(questions, {}, client=shadow_provider, request_id="shadow-request")
     assert result.usage[0]["cost_usd"] == 0.001
     assert gov.usage_snapshot(request_id="shadow-request")["overall"]["calls"] == 0
+
+
+def test_legacy_offline_adapter_includes_only_its_actual_calls(monkeypatch):
+    from evaluation.routing_evaluate import _legacy
+    from software_recommend_system import router
+
+    priced(monkeypatch)
+    gov.record_response_usage(scene="unrelated", model="m", response={})
+
+    def route(*args, **kwargs):
+        gov.record_response_usage(scene="legacy_router", model="m", response=response())
+        return SimpleNamespace(mode="rag", fallback_used=False)
+
+    monkeypatch.setattr(router, "route_query", route)
+    result = _legacy({"query": "q", "binding": "new"})
+    assert len(result["usage"]) == 1
+    assert result["usage"][0]["cost_usd"] == 0.02
