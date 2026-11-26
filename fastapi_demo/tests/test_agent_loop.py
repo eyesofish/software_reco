@@ -235,8 +235,7 @@ class AgentLoopTests(unittest.TestCase):
 
 
 class RetrieveNodeIntegrationTests(unittest.TestCase):
-    """The flag must actually change retrieve_node behavior, and a loop that
-    returns nothing must fall back to the static pipeline."""
+    """Experimental tool loops cannot bypass guarded original-query recall."""
 
     def setUp(self) -> None:
         # retrieve_node calls rerank_documents, which would otherwise try to
@@ -273,7 +272,7 @@ class RetrieveNodeIntegrationTests(unittest.TestCase):
 
         with (
             patch.object(nodes.settings, "AGENT_LOOP_ENABLE", False),
-            patch.object(nodes, "run_agent_loop") as loop,
+            patch.object(al, "run_agent_loop") as loop,
             patch.object(nodes, "retrieve") as static,
         ):
             static.return_value = [_doc("static-1")]
@@ -283,32 +282,33 @@ class RetrieveNodeIntegrationTests(unittest.TestCase):
         static.assert_called_once()
         self.assertEqual(result["retrieval_records"][0]["retrieval_strategy"], "static")
 
-    def test_flag_on_uses_agent_loop_results(self) -> None:
+    def test_legacy_flag_cannot_replace_original_query_pipeline(self) -> None:
         from software_recommend_system import nodes
 
         with (
             patch.object(nodes.settings, "AGENT_LOOP_ENABLE", True),
-            patch.object(nodes, "run_agent_loop", return_value=[_doc("agent-1")]) as loop,
+            patch.object(al, "run_agent_loop", return_value=[_doc("agent-1")]) as loop,
             patch.object(nodes, "retrieve") as static,
         ):
+            static.return_value = [_doc("static-1")]
             result = self._invoke(nodes)
 
-        loop.assert_called_once()
-        static.assert_not_called()
-        self.assertEqual(result["retrieval_records"][0]["retrieval_strategy"], "agent_loop")
+        loop.assert_not_called()
+        static.assert_called_once()
+        self.assertEqual(result["retrieval_records"][0]["retrieval_strategy"], "static")
 
     def test_agent_loop_failure_falls_back_to_static(self) -> None:
         from software_recommend_system import nodes
 
         with (
             patch.object(nodes.settings, "AGENT_LOOP_ENABLE", True),
-            patch.object(nodes, "run_agent_loop", return_value=None) as loop,
+            patch.object(al, "run_agent_loop", return_value=None) as loop,
             patch.object(nodes, "retrieve") as static,
         ):
             static.return_value = [_doc("static-1")]
             result = self._invoke(nodes)
 
-        loop.assert_called_once()
+        loop.assert_not_called()
         static.assert_called_once()
         self.assertEqual(result["retrieval_records"][0]["retrieval_strategy"], "static")
 

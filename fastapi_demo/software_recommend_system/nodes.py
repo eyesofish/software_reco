@@ -10,7 +10,6 @@ from typing import Any
 from langgraph.func import task
 from langgraph.types import interrupt
 
-from .agent_loop import run_agent_loop
 from .config import settings
 from .document_schema import Document
 from .evidence_evaluator import evaluate_evidence
@@ -35,7 +34,7 @@ from .llm_utils import (
 from .logging_utils import elapsed_ms, error_fields, log_event, new_trace_id, text_preview
 from .observability import traceable
 from .planner import build_execution_plan
-from .retriever import _web_request_reason, rerank_documents, retrieve
+from .retriever import rerank_documents, retrieve
 from .router import route_query
 from .skill_router import route_skill
 from .state import AgentState, CandidateSolution
@@ -1314,6 +1313,12 @@ def retrieve_node(state: AgentState) -> dict[str, Any]:
     BASE_MAX_EVIDENCE = 3
     retrieved_doc_ids_full_limit = max(1, int(getattr(settings, "RETRIEVED_DOC_IDS_FULL_LIMIT", 20)))
     sub_questions = _get_field(state, "sub_questions", [])
+    original_query = state.normalized_query.strip()
+    expansion = state.validated_query_expansion
+    query_overrides = {}
+    if expansion and original_query and expansion.startswith(original_query):
+        for question in sub_questions:
+            query_overrides[question] = question + expansion[len(original_query):]
     retrieval_records = list(_get_field(state, "retrieval_records", []) or [])
     iteration_count = _get_field(state, "iteration_count", 0)
     session_id = str(_get_field(state, "session_id", "") or "").strip()
@@ -1353,6 +1358,7 @@ def retrieve_node(state: AgentState) -> dict[str, Any]:
     def retrieve_question(index: int, question: str) -> tuple[list[Document], str, int]:
         check_current_run()
         question_started_at = time.perf_counter()
+        rewritten_query = query_overrides.get(question, "")
         question_hint = text_preview(question)
         log_event(
             logger,
@@ -1367,32 +1373,20 @@ def retrieve_node(state: AgentState) -> dict[str, Any]:
             query=question_hint,
             top_k=settings.TOP_K,
         )
-        search_results: list[Document] | None = None
         retrieval_strategy = "static"
-        if settings.AGENT_LOOP_ENABLE and _web_request_reason(global_query) != "user_opt_out":
-            # Model-driven tool selection. Returns None on any failure so the
-            # deterministic pipeline below stays the safety net.
-            agent_docs = run_agent_loop(
-                question,
-                session_id=session_id or None,
-                memory_context=memory_context,
-                top_k=settings.TOP_K,
-            )
-            if agent_docs:
-                search_results = agent_docs
-                retrieval_strategy = "agent_loop"
-
-        if search_results is None:
-            search_results = retrieve(
-                question,
-                top_k=settings.TOP_K,
-                session_id=session_id,
-                selected_skill=selected_skill,
-                memory_context=memory_context,
-                query_image_candidates=query_image_candidates,
-                defer_rerank=True,
-                web_query_hint=global_query,
-            )
+        # All app requests retain the original keyword/vector branches. The
+        # experimental free-form tool loop cannot bypass rewrite validation.
+        search_results = retrieve(
+            question,
+            top_k=settings.TOP_K,
+            session_id=session_id,
+            selected_skill=selected_skill,
+            memory_context=memory_context,
+            query_image_candidates=query_image_candidates,
+            defer_rerank=True,
+            web_query_hint=global_query,
+            rewrite_query=rewritten_query or None,
+        )
         check_current_run()
         return search_results, retrieval_strategy, elapsed_ms(question_started_at)
 
