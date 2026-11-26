@@ -33,8 +33,10 @@ def test_server_environment_preserves_optional_rates_and_isolates_knowledge(tmp_
     monkeypatch.setattr(performance_runner, "profile_settings", lambda offline: configured)
     environment = environment_for_server(tmp_path / "child", offline=True)
     for key, value in configured.model_dump().items():
-        if value is None:
+        if value is None and "COST_" in key:
             assert key not in environment
+    assert environment["MEMORY_STORE_DB"] == str((tmp_path / "child" / "memory.sqlite3").resolve())
+    assert environment["SESSION_STATE_DB"] == str((tmp_path / "child" / "sessions.sqlite3").resolve())
     assert json.loads(environment["LLM_COST_MODEL_RATES"]) == configured.LLM_COST_MODEL_RATES
     assert environment["KB_MANIFEST_PATH"] == str((tmp_path / "child" / "kb_manifest.sqlite3").resolve())
     assert environment["CHROMA_DB_PATH"] == str((tmp_path / "child" / "chroma").resolve())
