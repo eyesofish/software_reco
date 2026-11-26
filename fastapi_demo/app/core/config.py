@@ -64,6 +64,8 @@ class Settings(BaseSettings):
 
     # ---- vector / chunking ----
     CHROMA_DB_PATH: str = "./chroma_db"
+    # Defaults to CHROMA_DB_PATH/kb_manifest.sqlite3; keep with the vector-store backup.
+    KB_MANIFEST_PATH: str = ""
     EMBEDDING_MODEL: str = "Qwen/Qwen3-Embedding-0.6B"
     CHUNK_SIZE: int = 800
     CHUNK_OVERLAP: int = 120

@@ -7,6 +7,12 @@ class Metadata(BaseModel):
     """Normalized metadata used by retrieval and downstream nodes."""
 
     source: str
+    document_id: str | None = None
+    version: str | None = None
+    snapshot_id: str | None = None
+    status: str | None = None
+    chunk_id: str | None = None
+    parent_id: str | None = None
     doc_id: str | None = None
     retrieval_source: str | None = None
     channel: str | None = None
@@ -61,7 +67,22 @@ class Document(BaseModel):
 
 
 STRUCTURE_METADATA_FIELDS = (
-    "section_path", "section_id", "page_start", "page_end", "block_kind", "table_id",
-    "table_row_start", "table_row_end", "chunk_start", "chunk_end", "content_body_start",
-    "content_body_end", "oversized", "chunking_strategy", "chunking_version", "fallback_reason",
+    "section_path",
+    "section_id",
+    "page_start",
+    "page_end",
+    "block_kind",
+    "table_id",
+    "table_row_start",
+    "table_row_end",
+    "chunk_start",
+    "chunk_end",
+    "content_body_start",
+    "content_body_end",
+    "oversized",
+    "chunking_strategy",
+    "chunking_version",
+    "fallback_reason",
 )
+
+VERSION_METADATA_FIELDS = ("document_id", "version", "snapshot_id", "status", "chunk_id", "parent_id")
