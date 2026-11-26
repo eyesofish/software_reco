@@ -41,6 +41,30 @@ def _run_id() -> str | None:
     return control.run_id if control else None
 
 
+def current_correlation() -> dict[str, str | None]:
+    """Correlation is available even when the optional trace file is disabled."""
+    from .execution_control import current_control
+
+    context = _CONTEXT.get()
+    control = current_control()
+    return {
+        "request_id": context.request_id if context else None,
+        "run_id": control.run_id if control else None,
+        "session_id": control.session_id if control else None,
+    }
+
+
+@contextmanager
+def request_correlation(request_id: str | None = None) -> Iterator[str]:
+    """Give offline or non-HTTP work an isolated request identity without resetting ledgers."""
+    identifier = request_id or uuid.uuid4().hex
+    token = _CONTEXT.set(TraceContext(identifier, uuid.uuid4().hex))
+    try:
+        yield identifier
+    finally:
+        _CONTEXT.reset(token)
+
+
 def write_record(record: dict[str, Any]) -> None:
     destination = os.environ.get("PERFORMANCE_TRACE_FILE")
     if not destination:

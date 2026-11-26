@@ -35,8 +35,9 @@ class Settings(BaseSettings):
     LLM_RETRY_BACKOFF_MAX_SECONDS: float = 8.0
     # Per-1K-token pricing for cost accounting. Left at 0 so the ledger reports 0
     # instead of a fabricated figure when real pricing is not configured.
-    LLM_COST_PROMPT_PER_1K_USD: float = 0.0
-    LLM_COST_COMPLETION_PER_1K_USD: float = 0.0
+    LLM_COST_PROMPT_PER_1K_USD: float | None = Field(default=None, ge=0)
+    LLM_COST_COMPLETION_PER_1K_USD: float | None = Field(default=None, ge=0)
+    LLM_COST_MODEL_RATES: dict[str, dict[str, float]] = Field(default_factory=dict)
     OPENAI_API_KEY: str = ""
     DASHSCOPE_API_KEY: str = ""
     BASE_URL: str = ""

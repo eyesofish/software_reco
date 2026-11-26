@@ -15,9 +15,11 @@ They still inherit the timeout via the shared client factory.
 from __future__ import annotations
 
 import logging
+import math
 import random
 import threading
 import time
+from collections import deque
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -26,6 +28,7 @@ import openai
 from .config import settings
 from .execution_control import check_current_run
 from .logging_utils import elapsed_ms, error_fields, log_event, new_trace_id
+from .performance import current_correlation, write_record
 
 logger = logging.getLogger(__name__)
 
@@ -70,6 +73,8 @@ class SceneUsage:
     completion_tokens: int = 0
     total_tokens: int = 0
     cost_usd: float = 0.0
+    unknown_cost_calls: int = 0
+    unknown_usage_calls: int = 0
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -79,7 +84,11 @@ class SceneUsage:
             "prompt_tokens": self.prompt_tokens,
             "completion_tokens": self.completion_tokens,
             "total_tokens": self.total_tokens,
-            "cost_usd": round(self.cost_usd, 6),
+            "cost_usd": round(self.cost_usd, 9) if not self.unknown_cost_calls else None,
+            "known_cost_usd": round(self.cost_usd, 9),
+            "unknown_cost_calls": self.unknown_cost_calls,
+            "unknown_usage_calls": self.unknown_usage_calls,
+            "token_totals_complete": self.unknown_usage_calls == 0,
         }
 
 
@@ -93,6 +102,8 @@ class UsageLedger:
 
     overall: SceneUsage = field(default_factory=SceneUsage)
     by_scene: dict[str, SceneUsage] = field(default_factory=dict)
+    records: deque[dict[str, Any]] = field(default_factory=lambda: deque(maxlen=10000))
+    discarded_records: int = 0
 
 
 _LEDGER = UsageLedger()
@@ -100,64 +111,168 @@ _LEDGER_LOCK = threading.Lock()
 
 
 def reset_usage() -> None:
-    """Clear the ledger. Intended for tests and per-process reporting windows."""
+    """Clear diagnostics. Request reporting should filter by correlation, not reset globally."""
     with _LEDGER_LOCK:
         _LEDGER.overall = SceneUsage()
         _LEDGER.by_scene = {}
+        _LEDGER.records.clear()
+        _LEDGER.discarded_records = 0
 
 
-def usage_snapshot() -> dict[str, Any]:
+def _accumulate(bucket: SceneUsage, record: dict[str, Any]) -> None:
+    bucket.calls += 1
+    bucket.retries += record["retries"]
+    bucket.failed_calls += int(record["failed"])
+    for key in ("prompt_tokens", "completion_tokens", "total_tokens"):
+        setattr(bucket, key, getattr(bucket, key) + (record[key] or 0))
+    bucket.unknown_usage_calls += int(not record["usage_complete"])
+    bucket.unknown_cost_calls += int(record["cost_usd"] is None)
+    bucket.cost_usd += record["known_cost_usd"] or 0.0
+
+
+def usage_snapshot(
+    *, request_id: str | None = None, run_id: str | None = None, session_id: str | None = None
+) -> dict[str, Any]:
+    filters = {
+        key: value
+        for key, value in {
+            "request_id": request_id,
+            "run_id": run_id,
+            "session_id": session_id,
+        }.items()
+        if value is not None
+    }
     with _LEDGER_LOCK:
+        records = [
+            dict(record)
+            for record in _LEDGER.records
+            if all(record.get(key) == value for key, value in filters.items())
+        ]
+        overall, scenes = _LEDGER.overall, _LEDGER.by_scene
+        if filters:
+            overall, scenes = SceneUsage(), {}
+            for record in records:
+                _accumulate(overall, record)
+                _accumulate(scenes.setdefault(record["scene"], SceneUsage()), record)
+        totals = overall.as_dict()
+        if filters and _LEDGER.discarded_records:
+            totals["cost_usd"] = None
+            totals["token_totals_complete"] = False
         return {
-            "overall": _LEDGER.overall.as_dict(),
-            "by_scene": {scene: usage.as_dict() for scene, usage in sorted(_LEDGER.by_scene.items())},
+            "overall": totals,
+            "by_scene": {scene: usage.as_dict() for scene, usage in sorted(scenes.items())},
+            "records": records,
+            "records_truncated": _LEDGER.discarded_records > 0,
         }
 
 
-def _estimate_cost(prompt_tokens: int, completion_tokens: int) -> float:
-    """Cost in USD from configured per-1K rates.
-
-    Both rates default to 0.0: without real pricing configured we report 0
-    rather than inventing a number.
-    """
-    prompt_rate = _safe_float(getattr(settings, "LLM_COST_PROMPT_PER_1K_USD", 0.0), 0.0)
-    completion_rate = _safe_float(getattr(settings, "LLM_COST_COMPLETION_PER_1K_USD", 0.0), 0.0)
-    return (prompt_tokens / 1000.0) * prompt_rate + (completion_tokens / 1000.0) * completion_rate
+def _price(value: Any) -> float | None:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number if math.isfinite(number) and number >= 0 else None
 
 
-def _extract_usage(response: Any) -> tuple[int, int, int]:
+def _estimate_cost(prompt_tokens: int | None, completion_tokens: int | None, model: str = "") -> float | None:
+    """Missing prices or actual usage are unknown; explicitly configured zero is valid."""
+    if prompt_tokens is None or completion_tokens is None:
+        return None
+    rates = getattr(settings, "LLM_COST_MODEL_RATES", {}).get(model)
+    if rates is not None:
+        prompt_rate = _price(rates.get("prompt_per_1k_usd"))
+        completion_rate = _price(rates.get("completion_per_1k_usd"))
+    else:
+        prompt_rate = _price(getattr(settings, "LLM_COST_PROMPT_PER_1K_USD", None))
+        completion_rate = _price(getattr(settings, "LLM_COST_COMPLETION_PER_1K_USD", None))
+    if prompt_rate is None or completion_rate is None:
+        return None
+    return (prompt_tokens / 1000) * prompt_rate + (completion_tokens / 1000) * completion_rate
+
+
+def _extract_usage(response: Any) -> tuple[int | None, int | None, int | None]:
     usage = _get_field(response, "usage", None)
-    if usage is None:
-        return 0, 0, 0
-    prompt_tokens = _safe_int(_get_field(usage, "prompt_tokens", 0))
-    completion_tokens = _safe_int(_get_field(usage, "completion_tokens", 0))
-    total_tokens = _safe_int(_get_field(usage, "total_tokens", 0))
-    if not total_tokens:
-        total_tokens = prompt_tokens + completion_tokens
-    return prompt_tokens, completion_tokens, total_tokens
+    prompt = _get_field(usage, "prompt_tokens", None)
+    completion = _get_field(usage, "completion_tokens", None)
+    if any(isinstance(value, bool) or not isinstance(value, int) or value < 0 for value in (prompt, completion)):
+        return None, None, None
+    total = _get_field(usage, "total_tokens", None)
+    if total is None:
+        total = prompt + completion
+    if isinstance(total, bool) or not isinstance(total, int) or total < prompt + completion:
+        return None, None, None
+    return prompt, completion, total
 
 
 def record_usage(
     *,
     scene: str,
-    prompt_tokens: int = 0,
-    completion_tokens: int = 0,
-    total_tokens: int = 0,
-    cost_usd: float = 0.0,
+    model: str = "",
+    call_id: str | None = None,
+    prompt_tokens: int | None = None,
+    completion_tokens: int | None = None,
+    total_tokens: int | None = None,
+    cost_usd: float | None = None,
     retries: int = 0,
     failed: bool = False,
-) -> None:
+    elapsed_ms: int | None = None,
+    request_id: str | None = None,
+) -> dict[str, Any]:
+    usage_complete = all(value is not None for value in (prompt_tokens, completion_tokens, total_tokens))
+    # Unobserved attempts and partial streams may have incurred charges too.
+    complete = usage_complete and not failed and retries == 0
+    correlation = current_correlation()
+    if request_id and not correlation["request_id"]:
+        correlation["request_id"] = request_id
+    record = {
+        "kind": "llm_usage",
+        "call_id": call_id or new_trace_id("llm"),
+        "scene": scene,
+        "model": model,
+        **correlation,
+        "prompt_tokens": prompt_tokens,
+        "completion_tokens": completion_tokens,
+        "total_tokens": total_tokens,
+        "cost_usd": cost_usd if complete else None,
+        "known_cost_usd": cost_usd,
+        "usage_complete": complete,
+        "retries": retries,
+        "failed": failed,
+        "elapsed_ms": elapsed_ms,
+    }
     with _LEDGER_LOCK:
-        buckets = (_LEDGER.overall, _LEDGER.by_scene.setdefault(scene, SceneUsage()))
-        for bucket in buckets:
-            bucket.calls += 1
-            bucket.retries += retries
-            bucket.prompt_tokens += prompt_tokens
-            bucket.completion_tokens += completion_tokens
-            bucket.total_tokens += total_tokens
-            bucket.cost_usd += cost_usd
-            if failed:
-                bucket.failed_calls += 1
+        _accumulate(_LEDGER.overall, record)
+        _accumulate(_LEDGER.by_scene.setdefault(scene, SceneUsage()), record)
+        if len(_LEDGER.records) == _LEDGER.records.maxlen:
+            _LEDGER.discarded_records += 1
+        _LEDGER.records.append(record)
+    write_record(record)
+    return dict(record)
+
+
+def record_response_usage(
+    *,
+    scene: str,
+    model: str,
+    response: Any,
+    call_id: str | None = None,
+    retries: int = 0,
+    failed: bool = False,
+    elapsed_ms: int | None = None,
+) -> dict[str, Any]:
+    prompt, completion, total = _extract_usage(response)
+    return record_usage(
+        scene=scene,
+        model=model,
+        call_id=call_id,
+        prompt_tokens=prompt,
+        completion_tokens=completion,
+        total_tokens=total,
+        cost_usd=_estimate_cost(prompt, completion, model),
+        retries=retries,
+        failed=failed,
+        elapsed_ms=elapsed_ms,
+    )
 
 
 def _status_code(exc: BaseException) -> int | None:
@@ -219,6 +334,20 @@ def request_timeout_seconds() -> float:
     return max(1.0, _safe_float(getattr(settings, "LLM_TIMEOUT_SECONDS", 60.0), 60.0))
 
 
+def accounted_completion(*, create: Any, scene: str, model: str, **kwargs: Any) -> Any:
+    """Account for exactly one existing client call, without changing retry/timeout policy."""
+    check_current_run()
+    call_id = new_trace_id("llm")
+    started = time.perf_counter()
+    try:
+        response = create(model=model, **kwargs)
+    except Exception:
+        record_usage(scene=scene, model=model, call_id=call_id, failed=True, elapsed_ms=elapsed_ms(started))
+        raise
+    record_response_usage(scene=scene, model=model, response=response, call_id=call_id, elapsed_ms=elapsed_ms(started))
+    return response
+
+
 def governed_chat_completion(
     *,
     client: Any,
@@ -259,7 +388,14 @@ def governed_chat_completion(
             retryable = is_retryable_error(exc)
             has_attempts_left = attempt < attempts
             if not (retryable and has_attempts_left):
-                record_usage(scene=scene, retries=retries_used, failed=True)
+                record_usage(
+                    scene=scene,
+                    model=model,
+                    call_id=trace_id,
+                    retries=retries_used,
+                    failed=True,
+                    elapsed_ms=elapsed_ms(started_at),
+                )
                 log_event(
                     logger,
                     logging.ERROR,
@@ -294,20 +430,29 @@ def governed_chat_completion(
                 status_code=_status_code(exc),
                 **error_fields(exc),
             )
-            if delay > 0:
-                sleep(delay)
-            check_current_run()
+            try:
+                if delay > 0:
+                    sleep(delay)
+                check_current_run()
+            except BaseException:
+                record_usage(
+                    scene=scene,
+                    model=model,
+                    call_id=trace_id,
+                    retries=retries_used,
+                    failed=True,
+                    elapsed_ms=elapsed_ms(started_at),
+                )
+                raise
             continue
 
-        prompt_tokens, completion_tokens, total_tokens = _extract_usage(response)
-        cost = _estimate_cost(prompt_tokens, completion_tokens)
-        record_usage(
+        usage = record_response_usage(
             scene=scene,
-            prompt_tokens=prompt_tokens,
-            completion_tokens=completion_tokens,
-            total_tokens=total_tokens,
-            cost_usd=cost,
+            model=model,
+            response=response,
+            call_id=trace_id,
             retries=retries_used,
+            elapsed_ms=elapsed_ms(started_at),
         )
         log_event(
             logger,
@@ -320,10 +465,10 @@ def governed_chat_completion(
             attempt=attempt,
             retries=retries_used,
             elapsed_ms=elapsed_ms(started_at),
-            prompt_tokens=prompt_tokens,
-            completion_tokens=completion_tokens,
-            total_tokens=total_tokens,
-            cost_usd=round(cost, 6),
+            prompt_tokens=usage["prompt_tokens"],
+            completion_tokens=usage["completion_tokens"],
+            total_tokens=usage["total_tokens"],
+            cost_usd=usage["cost_usd"],
         )
         return response
 
