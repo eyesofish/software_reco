@@ -234,7 +234,12 @@ public class ChatController {
 
         Map<String, String> facts = conversationService.getFacts(conversation.getId());
         String knownName = facts.get("user_name");
-        String streamTaskId = firstNonBlank(request.getSessionId(), requestConversationId, conversation.getId());
+        boolean memoryReply = !MultimodalSupport.hasAttachments(images)
+                && isAskingUserName(query) && knownName != null && !knownName.isBlank();
+        boolean confirmOnly = !MultimodalSupport.hasAttachments(images) && isConfirmOnlyInput(query);
+        String streamTaskId = memoryReply || confirmOnly
+                ? firstNonBlank(request.getSessionId(), requestConversationId, conversation.getId())
+                : recommendTaskStateService.createStreamingTask(conversation.getId(), query, 60, 3, request.getModel()).getTaskId();
 
         SseEmitter emitter = new SseEmitter(0L);
         Map<String, Object> bootstrap = normalizeStreamPayload(
@@ -246,10 +251,7 @@ public class ChatController {
         );
         sendSseEvent(emitter, "meta", bootstrap);
 
-        if (!MultimodalSupport.hasAttachments(images)
-                && isAskingUserName(query)
-                && knownName != null
-                && !knownName.isBlank()) {
+        if (memoryReply) {
             String memoryAnswer = "你叫" + knownName + "。";
             conversationService.appendMessage(conversation, "assistant", memoryAnswer);
             Map<String, Object> finalPayload = normalizeStreamPayload(
@@ -267,7 +269,7 @@ public class ChatController {
             return emitter;
         }
 
-        if (!MultimodalSupport.hasAttachments(images) && isConfirmOnlyInput(query)) {
+        if (confirmOnly) {
             String blockedMessage = "Detected confirmation text. Please use the UI confirm button instead of sending a new question.";
             conversationService.appendMessage(conversation, "assistant", blockedMessage);
             Map<String, Object> errorPayload = normalizeStreamPayload(
@@ -475,7 +477,8 @@ public class ChatController {
         );
         String eventType = firstNonBlank(asText(payload.get("type")), "state");
         if ("token".equals(eventType)) {
-            tokenBuffer.append(firstNonBlank(asText(payload.get("delta")), ""));
+            String delta = asText(payload.get("delta"));
+            if (delta != null) tokenBuffer.append(delta);
         }
         if ("final".equals(eventType)) {
             String finalAnswer = firstNonBlank(asText(payload.get("final_answer")), tokenBuffer.toString());
@@ -484,7 +487,12 @@ public class ChatController {
                 payload.put("final_answer", finalAnswer);
             }
         }
-        recommendTaskStateService.applyStreamEvent(taskId, eventType, payload);
+        RecommendTaskStateResponse state = recommendTaskStateService.applyStreamEvent(taskId, eventType, payload);
+        if ("final".equals(eventType) && "FAILED".equals(state.getStatus())) {
+            stream.send("error", normalizeStreamPayload("error", Map.of("message", state.getErrorMessage()),
+                    taskId, conversation.getId(), sessionId));
+            return;
+        }
         stream.send(eventType, payload);
     }
 

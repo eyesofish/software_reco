@@ -226,7 +226,7 @@ public class RecommendTaskStateService {
         return toResponse(savedTask);
     }
 
-    @Transactional
+    @Transactional(rollbackFor = Exception.class)
     public RecommendTaskStateResponse applyStreamEvent(
             String taskId,
             String eventType,
@@ -296,6 +296,13 @@ public class RecommendTaskStateService {
                         asText(payload == null ? null : payload.get("message")),
                         ""
                 );
+                String reported = firstNonBlank(asText(payload == null ? null : payload.get("status")), "success");
+                if (finalAnswer == null && ("success".equalsIgnoreCase(reported) || "done".equalsIgnoreCase(reported))) {
+                    applyCanonicalTaskState(task, RecommendTaskStatus.FAILED, List.of(), null, "Agent returned an empty answer");
+                    task.setProgress(progressForStatus(RecommendTaskStatus.FAILED));
+                    task.setLastHeartbeatAt(now);
+                    break;
+                }
                 applyCanonicalTaskState(task, RecommendTaskStatus.DONE, List.of(), finalAnswer, null);
                 task.setProgress(progressForStatus(RecommendTaskStatus.DONE));
                 task.setLastHeartbeatAt(now);
