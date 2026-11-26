@@ -23,6 +23,8 @@ from app.api.v1.routes import router as v1_router  # noqa: E402  (must follow co
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    if not settings.API_KEY:
+        raise RuntimeError("API_KEY is required; run scripts/init_auth_demo.py and load .runtime/auth-demo.env")
     await startup_event_handler()
     yield
 
