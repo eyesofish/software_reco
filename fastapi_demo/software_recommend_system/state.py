@@ -27,6 +27,8 @@ class AgentState(BaseModel):
     query_image_candidates: list[Document] = Field(default_factory=list)
     mode: str | None = None
     normalized_query: str = ""
+    validated_query_expansion: str = ""
+    rewrite_audit: dict[str, Any] = Field(default_factory=dict)
     constraints: dict[str, str] = Field(
         default_factory=lambda: {"language": "", "scenario": "", "preference": ""}
     )
