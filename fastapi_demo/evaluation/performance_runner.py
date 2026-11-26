@@ -88,6 +88,8 @@ def fingerprint(settings, manifest: Path = MANIFEST, *, offline: bool = False) -
             "CHROMA_DB_PATH",
             "INGEST_PATH",
             "SESSION_STATE_FILE",
+            "SESSION_STATE_DB",
+            "MEMORY_STORE_DB",
             "MEMORY_STORE_FILE",
             "SERVER_HOST",
             "SERVER_PORT",
@@ -145,9 +147,17 @@ def read_trace(path: Path) -> list[dict]:
 
 def environment_for_server(runtime: Path, *, offline: bool) -> dict[str, str]:
     settings = profile_settings(offline)
+    runtime = runtime.resolve()
     environment = os.environ.copy()
     for key, value in settings.model_dump().items():
-        environment[key] = str(value).lower() if isinstance(value, bool) else str(value)
+        if value is None:
+            # Optional unset rates must remain unset. The literal "None" cannot
+            # be parsed as an optional float by the child Settings instance.
+            environment.pop(key, None)
+        elif isinstance(value, (dict, list, tuple)):
+            environment[key] = json.dumps(value)
+        else:
+            environment[key] = str(value).lower() if isinstance(value, bool) else str(value)
     ingest = runtime / "empty-ingest"
     ingest.mkdir(parents=True, exist_ok=True)
     environment.update(
@@ -159,7 +169,9 @@ def environment_for_server(runtime: Path, *, offline: bool) -> dict[str, str]:
             "CHROMA_DB_PATH": str(runtime / "chroma"),
             "INGEST_PATH": str(ingest),
             "SESSION_STATE_FILE": str(runtime / "sessions.json"),
+            "SESSION_STATE_DB": str(runtime / "sessions.sqlite3"),
             "MEMORY_STORE_FILE": str(runtime / "memory.json"),
+            "MEMORY_STORE_DB": str(runtime / "memory.sqlite3"),
             "LANGGRAPH_CHECKPOINT_PATH": str(runtime / "checkpoints.sqlite"),
             "LANGCHAIN_TRACING_V2": "false",
             "LANGSMITH_TRACING": "false",

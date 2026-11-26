@@ -81,6 +81,10 @@ $env:INGEST_PATH = $evalIngest
 $env:CHROMA_DB_PATH = $evalChroma
 $env:MEMORY_STORE_FILE = $evalMemory
 $env:SESSION_STATE_FILE = $evalSession
+# Each run starts with isolated databases even if the caller has configured production paths.
+$runDatabaseTag = [Guid]::NewGuid().ToString("N")
+$env:SESSION_STATE_DB = [IO.Path]::ChangeExtension($evalSession, "$runDatabaseTag.sqlite3")
+$env:MEMORY_STORE_DB = [IO.Path]::ChangeExtension($evalMemory, "$runDatabaseTag.sqlite3")
 
 # Evaluation-time router/latency guardrails.
 $env:ROUTER_TIMEOUT_SECONDS = "1"
@@ -133,8 +137,8 @@ client = chromadb.PersistentClient(path=chroma_path)
 payload = {
     "chroma_db_path": chroma_path,
     "ingest_path": _resolve(os.environ.get("INGEST_PATH", "./ingest_docs")),
-    "memory_store_file": _resolve(os.environ.get("MEMORY_STORE_FILE", ".runtime/layered_memory_store.json")),
-    "session_state_file": _resolve(os.environ.get("SESSION_STATE_FILE", ".runtime/fastapi_session_state.json")),
+    "memory_store_file": _resolve(os.environ["MEMORY_STORE_DB"]),
+    "session_state_file": _resolve(os.environ["SESSION_STATE_DB"]),
     "enable_parent_child_chunking": parent_enabled,
     "retrieval_enable_rerank": os.environ.get("RETRIEVAL_ENABLE_RERANK"),
     "parent_collection_name": parent_name,
@@ -427,8 +431,8 @@ $mdLines = @(
     "- Effective BucketIndex: $(if ($useBuckets) { $effectiveBucketIndex } else { 'disabled' })"
     "- CHROMA_DB_PATH: $($evalRuntimeSummary.chroma_db_path)"
     "- INGEST_PATH: $($evalRuntimeSummary.ingest_path)"
-    "- MEMORY_STORE_FILE: $($evalRuntimeSummary.memory_store_file)"
-    "- SESSION_STATE_FILE: $($evalRuntimeSummary.session_state_file)"
+    "- MEMORY_STORE_DB: $($evalRuntimeSummary.memory_store_file)"
+    "- SESSION_STATE_DB: $($evalRuntimeSummary.session_state_file)"
     "- ENABLE_PARENT_CHILD_CHUNKING: $($evalRuntimeSummary.enable_parent_child_chunking)"
     "- RETRIEVAL_ENABLE_RERANK: $($evalRuntimeSummary.retrieval_enable_rerank)"
     "- Parent collection name: $($evalRuntimeSummary.parent_collection_name)"

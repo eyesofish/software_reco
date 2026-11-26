@@ -203,6 +203,8 @@ foreach ($method in $methods) {
         $env:ENABLE_PARENT_CHILD_CHUNKING = if ($method.IndexMode -eq "child_only") { "false" } else { "true" }
         $env:MEMORY_STORE_FILE = Join-Path $memoryRoot ("{0}.json" -f $method.Name)
         $env:SESSION_STATE_FILE = Join-Path $sessionRoot ("{0}.json" -f $method.Name)
+        $env:SESSION_STATE_DB = [IO.Path]::ChangeExtension($env:SESSION_STATE_FILE, ".sqlite3")
+        $env:MEMORY_STORE_DB = [IO.Path]::ChangeExtension($env:MEMORY_STORE_FILE, ".sqlite3")
 
         $null = Invoke-AndCapture -CommandArgs @(
             "-m", "evaluation.retrieval_benchmark",
