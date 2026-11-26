@@ -42,6 +42,11 @@ public class FastApiClient {
     private final String confirmStreamUrl;
     private final String sessionStateUrl;
     private final java.time.Duration sessionSyncTimeout;
+    private final String baseUrl;
+    private final java.util.concurrent.ThreadPoolExecutor shadowExecutor = new java.util.concurrent.ThreadPoolExecutor(
+            1, 1, 0L, java.util.concurrent.TimeUnit.SECONDS, new java.util.concurrent.ArrayBlockingQueue<>(32),
+            runnable -> { Thread thread = new Thread(runnable, "routing-shadow-submit"); thread.setDaemon(true); return thread; },
+            new java.util.concurrent.ThreadPoolExecutor.AbortPolicy());
 
     public FastApiClient(
             @Qualifier("agentRestTemplate") RestTemplate restTemplate,
@@ -54,6 +59,7 @@ public class FastApiClient {
             @Value("${app.fastapi.confirm-stream-path:/api/v1/recommend/confirm/stream}") String confirmStreamPath,
             @Value("${app.fastapi.session-state-path:/api/v1/session-state}") String sessionStatePath,
             @Value("${app.fastapi.session-sync-timeout:3s}") java.time.Duration sessionSyncTimeout) {
+        this.baseUrl = baseUrl;
         this.restTemplate = restTemplate;
         this.webClient = webClient;
         this.objectMapper = objectMapper;
@@ -64,6 +70,34 @@ public class FastApiClient {
         this.sessionStateUrl = baseUrl + sessionStatePath;
         this.sessionSyncTimeout = sessionSyncTimeout;
     }
+
+    public Map<String, Object> resolveRouting(Map<String, Object> snapshot) {
+        return webClient.post().uri(baseUrl + "/api/v1/routing/resolve")
+                .contentType(MediaType.APPLICATION_JSON).bodyValue(snapshot).retrieve()
+                .bodyToMono(new ParameterizedTypeReference<Map<String, Object>>() {})
+                .block(java.time.Duration.ofSeconds(9));
+    }
+
+    public void shadowRouting(Map<String, Object> snapshot) {
+        // Serialize immediately so a later primary mutation cannot change this snapshot.
+        final byte[] frozen;
+        try { frozen = objectMapper.writeValueAsBytes(snapshot); }
+        catch (Exception error) { logger.warn("routing.shadow.serialization_failed"); return; }
+        try {
+            shadowExecutor.execute(() -> {
+                try {
+                    webClient.post().uri(baseUrl + "/api/v1/routing/shadow")
+                            .contentType(MediaType.APPLICATION_JSON).bodyValue(frozen).retrieve()
+                            .toBodilessEntity().block(java.time.Duration.ofSeconds(2));
+                } catch (Exception error) { logger.info("routing.shadow.submit_failed snapshot_id={}", snapshot.get("snapshot_id")); }
+            });
+        } catch (java.util.concurrent.RejectedExecutionException full) {
+            logger.info("routing.shadow.dropped snapshot_id={}", snapshot.get("snapshot_id"));
+        }
+    }
+
+    @jakarta.annotation.PreDestroy
+    public void stopShadowExecutor() { shadowExecutor.shutdownNow(); }
 
     public RecommendResponse recommend(RecommendRequest request) {
         HttpHeaders headers = new HttpHeaders();
@@ -262,8 +296,11 @@ public class FastApiClient {
     private Map<String, Object> buildRecommendPayload(RecommendRequest request) {
         Map<String, Object> payload = new HashMap<>();
         payload.put("query", request.getQuery());
+        payload.put("routing_prechecked", request.isRoutingPrechecked());
         payload.put("timeout", request.getTimeout());
         payload.put("max_iterations", request.getMaxIterations());
+        if (request.getRoutingDecision() != null) payload.put("routing_decision", request.getRoutingDecision());
+        if (request.getExecutionBudgetSeconds() != null) payload.put("execution_budget_seconds", request.getExecutionBudgetSeconds());
         if (request.getSessionId() != null && !request.getSessionId().isBlank()) {
             payload.put("session_id", request.getSessionId());
         }

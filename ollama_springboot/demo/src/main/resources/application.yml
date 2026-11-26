@@ -25,6 +25,12 @@ spring:
       path: /h2-console
 
 app:
+  routing:
+    mode: ${ROUTING_DEPLOYMENT_MODE:shadow}
+    auto-session-approved: ${ROUTING_AUTO_SESSION_APPROVED:false}
+    traffic-percent: ${ROUTING_TRAFFIC_PERCENT:0}
+    gate-report: ${ROUTING_GATE_REPORT:}
+    model-version: ${JEV_MODEL:jev-1.14.0}
   auth:
     jwt-secret: ${JWT_SECRET:}
     alice-password: ${DEMO_ALICE_PASSWORD:}
