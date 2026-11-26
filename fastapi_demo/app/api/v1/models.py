@@ -1,4 +1,4 @@
-from typing import Any, Self
+from typing import Any, Literal, Self
 
 from pydantic import BaseModel, Field, model_validator
 
@@ -17,6 +17,13 @@ class ImageAttachment(BaseModel):
 
 
 class RecommendationRequest(BaseModel):
+    routing_mode: Literal["explicit", "auto", "new"] | None = None
+    current_conversation_id: str | None = None
+    thread_id: str | None = None
+    # Internal service-key boundary; the business API never accepts these from a browser.
+    routing_decision: dict[str, Any] | None = None
+    routing_prechecked: bool = False
+    execution_budget_seconds: float | None = Field(default=None, gt=0, le=300)
     query: str = Field(default="", description="User query text", max_length=1000)
     images: list[ImageAttachment] = Field(
         default_factory=list,
@@ -50,8 +57,16 @@ class RecommendationRequest(BaseModel):
 
     @model_validator(mode="after")
     def normalize_ids(self) -> Self:
-        if not self.session_id and self.conversation_id:
-            self.session_id = self.conversation_id
+        ids = {value.strip() for value in (self.session_id, self.conversation_id, self.thread_id)
+               if value and value.strip()}
+        if len(ids) > 1:
+            raise ValueError("Conflicting session identifiers")
+        if self.routing_mode == "new" and ids:
+            raise ValueError("new routing cannot include an existing session")
+        self.session_id = next(iter(ids), None)
+        if self.routing_decision is not None:
+            from software_recommend_system.intent_routing import RoutingResolution
+            self.routing_decision = RoutingResolution.model_validate(self.routing_decision).model_dump()
         if not self.query.strip() and not self.images:
             raise ValueError("query or at least one image is required")
         return self
@@ -92,49 +107,50 @@ class RetrievedImage(BaseModel):
 class RecommendationResponse(BaseModel):
     status: str = Field(..., description="Request status")
     final_answer: str = Field(..., description="Final answer")
+    clarification: dict[str, Any] | None = None
     candidates: list[dict[str, Any]] | None = Field(
-        None,
+        default=None,
         description="Candidate recommendations",
     )
-    mode: str | None = Field(None, description="Mode used (rag/direct/hitl)")
-    iteration_count: int | None = Field(None, description="Iteration count")
-    coverage: float | None = Field(None, description="Coverage score")
-    session_id: str | None = Field(None, description="Session id for resume")
+    mode: str | None = Field(default=None, description="Mode used (rag/direct/hitl)")
+    iteration_count: int | None = Field(default=None, description="Iteration count")
+    coverage: float | None = Field(default=None, description="Coverage score")
+    session_id: str | None = Field(default=None, description="Session id for resume")
     awaiting_human_confirmation: bool | None = Field(
-        None,
+        default=None,
         description="Whether pipeline is waiting for human input",
     )
     pending_sub_questions: list[str] | None = Field(
-        None,
+        default=None,
         description="Sub-questions waiting for confirmation",
     )
     hitl: dict[str, Any] | None = Field(
-        None,
+        default=None,
         description="HITL decision payload used for tracing/evaluation",
     )
     retrieval_records: list[dict[str, Any]] | None = Field(
-        None,
+        default=None,
         description="Per-subquery retrieval records",
     )
     retrieved_doc_ids: list[str] | None = Field(
-        None,
+        default=None,
         description="Deduplicated union of retrieved doc ids across all subqueries",
     )
     retrieved_images: list[RetrievedImage] | None = Field(
-        None,
+        default=None,
         description="Image knowledge assets included in retrieved evidence",
     )
     selected_skill: str | None = Field(
-        None,
+        default=None,
         description="Skill selected by skill router",
     )
     plan_steps: list[dict[str, Any]] | None = Field(
-        None,
+        default=None,
         description="Planner output steps",
     )
-    run_id: str | None = Field(None, description="Identifier of this execution")
-    stop_reason: str | None = Field(None, description="Reason the execution did not complete")
-    elapsed_ms: int | None = Field(None, description="Elapsed execution time in milliseconds")
+    run_id: str | None = Field(default=None, description="Identifier of this execution")
+    stop_reason: str | None = Field(default=None, description="Reason the execution did not complete")
+    elapsed_ms: int | None = Field(default=None, description="Elapsed execution time in milliseconds")
 
 
 class SessionStateUpdateRequest(BaseModel):

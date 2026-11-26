@@ -56,7 +56,7 @@ class AgentState(BaseModel):
     needs_refinement: bool = False
     iteration_count: int = 0
     max_iterations: int = 3
-    timeout_budget: int = 60
+    timeout_budget: float = 60
     start_time: float | None = None
     awaiting_human_confirmation: bool = False
     human_feedback: str = ""
@@ -68,3 +68,4 @@ class AgentState(BaseModel):
     session_id: str = ""
     kb_snapshot_id: str = ""
     run_id: str | None = None
+    routing_decision: dict[str, Any] | None = None

@@ -61,6 +61,7 @@ from .handlers.recommend_orchestrator import (
 from .handlers.recommend_orchestrator import (
     upsert_name_fact_from_query as _upsert_name_fact_from_query,
 )
+from .routing_api import preflight
 from .session_store import (
     _append_session_message_once,
     _append_session_messages,
@@ -124,12 +125,20 @@ async def _prepare_multimodal_request(
 
 
 async def _prepare_pinned_request(request_data: RecommendationRequest):
-    """Freeze the published KB before any recall."""
+    """Freeze the published KB before any recall, charging preparation to active time."""
     from software_recommend_system.kb_versions import capture_snapshot, use_snapshot
 
+    started = time.monotonic()
+    remaining = min(request_data.timeout, request_data.execution_budget_seconds or request_data.timeout)
     kb_snapshot_id = capture_snapshot()
-    with use_snapshot(kb_snapshot_id):
-        prepared = await _prepare_multimodal_request(request_data)
+    try:
+        with use_snapshot(kb_snapshot_id):
+            prepared = await asyncio.wait_for(_prepare_multimodal_request(request_data), timeout=remaining)
+    except TimeoutError as exc:
+        raise HTTPException(408, "Multimodal preparation exceeded the request deadline") from exc
+    request_data.execution_budget_seconds = remaining - (time.monotonic() - started)
+    if request_data.execution_budget_seconds <= 0:
+        raise HTTPException(408, "Multimodal preparation exceeded the request deadline")
     logger.info("recommend knowledge snapshot pinned: kb_snapshot_id=%s", kb_snapshot_id)
     return kb_snapshot_id, *prepared
 
@@ -156,6 +165,9 @@ async def get_ingested_asset(asset_path: str):
 
 @router.post("/recommend", response_model=RecommendationResponse)
 async def get_software_recommendation(request_data: RecommendationRequest):
+    clarification = await preflight(request_data)
+    if clarification is not None:
+        return clarification
     session_id = request_data.session_id or uuid4().hex
     try:
         kb_snapshot_id, effective_query, persisted_user_message, image_descriptions, query_image_candidates = (
@@ -253,13 +265,14 @@ async def get_software_recommendation(request_data: RecommendationRequest):
         )
 
         state = AgentState(
+            routing_decision=request_data.routing_decision,
             kb_snapshot_id=kb_snapshot_id,
             user_query=effective_query,
             messages=session_messages,
             input_images=image_descriptions,
             query_image_candidates=query_image_candidates,
             memory_context=memory_context,
-            timeout_budget=request_data.timeout,
+            timeout_budget=request_data.execution_budget_seconds or request_data.timeout,
             max_iterations=request_data.max_iterations,
             start_time=time.time(),
             hitl_policy=request_data.hitl_policy or "human",
@@ -293,6 +306,14 @@ async def get_software_recommendation(request_data: RecommendationRequest):
 
 @router.post("/recommend/stream")
 async def stream_software_recommendation(request_data: RecommendationRequest):
+    clarification = await preflight(request_data)
+    if clarification is not None:
+
+        async def clarification_events():
+            yield _sse("routing_clarification", clarification.model_dump())
+
+        return StreamingResponse(clarification_events(), media_type="text/event-stream")
+
     async def event_gen() -> AsyncIterator[str]:
         session_id = request_data.session_id or uuid4().hex
         try:
@@ -404,13 +425,14 @@ async def stream_software_recommendation(request_data: RecommendationRequest):
             )
 
             state = AgentState(
+                routing_decision=request_data.routing_decision,
                 kb_snapshot_id=kb_snapshot_id,
                 user_query=effective_query,
                 messages=session_messages,
                 input_images=image_descriptions,
                 query_image_candidates=query_image_candidates,
                 memory_context=memory_context,
-                timeout_budget=request_data.timeout,
+                timeout_budget=request_data.execution_budget_seconds or request_data.timeout,
                 max_iterations=request_data.max_iterations,
                 start_time=time.time(),
                 hitl_policy=request_data.hitl_policy or "human",
