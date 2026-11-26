@@ -1,4 +1,21 @@
 services:
+  postgres:
+    image: postgres:17
+    environment:
+      POSTGRES_DB: software_reco
+      POSTGRES_USER: software_reco
+      POSTGRES_PASSWORD_FILE: /run/secrets/db_password
+    secrets:
+      - db_password
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD", "pg_isready", "-h", "127.0.0.1", "-U", "software_reco", "-d", "software_reco"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+
   elasticsearch:
     image: docker.elastic.co/elasticsearch/elasticsearch:9.5.4
     environment:
@@ -20,10 +37,12 @@ services:
   fastapi:
     build: ./fastapi_demo
     ports:
-      - "8000:8000"
+      - "127.0.0.1:8000:8000"
     env_file:
       - path: ./fastapi_demo/.env
         required: false
+      - path: ./.runtime/auth-demo.env
+        required: true
     environment:
       - CHROMA_DB_PATH=/data/chroma
       - INGEST_PATH=/data/ingest
@@ -40,11 +59,23 @@ services:
     build: ./ollama_springboot/demo
     ports:
       - "8080:8080"
+    env_file:
+      - path: ./.runtime/auth-demo.env
+        required: true
     environment:
       - APP_FASTAPI_BASE_URL=http://fastapi:8000
-      - SPRING_DATASOURCE_URL=jdbc:h2:mem:software_reco;MODE=PostgreSQL
+      - SPRING_PROFILES_ACTIVE=postgres
+      - DB_URL=jdbc:postgresql://postgres:5432/software_reco
+      - DB_USER=software_reco
+      - SPRING_CONFIG_IMPORT=configtree:/run/secrets/
+    secrets:
+      - source: db_password
+        target: DB_PASSWORD
     depends_on:
-      - fastapi
+      fastapi:
+        condition: service_started
+      postgres:
+        condition: service_healthy
     restart: unless-stopped
 
   frontend:
@@ -58,5 +89,10 @@ services:
       - spring-boot
 
 volumes:
+  postgres_data:
   fastapi_chroma:
   elasticsearch_data:
+
+secrets:
+  db_password:
+    file: ./.runtime/postgres-password

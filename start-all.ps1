@@ -39,6 +39,14 @@ Require-Path -PathValue $FrontendDir -Description "Frontend directory"
 Require-Command -Name "python" -Hint "Install Python and ensure it is on PATH."
 Require-Path -PathValue (Join-Path $SpringDir "mvnw.cmd") -Description "SpringBoot mvnw.cmd"
 
+python (Join-Path $RepoRoot "scripts/init_auth_demo.py")
+if ($LASTEXITCODE -ne 0) { throw "Could not initialize authentication configuration" }
+Get-Content -LiteralPath (Join-Path $RepoRoot ".runtime/auth-demo.env") | ForEach-Object {
+    if ($_ -match '^(JWT_SECRET|AGENT_API_KEY|API_KEY|DEMO_ALICE_PASSWORD|DEMO_BOB_PASSWORD)=(.+)$') {
+        [Environment]::SetEnvironmentVariable($Matches[1], $Matches[2], 'Process')
+    }
+}
+
 $frontendPm = $null
 if (-not $SkipFrontend) {
     if (Get-Command "yarn" -ErrorAction SilentlyContinue) {

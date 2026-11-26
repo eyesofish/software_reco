@@ -86,7 +86,7 @@ streaming, human-in-the-loop, memory, and evaluation flows.
 Optional but useful:
 
 - `TAVILY_API_KEY` for web recall
-- PostgreSQL if you want to run Spring Boot with the `postgres` profile instead of the default in-memory H2 database
+- PostgreSQL for persistent Spring history. Docker Compose starts PostgreSQL on a private network. Standalone development uses H2 in memory by default.
 
 ## Quick Start
 
@@ -334,7 +334,7 @@ Notes:
 
 - Default profile uses in-memory H2.
 - The optional `postgres` profile reads `DB_URL`, `DB_USER`, and `DB_PASSWORD`.
-- H2 console is enabled by default at `http://127.0.0.1:8080/h2-console`.
+- The H2 console is disabled. Business APIs require a logged-in user.
 
 ### 4. Start the React frontend
 
@@ -353,11 +353,58 @@ yarn start
 
 ## Security & Operations
 
-### API key authentication (FastAPI)
+### User authentication (Spring Boot)
 
-All `/api/v1/*` endpoints require an `X-API-Key` header when `API_KEY` is set
-in `fastapi_demo/.env`. Leave `API_KEY=""` for dev (no auth). `/initialize-db`
-is gated behind `ADMIN_API_KEY` (falls back to `API_KEY` if unset).
+Spring owns user login, conversation ownership, persisted messages and task lifecycle.
+FastAPI owns retrieval, model calls and LangGraph execution. Browser requests use a
+JWT; Spring-to-FastAPI requests use a separate service key. A user's JWT is never
+sent to the Agent service. This is a single-instance implementation; distributed
+checkpoint storage and cross-instance coordination are not implemented.
+
+`start-all.ps1` initializes and loads `.runtime/auth-demo.env` automatically.
+The login page uses accounts `alice` and `bob`; their generated passwords are in
+that ignored local file. Existing anonymous conversations and browser caches are
+preserved but are not assigned to either account.
+
+For manual startup or Docker, first initialize the configuration:
+
+```powershell
+python scripts/init_auth_demo.py
+Get-Content .runtime/auth-demo.env | ForEach-Object {
+  $key, $value = $_ -split '=', 2
+  [Environment]::SetEnvironmentVariable($key, $value, 'Process')
+}
+```
+
+Then use the existing service startup commands, or `docker compose up --build`.
+Compose uses the `postgres_data` volume for conversations, messages and tasks.
+The initializer creates `.runtime/postgres-password` once. Spring and PostgreSQL
+read it as a Compose secret. Keep it with your deployment credentials when
+reattaching an existing volume. The Agent debug port binds loopback only.
+Passwords are seeded only when an account does not exist; changing the environment
+does not reset a persisted account's password. JWTs expire after 30 minutes; logout
+clears the browser session and cancels active requests, without server-side token
+revocation or refresh tokens.
+
+Authentication endpoints:
+
+- `POST /api/auth/login`: `{ "username": "alice", "password": "..." }`
+- `GET /api/auth/me`: `Authorization: Bearer <access_token>`
+
+Business requests require the same Bearer header. Unauthorized resources return
+404, and anonymous/invalid-token requests return 401 before Agent execution.
+Unknown nonempty conversation IDs are no longer created automatically; create
+a conversation through Spring first, or omit the ID for a new chat.
+
+**Upgrading an existing Compose deployment.** The old Spring database lived
+inside its JVM. Export any history you need from the running instance before
+replacing it. An instance that already exited has no H2 data volume to restore.
+### Service authentication (FastAPI)
+
+All `/api/v1/*` endpoints require an `X-API-Key` header matching `API_KEY`.
+Empty configuration fails closed; FastAPI startup requires a key. Spring uses
+`AGENT_API_KEY`, which must match it. `/initialize-db` is gated behind
+`ADMIN_API_KEY` (falls back to `API_KEY` if unset).
 
 Generate keys:
 
