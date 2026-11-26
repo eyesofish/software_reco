@@ -5,7 +5,7 @@ import chromadb
 import pytest
 from chromadb.api.types import EmbeddingFunction
 
-from software_recommend_system import keyword_index
+from software_recommend_system import kb_versions, keyword_index
 from software_recommend_system.config import settings
 from software_recommend_system.ingestion import embedder, indexer, rechunk
 
@@ -33,6 +33,8 @@ class MemoryKeyword:
     def __init__(self):
         self.rows = {}
         self.fail = False
+        self.client = Mock()
+        self.index = "test_keyword"
 
     def upsert(self, ids, texts, metadatas):
         if self.fail:
@@ -49,6 +51,8 @@ def store(tmp_path, monkeypatch):
     root = tmp_path / "docs"
     root.mkdir()
     monkeypatch.setattr(settings, "INGEST_PATH", str(root))
+    monkeypatch.setattr(settings, "CHROMA_DB_PATH", str(tmp_path / "chroma"))
+    monkeypatch.setattr(settings, "KB_MANIFEST_PATH", str(tmp_path / "manifest.sqlite3"))
     monkeypatch.setattr(settings, "CHUNKING_STRATEGY", "structure")
     monkeypatch.setattr(settings, "ENABLE_PARENT_CHILD_CHUNKING", False)
     monkeypatch.setattr(settings, "RECALL_ENABLE_KEYWORD", True)
@@ -101,11 +105,13 @@ def test_rebuild_shrinks_and_preserves_identity_and_is_idempotent(store):
     assert first["chunks"] > 1
     doc = write_doc(root, body="# Small\nA short replacement.")
     result = rechunk.apply_document(doc)
-    assert result["removed_chunks"] > 0 and text.count() == 1
-    assert text.get()["ids"] == ["legacy-id:0"]
-    assert set(keyword.rows) == {"legacy-id:0"}
+    assert result["removed_chunks"] == 0 and text.count() > 1
+    current = current_rows(text)
+    assert len(current["ids"]) == 1
+    assert current["metadatas"][0]["document_id"] == "legacy-id"
+    assert set(keyword.rows) == set(text.get()["ids"])
     assert rechunk.apply_document(doc)["removed_chunks"] == 0
-    assert text.count() == 1 and parent.count() == 0
+    assert len(current_rows(text)["ids"]) == 1 and parent.count() == 0
 
 
 def test_switch_parent_child_both_directions(store, monkeypatch):
@@ -115,12 +121,12 @@ def test_switch_parent_child_both_directions(store, monkeypatch):
     monkeypatch.setattr(settings, "ENABLE_PARENT_CHILD_CHUNKING", True)
     rechunk.apply_document(doc)
     assert parent.count() > 0
-    assert all(":c:" in key for key in text.get()["ids"])
+    assert all(":c:" in key for key in current_rows(text)["ids"])
     assert set(keyword.rows) == set(text.get()["ids"])
     monkeypatch.setattr(settings, "ENABLE_PARENT_CHILD_CHUNKING", False)
     rechunk.apply_document(doc)
-    assert parent.count() == 0
-    assert all(":c:" not in key for key in text.get()["ids"])
+    assert parent.count() > 0 and not current_rows(parent)["ids"]
+    assert all(":c:" not in key for key in current_rows(text)["ids"])
     assert set(keyword.rows) == set(text.get()["ids"])
 
 
@@ -141,12 +147,13 @@ def test_es_failure_retains_stale_ids_until_retry(store):
     before_ids = set(text.get()["ids"])
     keyword.fail = True
     doc = write_doc(root, body="# Small\nReplacement.")
-    with pytest.raises(RuntimeError, match="ES sync failed"):
+    with pytest.raises(ConnectionError, match="ES unavailable"):
         rechunk.apply_document(doc)
-    assert set(text.get()["ids"]) == before_ids
+    assert before_ids.issubset(set(text.get()["ids"]))
+    assert set(current_rows(text)["ids"]) == before_ids
     keyword.fail = False
     rechunk.apply_document(doc)
-    assert text.count() == 1 and set(keyword.rows) == set(text.get()["ids"])
+    assert len(current_rows(text)["ids"]) == 1 and set(keyword.rows) == set(text.get()["ids"])
 
 
 def test_same_basename_in_different_directories_never_overwrites(store):
@@ -196,3 +203,8 @@ def test_write_failure_returns_nonzero_and_retry_cleans_up(store, monkeypatch):
     monkeypatch.setattr(indexer, "index_embeddings", original)
     assert rechunk.main(["--path", "guide.md", "--apply"]) == 0
     assert text.count() > 0 and set(text.get()["ids"]) == set(keyword.rows)
+
+
+def current_rows(collection):
+    with kb_versions.use_snapshot(kb_versions.capture_snapshot()):
+        return collection.get(where=kb_versions.chroma_filter())
