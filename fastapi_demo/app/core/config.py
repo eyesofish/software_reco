@@ -63,6 +63,21 @@ class Settings(BaseSettings):
     ROUTER_CONFIDENCE_THRESHOLD: float = 0.65
     ROUTER_FALLBACK_MODE: str = "rag"
 
+    # Candidate routing never becomes authoritative just because a key exists.
+    JEV_API_KEY: str = ""
+    JEV_BASE_URL: str = "https://api.typesafe.ai"
+    JEV_MODEL: str = "jev-1.14.0"
+    JEV_HIGH_PROBABILITY: float = Field(default=0.90, ge=0, le=1)
+    JEV_LOW_PROBABILITY: float = Field(default=0.60, ge=0, le=1)
+    JEV_REVIEW_CONFIDENCE: float = Field(default=0.80, ge=0, le=1)
+    JEV_MAX_REVIEWS: int = Field(default=3, ge=0, le=3)
+    JEV_TIMEOUT_SECONDS: float = Field(default=8, gt=0)
+    JEV_CIRCUIT_SECONDS: float = Field(default=30, ge=0)
+    JEV_INPUT_COST_PER_MILLION_USD: float | None = None
+    JEV_OUTPUT_COST_PER_MILLION_USD: float | None = None
+    ROUTING_REVIEW_INPUT_COST_PER_MILLION_USD: float | None = None
+    ROUTING_REVIEW_OUTPUT_COST_PER_MILLION_USD: float | None = None
+
     # ---- vector / chunking ----
     CHROMA_DB_PATH: str = "./chroma_db"
     # Defaults to CHROMA_DB_PATH/kb_manifest.sqlite3; keep with the vector-store backup.

@@ -3,7 +3,7 @@ from unittest.mock import Mock
 
 from software_recommend_system import router as router_module
 from software_recommend_system.config import settings
-from software_recommend_system.router import route_query
+from software_recommend_system.router import RoutingDecision, route_query
 
 
 class RouterTests(unittest.TestCase):
@@ -37,15 +37,48 @@ class RouterTests(unittest.TestCase):
 
     def test_route_query_parses_valid_json(self) -> None:
         client = self._mock_client_with_content(
-            '{"mode":"direct","confidence":0.91,"reason":"small talk query"}'
+            '{"mode":"direct","confidence":0.91,"reason":"small talk query",'
+            '"user_intent":"解释概念","target_objects":["Python"],'
+            '"tasks":[{"action":"explain","description":"解释 Python","target":"Python"}]}'
         )
 
         decision = route_query("What is Python?", client=client)
 
+        self.assertIsInstance(decision, RoutingDecision)
         self.assertEqual(decision.mode, "direct")
         self.assertAlmostEqual(decision.confidence, 0.91)
         self.assertEqual(decision.reason, "small talk query")
         self.assertFalse(decision.fallback_used)
+        self.assertEqual(decision.user_intent, "解释概念")
+        self.assertEqual(decision.target_objects, ["Python"])
+        self.assertEqual(decision.tasks[0].action, "explain")
+        self.assertEqual(decision.tasks[0].target, "Python")
+
+    def test_route_query_accepts_legacy_output_with_schema_defaults(self) -> None:
+        client = self._mock_client_with_content(
+            '{"mode":"direct","confidence":0.91,"reason":"legacy response"}'
+        )
+
+        decision = route_query("What is Python?", client=client)
+
+        self.assertEqual(decision.user_intent, "unknown")
+        self.assertEqual(decision.target_objects, [])
+        self.assertEqual(decision.tasks, [])
+        self.assertEqual(decision.as_dict()["mode"], "direct")
+
+    def test_route_query_invalid_structured_fields_fall_back(self) -> None:
+        client = self._mock_client_with_content(
+            '{"mode":"unsupported","confidence":0.91,"reason":"bad mode",'
+            '"user_intent":"unknown","target_objects":[],"tasks":[]}'
+        )
+
+        decision = route_query("Need architecture advice", client=client)
+
+        self.assertEqual(decision.mode, "rag")
+        self.assertTrue(decision.fallback_used)
+        self.assertEqual(decision.reason, "router_fallback:ValidationError")
+        self.assertEqual(decision.target_objects, [])
+        self.assertEqual(decision.tasks, [])
 
     def test_route_query_non_json_falls_back(self) -> None:
         client = self._mock_client_with_content("I think this should be rag")
@@ -56,6 +89,7 @@ class RouterTests(unittest.TestCase):
         self.assertEqual(decision.confidence, 0.0)
         self.assertTrue(decision.fallback_used)
         self.assertIn("router_fallback", decision.reason)
+        self.assertEqual(decision.user_intent, "unknown")
 
     def test_route_query_timeout_falls_back(self) -> None:
         client = Mock()
