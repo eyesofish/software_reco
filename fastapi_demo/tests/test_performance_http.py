@@ -203,6 +203,7 @@ async def test_capacity_and_disconnect_cleanup(server):
         assert all(row["outcome"] == "error" for row in workers)
         assert len(cleanups) == 4
         assert all(row["outcome"] == "success" for row in cleanups)
+        assert all(row["stop_reason"] == "cancelled" for row in cleanups)
         response = await client.post(
             url + "/api/v1/recommend/stream",
             json={

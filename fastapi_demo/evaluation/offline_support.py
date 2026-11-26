@@ -104,10 +104,19 @@ class FakeOpenAI:
         query = str(messages[-1].get("content", ""))
         if "__perf_fail__" in query:
             raise RuntimeError("Injected model failure")
-        if "__perf_slow__" in query or "__perf_hold__" in query:
+        if "__perf_hold__" in query:
+            from software_recommend_system.execution_control import current_control
+
+            control = current_control()
+            if control is None:
+                raise RuntimeError("The capacity fixture requires an active run")
+            # Keep the slot occupied until the client disconnects or the run expires.
+            control.stop_event.wait(control.remaining_seconds)
+            control.check()
+        if "__perf_slow__" in query:
             from software_recommend_system.execution_control import check_current_run, current_control
 
-            deadline = time.monotonic() + (12 if "__perf_slow__" in query else 3)
+            deadline = time.monotonic() + 12
             while time.monotonic() < deadline:
                 control = current_control()
                 if control:
