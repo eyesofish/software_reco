@@ -64,6 +64,10 @@ class Settings(BaseSettings):
     ROUTER_FALLBACK_MODE: str = "rag"
 
     # Candidate routing never becomes authoritative just because a key exists.
+    ROUTING_DEPLOYMENT_MODE: Literal["off", "shadow", "live"] = "shadow"
+    ROUTING_AUTO_SESSION_APPROVED: bool = False
+    ROUTING_GATE_REPORT: str = ""
+    ROUTING_TRAFFIC_PERCENT: float = Field(default=0, ge=0, le=100)
     JEV_API_KEY: str = ""
     JEV_BASE_URL: str = "https://api.typesafe.ai"
     JEV_MODEL: str = "jev-1.14.0"
@@ -77,6 +81,8 @@ class Settings(BaseSettings):
     JEV_OUTPUT_COST_PER_MILLION_USD: float | None = None
     ROUTING_REVIEW_INPUT_COST_PER_MILLION_USD: float | None = None
     ROUTING_REVIEW_OUTPUT_COST_PER_MILLION_USD: float | None = None
+    ROUTING_SHADOW_QUEUE_CAPACITY: int = Field(default=100, ge=1)
+    ROUTING_SHADOW_TRACE_FILE: str = ".runtime/routing_shadow.jsonl"
 
     # ---- vector / chunking ----
     CHROMA_DB_PATH: str = "./chroma_db"

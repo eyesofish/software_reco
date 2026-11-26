@@ -56,6 +56,8 @@ def main(argv: list[str] | None = None) -> int:
             "INGEST_PATH": str(ingest),
             "OPENAI_API_KEY": "offline",
             "DASHSCOPE_API_KEY": "offline",
+            "JEV_API_KEY": "",
+            "ROUTING_SHADOW_TRACE_FILE": str(runtime / "routing_shadow.jsonl"),
             "TAVILY_API_KEY": "",
             "API_KEY": "",
             "ADMIN_API_KEY": "",
