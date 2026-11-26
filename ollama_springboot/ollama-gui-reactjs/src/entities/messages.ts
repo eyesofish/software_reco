@@ -133,6 +133,9 @@ export interface RecommendTaskStateResponse {
   createdAt ?: string,
   updated_at ?: string,
   updatedAt ?: string,
+  pending_input ?: Clarification,
+  pendingInput ?: Clarification,
+  clarification ?: Clarification
 }
 
 export interface ConversationCreateRequest {
@@ -169,6 +172,8 @@ export type ChatStreamEventType =
   | 'state'
   | 'awaiting_confirmation'
   | 'routing_clarification'
+  | 'awaiting_input'
+  | 'route_decision'
   | 'final'
   | 'error'
 
@@ -228,6 +233,17 @@ export interface ChatStreamRoutingClarificationEvent extends ChatStreamBaseEvent
   clarification : Clarification
 }
 
+export interface ChatStreamAwaitingInputEvent extends ChatStreamBaseEvent {
+  type : 'awaiting_input',
+  pending_input : Clarification
+}
+
+export interface ChatStreamRouteDecisionEvent extends ChatStreamBaseEvent {
+  type : 'route_decision',
+  next_step : string,
+  stage : string
+}
+
 export type ChatStreamEvent =
   | ChatStreamMetaEvent
   | ChatStreamNodeEvent
@@ -237,6 +253,8 @@ export type ChatStreamEvent =
   | ChatStreamFinalEvent
   | ChatStreamErrorEvent
   | ChatStreamRoutingClarificationEvent
+  | ChatStreamAwaitingInputEvent
+  | ChatStreamRouteDecisionEvent
 
 // Backward-compat alias for existing imports.
 export type RecommendStreamEventType = ChatStreamEventType
