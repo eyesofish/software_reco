@@ -14,6 +14,7 @@ import urllib.error
 import urllib.request
 from collections import Counter
 from collections.abc import Callable, Iterable, Sequence
+from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -93,11 +94,7 @@ def validate_manifest(manifest: dict[str, Any]) -> None:
         raise ValueError("Image benchmark manifest schema_version must be 1")
 
     licenses = list(manifest.get("licenses") or [])
-    license_ids = {
-        str(item.get("id", "") or "").strip()
-        for item in licenses
-        if isinstance(item, dict)
-    }
+    license_ids = {str(item.get("id", "") or "").strip() for item in licenses if isinstance(item, dict)}
     if not license_ids or "" in license_ids:
         raise ValueError("Every benchmark license must have a non-empty id")
 
@@ -155,9 +152,7 @@ def validate_manifest(manifest: dict[str, Any]) -> None:
     for category in BENCHMARK_CATEGORIES:
         expected = int(expected_assets.get(category, -1))
         if category_counts[category] != expected:
-            raise ValueError(
-                f"Expected {expected} {category} assets, found {category_counts[category]}"
-            )
+            raise ValueError(f"Expected {expected} {category} assets, found {category_counts[category]}")
 
     queries = list(manifest.get("queries") or [])
     if not queries:
@@ -192,18 +187,14 @@ def validate_manifest(manifest: dict[str, Any]) -> None:
             if asset_id not in asset_ids:
                 raise ValueError(f"Query {query_id} references unknown asset {asset_id}")
             if category_by_asset[asset_id] != category:
-                raise ValueError(
-                    f"Query {query_id} category does not match relevant asset {asset_id}"
-                )
+                raise ValueError(f"Query {query_id} category does not match relevant asset {asset_id}")
 
         if modality == "image":
             source_asset_id = str(raw_query.get("query_asset_id", "") or "").strip()
             if source_asset_id not in asset_ids:
                 raise ValueError(f"Image query {query_id} has an unknown query_asset_id")
             if category_by_asset[source_asset_id] != category:
-                raise ValueError(
-                    f"Image query {query_id} category does not match its source asset"
-                )
+                raise ValueError(f"Image query {query_id} category does not match its source asset")
 
     expected_queries = manifest.get("expected_query_counts")
     if not isinstance(expected_queries, dict):
@@ -211,9 +202,7 @@ def validate_manifest(manifest: dict[str, Any]) -> None:
     for modality in BENCHMARK_MODALITIES:
         expected = int(expected_queries.get(modality, -1))
         if modality_counts[modality] != expected:
-            raise ValueError(
-                f"Expected {expected} {modality} queries, found {modality_counts[modality]}"
-            )
+            raise ValueError(f"Expected {expected} {modality} queries, found {modality_counts[modality]}")
 
 
 def _asset_path(runtime_dir: Path, asset: dict[str, Any]) -> Path:
@@ -265,17 +254,12 @@ def _download_asset(
                         break
                     downloaded += len(chunk)
                     if downloaded > MAX_DOWNLOAD_BYTES:
-                        raise ValueError(
-                            f"Asset {asset['id']} exceeds the {MAX_DOWNLOAD_BYTES}-byte limit"
-                        )
+                        raise ValueError(f"Asset {asset['id']} exceeds the {MAX_DOWNLOAD_BYTES}-byte limit")
                     digest.update(chunk)
                     handle.write(chunk)
             actual_digest = digest.hexdigest()
             if actual_digest != expected_digest:
-                raise ValueError(
-                    f"SHA-256 mismatch for {asset['id']}: "
-                    f"expected {expected_digest}, got {actual_digest}"
-                )
+                raise ValueError(f"SHA-256 mismatch for {asset['id']}: expected {expected_digest}, got {actual_digest}")
             temporary.replace(target)
             return True
         except (OSError, TimeoutError, urllib.error.URLError, ValueError) as exc:
@@ -459,9 +443,7 @@ def _refresh_caption_cache(
     for query in list(manifest["queries"]):
         if query["modality"] != "image":
             continue
-        description = multimodal.describe_local_image(
-            _query_image_path(runtime_dir, query)
-        )
+        description = multimodal.describe_local_image(_query_image_path(runtime_dir, query))
         query_captions[str(query["id"])] = {
             "caption": str(description["description"]),
             "source": "vision",
@@ -497,9 +479,7 @@ def prepare_benchmark(
     timeout_seconds: float,
 ) -> dict[str, Any]:
     if refresh_captions and seed_reference_captions:
-        raise ValueError(
-            "refresh_captions and seed_reference_captions cannot both be enabled"
-        )
+        raise ValueError("refresh_captions and seed_reference_captions cannot both be enabled")
     manifest = load_manifest(manifest_path)
     runtime_dir.mkdir(parents=True, exist_ok=True)
 
@@ -523,11 +503,7 @@ def prepare_benchmark(
             generated += 1
 
     asset_by_id = {str(item["id"]): item for item in list(manifest["assets"])}
-    image_queries = [
-        query
-        for query in list(manifest["queries"])
-        if str(query["modality"]) == "image"
-    ]
+    image_queries = [query for query in list(manifest["queries"]) if str(query["modality"]) == "image"]
     for query in image_queries:
         source_asset = asset_by_id[str(query["query_asset_id"])]
         _perturb_image(
@@ -538,9 +514,7 @@ def prepare_benchmark(
     cache_path = runtime_dir / "captions.json"
     existing_cache = (
         _load_caption_cache(manifest, manifest_path, runtime_dir)
-        if cache_path.is_file()
-        and not refresh_captions
-        and not seed_reference_captions
+        if cache_path.is_file() and not refresh_captions and not seed_reference_captions
         else None
     )
     if seed_reference_captions:
@@ -562,12 +536,8 @@ def prepare_benchmark(
         "reused_downloads": reused,
         "generated_assets": generated,
         "perturbed_query_images": len(image_queries),
-        "caption_sources": _caption_source_counts(
-            dict(caption_cache["asset_captions"])
-        ),
-        "query_caption_sources": _caption_source_counts(
-            dict(caption_cache["query_captions"])
-        ),
+        "caption_sources": _caption_source_counts(dict(caption_cache["asset_captions"])),
+        "query_caption_sources": _caption_source_counts(dict(caption_cache["query_captions"])),
         "vision_caption_cache": _uses_vision_caption_cache(caption_cache),
         "prepared_at": _utc_now(),
     }
@@ -583,9 +553,7 @@ def _load_caption_cache(
     cache_path = runtime_dir / "captions.json"
     cache = _read_json(cache_path)
     if cache.get("manifest_sha256") != _manifest_digest(manifest_path):
-        raise ValueError(
-            f"Caption cache is stale for {manifest_path}; rerun the prepare command"
-        )
+        raise ValueError(f"Caption cache is stale for {manifest_path}; rerun the prepare command")
     asset_captions = dict(cache.get("asset_captions") or {})
     query_captions = dict(cache.get("query_captions") or {})
     missing_assets = [
@@ -600,20 +568,13 @@ def _load_caption_cache(
         and not str(dict(query_captions.get(str(query["id"])) or {}).get("caption", "")).strip()
     ]
     if missing_assets or missing_queries:
-        raise ValueError(
-            "Caption cache is incomplete: "
-            f"assets={missing_assets}, image_queries={missing_queries}"
-        )
+        raise ValueError(f"Caption cache is incomplete: assets={missing_assets}, image_queries={missing_queries}")
     return cache
 
 
 def _caption_source_counts(entries: dict[str, Any]) -> dict[str, int]:
     return dict(
-        Counter(
-            str(dict(entry).get("source", "unknown"))
-            for entry in entries.values()
-            if isinstance(entry, dict)
-        )
+        Counter(str(dict(entry).get("source", "unknown")) for entry in entries.values() if isinstance(entry, dict))
     )
 
 
@@ -624,8 +585,7 @@ def _uses_vision_caption_cache(cache: dict[str, Any] | None) -> bool:
     query_entries = dict(cache.get("query_captions") or {})
     all_entries = [*asset_entries.values(), *query_entries.values()]
     return bool(all_entries) and all(
-        isinstance(entry, dict) and entry.get("source") == "vision"
-        for entry in all_entries
+        isinstance(entry, dict) and entry.get("source") == "vision" for entry in all_entries
     )
 
 
@@ -684,8 +644,7 @@ def _require_pinned_image_revision(settings: Any, *, official_run: bool) -> None
     revision = str(settings.IMAGE_EMBEDDING_REVISION or "").strip().lower()
     if official_run and not _GIT_COMMIT_PATTERN.fullmatch(revision):
         raise RuntimeError(
-            "Official image benchmark runs require an immutable "
-            "40-character IMAGE_EMBEDDING_REVISION commit."
+            "Official image benchmark runs require an immutable 40-character IMAGE_EMBEDDING_REVISION commit."
         )
 
 
@@ -694,11 +653,7 @@ def _text_embedding_identity(settings: Any, text_embedder: Any) -> dict[str, Any
     return {
         "provider": provider,
         "model": text_embedder._resolve_embedding_model(provider),
-        "base_url": (
-            text_embedder._resolve_embedding_base_url(provider)
-            if provider != "local"
-            else None
-        ),
+        "base_url": (text_embedder._resolve_embedding_base_url(provider) if provider != "local" else None),
     }
 
 
@@ -714,9 +669,7 @@ def _validate_index_summary(
     mismatches: list[str] = []
     if index_summary.get("manifest_sha256") != _manifest_digest(manifest_path):
         mismatches.append("manifest")
-    if index_summary.get("caption_cache_sha256") != _sha256_file(
-        runtime_dir / "captions.json"
-    ):
+    if index_summary.get("caption_cache_sha256") != _sha256_file(runtime_dir / "captions.json"):
         mismatches.append("caption cache")
     if index_summary.get("text_embedding_identity") != current_text_embedding_identity:
         mismatches.append("text embedding identity")
@@ -726,8 +679,7 @@ def _validate_index_summary(
         mismatches.append("Chroma path")
     if mismatches:
         raise RuntimeError(
-            "Image benchmark index is stale for the current "
-            f"{', '.join(mismatches)}; rerun the build-index command."
+            f"Image benchmark index is stale for the current {', '.join(mismatches)}; rerun the build-index command."
         )
 
 
@@ -735,9 +687,7 @@ def _assert_runtime_chroma_path(runtime_dir: Path, chroma_path: Path) -> None:
     try:
         chroma_path.relative_to(runtime_dir)
     except ValueError as exc:
-        raise ValueError(
-            "The image benchmark only rebuilds Chroma paths inside its runtime directory"
-        ) from exc
+        raise ValueError("The image benchmark only rebuilds Chroma paths inside its runtime directory") from exc
 
 
 def _in_batches(items: Sequence[Any], batch_size: int) -> Iterable[Sequence[Any]]:
@@ -755,9 +705,7 @@ def _embed_batches(
     for batch in _in_batches(items, batch_size):
         batch_vectors = embed(list(batch))
         if len(batch_vectors) != len(batch):
-            raise RuntimeError(
-                f"Embedding batch returned {len(batch_vectors)} vectors for {len(batch)} inputs"
-            )
+            raise RuntimeError(f"Embedding batch returned {len(batch_vectors)} vectors for {len(batch)} inputs")
         vectors.extend(batch_vectors)
     return vectors
 
@@ -818,26 +766,18 @@ def build_index(
     text_embedding_identity = _text_embedding_identity(settings, text_embedder)
     chroma_path.mkdir(parents=True, exist_ok=True)
     client = chromadb.PersistentClient(path=str(chroma_path))
-    collections_before = [
-        getattr(item, "name", str(item))
-        for item in client.list_collections()
-    ]
+    collections_before = [getattr(item, "name", str(item)) for item in client.list_collections()]
     for collection_name in collections_before:
         client.delete_collection(collection_name)
 
     assets = list(manifest["assets"])
     asset_captions = dict(caption_cache["asset_captions"])
     ids = [str(asset["id"]) for asset in assets]
-    captions = [
-        str(dict(asset_captions[str(asset["id"])])["caption"])
-        for asset in assets
-    ]
+    captions = [str(dict(asset_captions[str(asset["id"])])["caption"]) for asset in assets]
     paths = [_asset_path(runtime_dir, asset) for asset in assets]
     missing_files = [str(path) for path in paths if not path.is_file()]
     if missing_files:
-        raise FileNotFoundError(
-            f"Prepared benchmark assets are missing: {missing_files}"
-        )
+        raise FileNotFoundError(f"Prepared benchmark assets are missing: {missing_files}")
 
     metadatas = [
         {
@@ -847,11 +787,7 @@ def build_index(
             "filename": str(asset["filename"]),
             "path": str(asset["filename"]),
             "asset_path": str(asset["filename"]),
-            "media_type": (
-                "image/jpeg"
-                if str(asset["filename"]).lower().endswith((".jpg", ".jpeg"))
-                else "image/png"
-            ),
+            "media_type": ("image/jpeg" if str(asset["filename"]).lower().endswith((".jpg", ".jpeg")) else "image/png"),
             "modality": "image",
             "benchmark_category": str(asset["category"]),
         }
@@ -902,9 +838,7 @@ def build_index(
         "text_embedding_model": text_embedding_identity["model"],
         "image_embedding_model": image_embedding_identity(),
         "caption_sources": _caption_source_counts(asset_captions),
-        "query_caption_sources": _caption_source_counts(
-            dict(caption_cache["query_captions"])
-        ),
+        "query_caption_sources": _caption_source_counts(dict(caption_cache["query_captions"])),
         "vision_caption_cache": uses_vision_captions,
         "caption_generation": dict(caption_cache.get("caption_generation") or {}),
         "built_at": _utc_now(),
@@ -949,18 +883,11 @@ def _doc_id(document: Any) -> str:
         metadata = metadata.model_dump(exclude_none=True)
     if not isinstance(metadata, dict):
         return ""
-    return str(
-        metadata.get("doc_id")
-        or metadata.get("source_doc_id")
-        or ""
-    ).strip()
+    return str(metadata.get("doc_id") or metadata.get("source_doc_id") or "").strip()
 
 
 def _ranked_ids(documents: Sequence[Any], top_k: int) -> list[str]:
-    return _unique_strings(
-        _doc_id(document)
-        for document in list(documents)[:top_k]
-    )
+    return _unique_strings(_doc_id(document) for document in list(documents)[:top_k])
 
 
 def _aggregate_results(per_query: list[dict[str, Any]]) -> dict[str, Any]:
@@ -968,28 +895,17 @@ def _aggregate_results(per_query: list[dict[str, Any]]) -> dict[str, Any]:
     for method in BENCHMARK_METHODS:
         rows = [row for row in per_query if row["method"] == method]
         aggregate[method] = {
-            "overall": {
-                metric: _mean(row[metric] for row in rows)
-                for metric in ("recall_at_1", "recall_at_3", "mrr")
-            },
+            "overall": {metric: _mean(row[metric] for row in rows) for metric in ("recall_at_1", "recall_at_3", "mrr")},
             "by_category": {
                 category: {
-                    metric: _mean(
-                        row[metric]
-                        for row in rows
-                        if row["category"] == category
-                    )
+                    metric: _mean(row[metric] for row in rows if row["category"] == category)
                     for metric in ("recall_at_1", "recall_at_3", "mrr")
                 }
                 for category in BENCHMARK_CATEGORIES
             },
             "by_modality": {
                 modality: {
-                    metric: _mean(
-                        row[metric]
-                        for row in rows
-                        if row["modality"] == modality
-                    )
+                    metric: _mean(row[metric] for row in rows if row["modality"] == modality)
                     for metric in ("recall_at_1", "recall_at_3", "mrr")
                 }
                 for modality in BENCHMARK_MODALITIES
@@ -1003,23 +919,14 @@ def evaluate_keep_gate(aggregate: dict[str, Any]) -> dict[str, Any]:
     clip_mrr = float(aggregate["clip_only"]["overall"]["mrr"])
     fusion_mrr = float(aggregate["fusion"]["overall"]["mrr"])
     epsilon = 1e-12
-    mrr_wins = (
-        fusion_mrr > caption_mrr + epsilon
-        and fusion_mrr > clip_mrr + epsilon
-    )
+    mrr_wins = fusion_mrr > caption_mrr + epsilon and fusion_mrr > clip_mrr + epsilon
 
     non_degrading_categories: list[str] = []
     for category in BENCHMARK_CATEGORIES:
-        fusion_recall = float(
-            aggregate["fusion"]["by_category"][category]["recall_at_3"]
-        )
+        fusion_recall = float(aggregate["fusion"]["by_category"][category]["recall_at_3"])
         stronger_baseline = max(
-            float(
-                aggregate["caption_only"]["by_category"][category]["recall_at_3"]
-            ),
-            float(
-                aggregate["clip_only"]["by_category"][category]["recall_at_3"]
-            ),
+            float(aggregate["caption_only"]["by_category"][category]["recall_at_3"]),
+            float(aggregate["clip_only"]["by_category"][category]["recall_at_3"]),
         )
         if fusion_recall + epsilon >= stronger_baseline:
             non_degrading_categories.append(category)
@@ -1071,6 +978,22 @@ def _write_results_csv(path: Path, rows: list[dict[str, Any]]) -> None:
                     "retrieved_ids": "|".join(row["retrieved_ids"]),
                 }
             )
+
+
+@contextmanager
+def _benchmark_snapshot(chroma_path: Path):
+    """Pin one benchmark-wide view without reading the application's live KB."""
+    from software_recommend_system.config import settings
+    from software_recommend_system.kb_versions import capture_snapshot, use_snapshot
+
+    previous = settings.CHROMA_DB_PATH, settings.KB_MANIFEST_PATH
+    settings.CHROMA_DB_PATH = str(chroma_path)
+    settings.KB_MANIFEST_PATH = str(chroma_path / "kb_manifest.sqlite3")
+    try:
+        with use_snapshot(capture_snapshot()) as snapshot:
+            yield snapshot
+    finally:
+        settings.CHROMA_DB_PATH, settings.KB_MANIFEST_PATH = previous
 
 
 def run_benchmark(
@@ -1154,106 +1077,86 @@ def run_benchmark(
     client = chromadb.PersistentClient(path=str(chroma_path))
     try:
         text_count = int(client.get_collection("software_recommendations").count())
-        image_count = int(
-            client.get_collection(resolve_image_collection_name()).count()
-        )
+        image_count = int(client.get_collection(resolve_image_collection_name()).count())
     except Exception as exc:
-        raise RuntimeError(
-            "Image benchmark index is missing; run the build-index command first"
-        ) from exc
+        raise RuntimeError("Image benchmark index is missing; run the build-index command first") from exc
     expected_count = len(manifest["assets"])
     if text_count != expected_count or image_count != expected_count:
         raise RuntimeError(
-            "Image benchmark index count mismatch: "
-            f"expected={expected_count}, text={text_count}, image={image_count}"
+            f"Image benchmark index count mismatch: expected={expected_count}, text={text_count}, image={image_count}"
         )
 
-    image_queries = [
-        query
-        for query in list(manifest["queries"])
-        if query["modality"] == "image"
-    ]
+    image_queries = [query for query in list(manifest["queries"]) if query["modality"] == "image"]
     query_vectors: dict[str, list[float]] = {}
     if image_queries:
-        query_paths = [
-            _query_image_path(runtime_dir, query)
-            for query in image_queries
-        ]
-        missing_query_images = [
-            str(path)
-            for path in query_paths
-            if not path.is_file()
-        ]
+        query_paths = [_query_image_path(runtime_dir, query) for query in image_queries]
+        missing_query_images = [str(path) for path in query_paths if not path.is_file()]
         if missing_query_images:
-            raise FileNotFoundError(
-                f"Perturbed query images are missing: {missing_query_images}"
-            )
+            raise FileNotFoundError(f"Perturbed query images are missing: {missing_query_images}")
         embedded_queries = embed_image_files(query_paths)
         if len(embedded_queries) != len(image_queries):
             raise RuntimeError("Image query embedding count mismatch")
         query_vectors = {
-            str(query["id"]): vector
-            for query, vector in zip(image_queries, embedded_queries, strict=True)
+            str(query["id"]): vector for query, vector in zip(image_queries, embedded_queries, strict=True)
         }
 
     query_caption_entries = dict(caption_cache["query_captions"])
     per_query: list[dict[str, Any]] = []
-    for query in list(manifest["queries"]):
-        query_id = str(query["id"])
-        modality = str(query["modality"])
-        query_text = (
-            str(query["text"])
-            if modality == "text"
-            else str(dict(query_caption_entries[query_id])["caption"])
-        )
-        relevant_ids = _unique_strings(query["relevant_ids"])
+    with _benchmark_snapshot(chroma_path) as kb_snapshot_id:
+        for query in list(manifest["queries"]):
+            query_id = str(query["id"])
+            modality = str(query["modality"])
+            query_text = (
+                str(query["text"]) if modality == "text" else str(dict(query_caption_entries[query_id])["caption"])
+            )
+            relevant_ids = _unique_strings(query["relevant_ids"])
 
-        caption_docs = _normalize_documents(
-            recall_vector(query=query_text, top_k=top_k),
-            source_hint="vector",
-            channel="vector",
-        )
-        if modality == "text":
-            clip_docs = recall_image_vector(
-                query=query_text,
-                top_k=top_k,
+            caption_docs = _normalize_documents(
+                recall_vector(query=query_text, top_k=top_k),
+                source_hint="vector",
+                channel="vector",
             )
-        else:
-            clip_docs = recall_image_vector(
-                query="",
-                top_k=top_k,
-                query_image_embeddings=[query_vectors[query_id]],
+            if modality == "text":
+                clip_docs = recall_image_vector(
+                    query=query_text,
+                    top_k=top_k,
+                )
+            else:
+                clip_docs = recall_image_vector(
+                    query="",
+                    top_k=top_k,
+                    query_image_embeddings=[query_vectors[query_id]],
+                )
+            clip_docs = _normalize_documents(
+                clip_docs,
+                source_hint="image_vector",
+                channel="image_vector",
             )
-        clip_docs = _normalize_documents(
-            clip_docs,
-            source_hint="image_vector",
-            channel="image_vector",
-        )
-        if not caption_docs:
-            raise RuntimeError(f"Caption retrieval returned no results for {query_id}")
-        if not clip_docs:
-            raise RuntimeError(f"CLIP retrieval returned no results for {query_id}")
+            if not caption_docs:
+                raise RuntimeError(f"Caption retrieval returned no results for {query_id}")
+            if not clip_docs:
+                raise RuntimeError(f"CLIP retrieval returned no results for {query_id}")
 
-        method_documents = {
-            "caption_only": caption_docs,
-            "clip_only": clip_docs,
-            "fusion": _fuse_local_vector_documents(caption_docs, clip_docs),
-        }
-        for method, documents in method_documents.items():
-            retrieved_ids = _ranked_ids(documents, top_k)
-            metrics = compute_rank_metrics(relevant_ids, retrieved_ids)
-            per_query.append(
-                {
-                    "query_id": query_id,
-                    "category": str(query["category"]),
-                    "modality": modality,
-                    "method": method,
-                    "query_text": query_text,
-                    "relevant_ids": relevant_ids,
-                    "retrieved_ids": retrieved_ids,
-                    **metrics,
-                }
-            )
+            method_documents = {
+                "caption_only": caption_docs,
+                "clip_only": clip_docs,
+                "fusion": _fuse_local_vector_documents(caption_docs, clip_docs),
+            }
+            for method, documents in method_documents.items():
+                retrieved_ids = _ranked_ids(documents, top_k)
+                metrics = compute_rank_metrics(relevant_ids, retrieved_ids)
+                per_query.append(
+                    {
+                        "query_id": query_id,
+                        "category": str(query["category"]),
+                        "modality": modality,
+                        "method": method,
+                        "query_text": query_text,
+                        "relevant_ids": relevant_ids,
+                        "retrieved_ids": retrieved_ids,
+                        **metrics,
+                    }
+                )
 
     aggregate = _aggregate_results(per_query)
     gate = evaluate_keep_gate(aggregate)
@@ -1262,11 +1165,11 @@ def run_benchmark(
         gate["raw_passed"] = gate["passed"]
         gate["passed"] = False
         gate["reason"] = (
-            "Reference captions were used; refresh and cache Vision captions "
-            "before making a keep/remove decision."
+            "Reference captions were used; refresh and cache Vision captions before making a keep/remove decision."
         )
     payload = {
         "benchmark": manifest["name"],
+        "kb_snapshot_id": kb_snapshot_id,
         "synthetic_labels": True,
         "human_verified": False,
         "manifest": str(manifest_path),
@@ -1276,12 +1179,8 @@ def run_benchmark(
         "top_k": top_k,
         "asset_count": len(manifest["assets"]),
         "query_count": len(manifest["queries"]),
-        "caption_sources": _caption_source_counts(
-            dict(caption_cache["asset_captions"])
-        ),
-        "query_caption_sources": _caption_source_counts(
-            dict(caption_cache["query_captions"])
-        ),
+        "caption_sources": _caption_source_counts(dict(caption_cache["asset_captions"])),
+        "query_caption_sources": _caption_source_counts(dict(caption_cache["query_captions"])),
         "vision_caption_cache": uses_vision_captions,
         "caption_generation": dict(caption_cache.get("caption_generation") or {}),
         "text_embedding_identity": current_text_embedding_identity,
@@ -1302,9 +1201,7 @@ def _print_summary(payload: dict[str, Any]) -> None:
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(
-        description="Prepare, index, and evaluate the synthetic image benchmark."
-    )
+    parser = argparse.ArgumentParser(description="Prepare, index, and evaluate the synthetic image benchmark.")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     prepare_parser = subparsers.add_parser(
@@ -1401,14 +1298,10 @@ def main() -> None:
         )
     else:
         output_json = (
-            _resolve_path(args.output_json)
-            if str(args.output_json).strip()
-            else runtime_dir / "benchmark-results.json"
+            _resolve_path(args.output_json) if str(args.output_json).strip() else runtime_dir / "benchmark-results.json"
         )
         output_csv = (
-            _resolve_path(args.output_csv)
-            if str(args.output_csv).strip()
-            else runtime_dir / "benchmark-results.csv"
+            _resolve_path(args.output_csv) if str(args.output_csv).strip() else runtime_dir / "benchmark-results.csv"
         )
         payload = run_benchmark(
             manifest_path=manifest_path,

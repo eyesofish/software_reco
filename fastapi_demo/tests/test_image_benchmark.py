@@ -45,10 +45,13 @@ class ImageBenchmarkPreparationTests(unittest.TestCase):
             image.save(target)
             return True
 
-        with TemporaryDirectory() as temp_dir, patch.object(
-            image_benchmark,
-            "_download_asset",
-            side_effect=fake_download,
+        with (
+            TemporaryDirectory() as temp_dir,
+            patch.object(
+                image_benchmark,
+                "_download_asset",
+                side_effect=fake_download,
+            ),
         ):
             runtime_dir = Path(temp_dir)
             runtime_dir.mkdir(parents=True, exist_ok=True)
@@ -187,12 +190,8 @@ class ImageBenchmarkPreparationTests(unittest.TestCase):
                 {"caption": "cached"},
             )
             summary = {
-                "manifest_sha256": image_benchmark._manifest_digest(
-                    image_benchmark.DEFAULT_MANIFEST_PATH
-                ),
-                "caption_cache_sha256": image_benchmark._sha256_file(
-                    runtime_dir / "captions.json"
-                ),
+                "manifest_sha256": image_benchmark._manifest_digest(image_benchmark.DEFAULT_MANIFEST_PATH),
+                "caption_cache_sha256": image_benchmark._sha256_file(runtime_dir / "captions.json"),
                 "text_embedding_identity": {
                     "provider": "local",
                     "model": "old-model",
@@ -278,3 +277,22 @@ class ImageBenchmarkMetricTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def test_benchmark_pins_once_and_restores_application_paths(tmp_path):
+    from software_recommend_system import kb_versions as kb
+    from software_recommend_system.config import settings
+
+    manifest = kb.ManifestStore(tmp_path / "kb_manifest.sqlite3")
+    manifest.adopt_legacy(lambda: {})
+    first = manifest.stage({"a": "v1"})
+    manifest.publish(first)
+    previous = settings.CHROMA_DB_PATH, settings.KB_MANIFEST_PATH
+    with image_benchmark._benchmark_snapshot(tmp_path) as pinned:
+        assert pinned == first and kb.current_snapshot_id() == first
+        second = manifest.stage({"a": "v2"})
+        manifest.publish(second)
+        assert kb.current_snapshot_id() == first
+        assert kb.capture_snapshot() == second
+    assert previous == (settings.CHROMA_DB_PATH, settings.KB_MANIFEST_PATH)
+    assert kb.current_snapshot_id() is None

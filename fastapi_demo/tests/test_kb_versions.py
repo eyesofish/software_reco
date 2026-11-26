@@ -173,3 +173,74 @@ def test_adoption_keeps_legacy_rows_and_excludes_failed_stage(store, monkeypatch
     current = indexer.publish_documents([doc()])["snapshot_id"]
     assert set(selected(store.text, current)["documents"]) == {"Existing original.", "Original text."}
     assert selected(store.text, kb.LEGACY) == old
+
+
+def test_parent_lookup_cannot_expand_across_revisions(store, monkeypatch):
+    monkeypatch.setattr(settings, "ENABLE_PARENT_CHILD_CHUNKING", True)
+    first = indexer.publish_documents([doc(content="Old parent sentence. " * 12)])["snapshot_id"]
+    old_ids = {meta["parent_id"] for meta in selected(store.text, first)["metadatas"]}
+    second = indexer.publish_documents([doc(content="New parent sentence. " * 12)])["snapshot_id"]
+    with kb.use_snapshot(first):
+        parents = indexer.get_parent_documents_by_ids(list(old_ids))
+        assert parents and all("Old" in item["content"] for item in parents.values())
+    with kb.use_snapshot(second):
+        assert indexer.get_parent_documents_by_ids(list(old_ids)) == {}
+    assert len(selected(store.parent, first)["ids"]) == len(old_ids)
+
+
+def test_image_assets_and_vectors_stay_immutable(store, monkeypatch):
+    from software_recommend_system import image_embedder
+
+    monkeypatch.setattr(settings, "RECALL_ENABLE_IMAGE_VECTOR", True)
+    monkeypatch.setattr(image_embedder, "embed_image_files", lambda paths: [[1.0, 0.0] for _ in paths])
+    asset = store.root / "screen.png"
+    asset.write_bytes(b"old image bytes")
+    original = doc("screen", "Old caption.")
+    original["metadata"].update(modality="image", media_type="image/png")
+    first = indexer.publish_documents([original], image_sources={"screen": asset})["snapshot_id"]
+    old = selected(store.image, first)
+    old_path = store.root / old["metadatas"][0]["asset_path"]
+    asset.write_bytes(b"new image bytes")
+    changed = doc("screen", "New caption.")
+    changed["metadata"].update(modality="image", media_type="image/png")
+    second = indexer.publish_documents([changed], image_sources={"screen": asset})["snapshot_id"]
+    current = selected(store.image, second)
+    assert old["ids"] != current["ids"]
+    assert old_path.read_bytes() == b"old image bytes"
+    assert (store.root / current["metadatas"][0]["asset_path"]).read_bytes() == b"new image bytes"
+    assert selected(store.image, first) == old and store.image.count() == 2
+    from app.api.v1.startup_ingest import _list_candidate_files
+
+    assert _list_candidate_files(store.root) == [asset]
+
+
+def test_keyword_and_text_queries_enforce_membership(store):
+    first = indexer.publish_documents([doc()])["snapshot_id"]
+    second = indexer.publish_documents([doc(content="Changed answer.")])["snapshot_id"]
+    with kb.use_snapshot(first):
+        results = tools.similarity_search("anything", k=2)
+        assert [item.content for item in results] == ["Original text."]
+        assert results[0].metadata.snapshot_id == first
+        client = Mock()
+        old, new = selected(store.text, first), selected(store.text, second)
+        client.search.return_value = {
+            "hits": {
+                "hits": [
+                    {
+                        "_id": "old",
+                        "_score": 1,
+                        "_source": {"content": "Original text.", "metadata": old["metadatas"][0]},
+                    },
+                    {
+                        "_id": "new",
+                        "_score": 2,
+                        "_source": {"content": "Changed answer.", "metadata": new["metadatas"][0]},
+                    },
+                ]
+            }
+        }
+        keyword = keyword_index.KeywordIndex(client, "test")
+        assert [item.content for item in keyword.search("anything", 5)] == ["Original text."]
+        assert "filter" in client.search.call_args.kwargs["query"]["bool"]
+    with pytest.raises(kb.SnapshotUnavailable, match="pin"):
+        kb.chroma_filter()

@@ -123,6 +123,17 @@ async def _prepare_multimodal_request(
     )
 
 
+async def _prepare_pinned_request(request_data: RecommendationRequest):
+    """Freeze the published KB before any recall."""
+    from software_recommend_system.kb_versions import capture_snapshot, use_snapshot
+
+    kb_snapshot_id = capture_snapshot()
+    with use_snapshot(kb_snapshot_id):
+        prepared = await _prepare_multimodal_request(request_data)
+    logger.info("recommend knowledge snapshot pinned: kb_snapshot_id=%s", kb_snapshot_id)
+    return kb_snapshot_id, *prepared
+
+
 def _resolve_ingested_asset(asset_path: str) -> tuple[Path, str]:
     root = Path(settings.INGEST_PATH).expanduser().resolve()
     candidate = (root / asset_path).resolve()
@@ -147,8 +158,8 @@ async def get_ingested_asset(asset_path: str):
 async def get_software_recommendation(request_data: RecommendationRequest):
     session_id = request_data.session_id or uuid4().hex
     try:
-        effective_query, persisted_user_message, image_descriptions, query_image_candidates = (
-            await _prepare_multimodal_request(request_data)
+        kb_snapshot_id, effective_query, persisted_user_message, image_descriptions, query_image_candidates = (
+            await _prepare_pinned_request(request_data)
         )
         session_state = _upsert_name_fact_from_query(session_id, request_data.query)
         known_name = (session_state.get("facts") or {}).get("user_name")
@@ -242,6 +253,7 @@ async def get_software_recommendation(request_data: RecommendationRequest):
         )
 
         state = AgentState(
+            kb_snapshot_id=kb_snapshot_id,
             user_query=effective_query,
             messages=session_messages,
             input_images=image_descriptions,
@@ -284,8 +296,8 @@ async def stream_software_recommendation(request_data: RecommendationRequest):
     async def event_gen() -> AsyncIterator[str]:
         session_id = request_data.session_id or uuid4().hex
         try:
-            effective_query, persisted_user_message, image_descriptions, query_image_candidates = (
-                await _prepare_multimodal_request(request_data)
+            kb_snapshot_id, effective_query, persisted_user_message, image_descriptions, query_image_candidates = (
+                await _prepare_pinned_request(request_data)
             )
             session_state = _upsert_name_fact_from_query(session_id, request_data.query)
             known_name = (session_state.get("facts") or {}).get("user_name")
@@ -392,6 +404,7 @@ async def stream_software_recommendation(request_data: RecommendationRequest):
             )
 
             state = AgentState(
+                kb_snapshot_id=kb_snapshot_id,
                 user_query=effective_query,
                 messages=session_messages,
                 input_images=image_descriptions,

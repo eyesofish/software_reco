@@ -220,7 +220,7 @@ def _resolve_doc_id(metadata: Any, content: str, source: str, index: int) -> str
 
 
 def _normalize_documents(documents: Iterable[Document], source_hint: str, channel: str) -> list[Document]:
-    from .document_schema import STRUCTURE_METADATA_FIELDS
+    from .document_schema import STRUCTURE_METADATA_FIELDS, VERSION_METADATA_FIELDS
 
     normalized: list[Document] = []
     for index, doc in enumerate(documents):
@@ -239,7 +239,7 @@ def _normalize_documents(documents: Iterable[Document], source_hint: str, channe
             Document(
                 content=content,
                 metadata={
-                    **{key: _get_field(metadata, key) for key in STRUCTURE_METADATA_FIELDS
+                    **{key: _get_field(metadata, key) for key in (*STRUCTURE_METADATA_FIELDS, *VERSION_METADATA_FIELDS)
                        if _get_field(metadata, key) is not None},
                     "doc_id": doc_id,
                     "source": source,

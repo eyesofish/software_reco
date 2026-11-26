@@ -36,12 +36,18 @@ def _controlled_node(node):
     """Check cancellation/deadline on both sides of each graph node."""
     def run(state, config=None):
         from .execution_control import check_for_session
+        from .kb_versions import capture_snapshot, use_snapshot
         from .performance import span
 
         session_id = state.get("session_id", "") if isinstance(state, dict) else getattr(state, "session_id", "")
         check_for_session(session_id)
-        with span("node." + node.__name__, session_id=session_id) as attributes:
+        snapshot_id = state.get("kb_snapshot_id", "") if isinstance(state, dict) else state.kb_snapshot_id
+        snapshot_id = snapshot_id or capture_snapshot()
+        with use_snapshot(snapshot_id), span("node." + node.__name__, session_id=session_id,
+                                            kb_snapshot_id=snapshot_id) as attributes:
             result = node(state)
+            if isinstance(result, dict):
+                result["kb_snapshot_id"] = snapshot_id
             if isinstance(result, dict) and "mode" in result:
                 attributes["mode"] = result["mode"]
             check_for_session(session_id)

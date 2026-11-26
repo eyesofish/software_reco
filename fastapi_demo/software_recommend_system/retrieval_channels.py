@@ -8,6 +8,7 @@ from .config import settings
 from .document_schema import Document, Metadata
 from .image_embedder import ImageEmbeddingError, embed_image_texts
 from .ingestion.indexer import get_image_collection
+from .kb_versions import chroma_filter, current_snapshot_id, visible
 from .keyword_index import get_keyword_index
 from .logging_utils import elapsed_ms, error_fields, log_event, new_trace_id, text_preview
 from .tools import _tavily_search, similarity_search
@@ -139,9 +140,7 @@ def recall_image_vector(
     image_vectors = _validated_query_embeddings(query_image_embeddings)
     if query_vectors:
         expected_dimension = len(query_vectors[0])
-        image_vectors = [
-            vector for vector in image_vectors if len(vector) == expected_dimension
-        ]
+        image_vectors = [vector for vector in image_vectors if len(vector) == expected_dimension]
     query_vectors.extend(image_vectors)
     query_modalities.extend(["image"] * len(image_vectors))
     if not query_vectors and not seed_docs:
@@ -152,6 +151,7 @@ def recall_image_vector(
         logger,
         logging.INFO,
         "search.image_vector.start",
+        kb_snapshot_id=current_snapshot_id() or "legacy",
         component="search",
         trace_id=current_trace_id,
         query=query_hint,
@@ -167,10 +167,12 @@ def recall_image_vector(
             collection = get_image_collection()
             available = max(0, int(collection.count()))
             if available > 0:
+                where = chroma_filter()
                 results = collection.query(
                     query_embeddings=query_vectors,
                     n_results=min(limit, available),
                     include=["documents", "metadatas", "distances"],
+                    **({"where": where} if where is not None else {}),
                 )
         except Exception as exc:
             log_event(
@@ -227,11 +229,7 @@ def recall_image_vector(
     ranked_list_count = 0
     for query_index, ids in enumerate(id_rows):
         ranked_list_count += 1
-        modality = (
-            query_modalities[query_index]
-            if query_index < len(query_modalities)
-            else "unknown"
-        )
+        modality = query_modalities[query_index] if query_index < len(query_modalities) else "unknown"
         documents = document_rows[query_index] if query_index < len(document_rows) else []
         metadatas = metadata_rows[query_index] if query_index < len(metadata_rows) else []
         distances = distance_rows[query_index] if query_index < len(distance_rows) else []
@@ -239,19 +237,12 @@ def recall_image_vector(
             metadata = metadatas[rank - 1] if rank - 1 < len(metadatas) else {}
             if not isinstance(metadata, dict):
                 metadata = {}
-            doc_id = str(
-                metadata.get("source_doc_id")
-                or metadata.get("doc_id")
-                or raw_id
-                or ""
-            ).strip()
+            if not visible(metadata):
+                continue
+            doc_id = str(metadata.get("source_doc_id") or metadata.get("doc_id") or raw_id or "").strip()
             if not doc_id:
                 continue
-            content = (
-                str(documents[rank - 1] or "").strip()
-                if rank - 1 < len(documents)
-                else ""
-            )
+            content = str(documents[rank - 1] or "").strip() if rank - 1 < len(documents) else ""
             try:
                 distance = float(distances[rank - 1])
             except (IndexError, TypeError, ValueError):
@@ -269,26 +260,18 @@ def recall_image_vector(
         ranked_list_count += 1
         for rank, seed_doc in enumerate(seed_docs[:limit], start=1):
             metadata = _document_metadata_dict(seed_doc)
-            doc_id = str(
-                metadata.get("doc_id")
-                or metadata.get("source_doc_id")
-                or ""
-            ).strip()
+            if not visible(metadata):
+                continue
+            doc_id = str(metadata.get("doc_id") or metadata.get("source_doc_id") or "").strip()
             if not doc_id:
                 continue
             raw_distance = metadata.get("vector_distance")
             try:
-                distance = (
-                    float(raw_distance)
-                    if isinstance(raw_distance, (int, float, str))
-                    else float("inf")
-                )
+                distance = float(raw_distance) if isinstance(raw_distance, (int, float, str)) else float("inf")
             except (TypeError, ValueError):
                 distance = float("inf")
             modalities = {
-                str(item).strip()
-                for item in list(metadata.get("query_modalities") or ["image"])
-                if str(item).strip()
+                str(item).strip() for item in list(metadata.get("query_modalities") or ["image"]) if str(item).strip()
             }
             add_ranked_result(
                 doc_id=doc_id,
@@ -304,42 +287,27 @@ def recall_image_vector(
     output_documents: list[Document] = []
     for doc_id, entry in fused.items():
         metadata = entry["metadata"] if isinstance(entry["metadata"], dict) else {}
-        score = (
-            min(1.0, float(entry["rrf_score"]) / max_rrf_score)
-            if max_rrf_score > 0
-            else 0.0
-        )
+        score = min(1.0, float(entry["rrf_score"]) / max_rrf_score) if max_rrf_score > 0 else 0.0
         output_documents.append(
             Document(
                 content=str(entry["content"] or metadata.get("filename") or doc_id),
                 metadata=Metadata(
+                    **{
+                        key: metadata[key]
+                        for key in ("document_id", "version", "snapshot_id", "status", "chunk_id", "parent_id")
+                        if key in metadata
+                    },
                     source=str(metadata.get("source", "image_vector")),
                     doc_id=doc_id,
                     retrieval_source="image_vector",
                     channel="image_vector",
                     channel_score=score,
                     score=score,
-                    filename=(
-                        str(metadata["filename"])
-                        if metadata.get("filename")
-                        else None
-                    ),
-                    media_type=(
-                        str(metadata["media_type"])
-                        if metadata.get("media_type")
-                        else None
-                    ),
+                    filename=(str(metadata["filename"]) if metadata.get("filename") else None),
+                    media_type=(str(metadata["media_type"]) if metadata.get("media_type") else None),
                     modality=str(metadata.get("modality", "image")),
-                    asset_path=(
-                        str(metadata["asset_path"])
-                        if metadata.get("asset_path")
-                        else None
-                    ),
-                    asset_url=(
-                        str(metadata["asset_url"])
-                        if metadata.get("asset_url")
-                        else None
-                    ),
+                    asset_path=(str(metadata["asset_path"]) if metadata.get("asset_path") else None),
+                    asset_url=(str(metadata["asset_url"]) if metadata.get("asset_url") else None),
                     tags=_normalize_tags(metadata.get("tags")),
                     source_ranking=_safe_float(
                         metadata.get("source_ranking"),
@@ -349,11 +317,7 @@ def recall_image_vector(
                     query_modalities=sorted(entry["modalities"]),
                     channel_rank=int(entry["best_rank"]),
                     fusion_score=score,
-                    vector_distance=(
-                        float(entry["distance"])
-                        if math.isfinite(float(entry["distance"]))
-                        else None
-                    ),
+                    vector_distance=(float(entry["distance"]) if math.isfinite(float(entry["distance"])) else None),
                 ),
                 score=score,
             )
@@ -458,9 +422,7 @@ def recall_memory(
 
     for index, item in enumerate(memory_context, start=1):
         content = str(
-            _get_field(item, "content", "")
-            or _get_field(item, "text", "")
-            or _get_field(item, "summary", "")
+            _get_field(item, "content", "") or _get_field(item, "text", "") or _get_field(item, "summary", "")
         ).strip()
         if not content:
             continue

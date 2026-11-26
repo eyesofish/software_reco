@@ -86,6 +86,7 @@ def fingerprint(settings, manifest: Path = MANIFEST, *, offline: bool = False) -
     for key, value in settings.model_dump().items():
         if any(part in key for part in ("API_KEY", "PASSWORD", "SECRET")) or key in {
             "CHROMA_DB_PATH",
+            "KB_MANIFEST_PATH",
             "INGEST_PATH",
             "SESSION_STATE_FILE",
             "SESSION_STATE_DB",
@@ -167,6 +168,7 @@ def environment_for_server(runtime: Path, *, offline: bool) -> dict[str, str]:
             "PERFORMANCE_OFFLINE": "1" if offline else "0",
             "PERFORMANCE_MANIFEST": str(MANIFEST),
             "CHROMA_DB_PATH": str(runtime / "chroma"),
+            "KB_MANIFEST_PATH": str(runtime / "kb_manifest.sqlite3"),
             "INGEST_PATH": str(ingest),
             "SESSION_STATE_FILE": str(runtime / "sessions.json"),
             "SESSION_STATE_DB": str(runtime / "sessions.sqlite3"),
