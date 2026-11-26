@@ -37,6 +37,9 @@ public class RecommendTaskEntity {
     @Column(nullable = false, length = 32)
     private RecommendTaskStatus status;
 
+    @Column(name = "pending_input", columnDefinition = "TEXT")
+    private String pendingInput;
+
     @Column(name = "sub_questions", columnDefinition = "TEXT")
     private String subQuestions;
 
