@@ -10,6 +10,8 @@ Spring checks ownership and conflicts among `conversation_id`, `session_id`, and
 
 For an unbound target, Jev accepts a decision at probability >=0.90. Probability >=0.60 and <0.90 receives one review by the existing router LLM, whose acceptance threshold is 0.80. Lower scores or unresolved labels ask the user. Review calls share a maximum of three per task. Transport failure is recorded separately: unknown attribution asks for a target; a known target uses conservative RAG. Structured targets cannot be changed by either model.
 
+The UI defaults to the current conversation. Auto attribution is optional. Attribution clarification occurs before persistence. Execution clarification is a separate `PENDING_INPUT` task state and resumes the same checkpoint through `/api/v1/recommend/clarify/stream`; `/api/v1/recommend/tasks/{taskId}/cancel` cancels a waiting task. A conversation cannot start another task while its current task is waiting.
+
 ## Bounded dynamic execution
 
 Set `DYNAMIC_ROUTING_ENABLE=true` only for the admitted live candidate cohort. Decision nodes checkpoint before interrupt nodes. Jev selects only an allowed step after planning or evidence assessment: retrieve, refine, answer, or clarify. The graph restricts answering to adequate evidence except at a hard limit, where the response explicitly marks incomplete evidence. Fact QA goes directly to answering; comparison and analysis can generate candidates.
@@ -70,3 +72,7 @@ After a passing historical holdout, run shadow on live traffic and review labele
 Copy the repository's `routing.env.example` to `.runtime/routing.env` for shared controls in `start-all.ps1` and Docker Compose. Keep the provider key in `fastapi_demo/.env`. Local launch needs an absolute report path; Compose mounts `.runtime/routing/` at `/data/routing` in both services. Compose keeps source documents read-only and stores immutable image assets in the writable `fastapi_versioned_assets` volume mounted under `.versions`.
 
 Promote through 1%, 5%, 25%, and 100%, with at least 24 hours of reviewed traffic at each stage. Before each increase, verify the session-risk bound, invariant violations, fallback/clarification rates, P95/P99 latency, cost, pending-task behavior, and snapshot consistency. This is an operator-controlled rollout; changing a percentage does not automatically certify the preceding observation window. Roll back to shadow on a wrong-session incident or a breached gate. Unknown token usage/pricing stays unknown rather than zero.
+
+## Verification
+
+Python tests cover classifier thresholds/failures, shadow isolation, risk-gate statistics, actual LangGraph interruption/resume, bounded active time, query protection/recall, and Manifest publication/pinning. Java tests cover preflight ownership/persistence ordering and task states; React tests cover attribution, waiting tasks, resume/cancel, and multimodal messages. Offline tests use fixtures and blocked external network access; they do not measure real Jev quality or throughput.

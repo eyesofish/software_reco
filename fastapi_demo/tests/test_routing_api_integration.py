@@ -18,6 +18,7 @@ from app.api.v1.handlers import recommend_orchestrator as orchestration
 from app.api.v1.models import (
     CancelWaitingRequest,
     ClarificationRequest,
+    RecommendationConfirmRequest,
     RecommendationRequest,
 )
 from app.api.v1.stream_utils import _execution_budget, run_agent_async
@@ -252,6 +253,51 @@ async def test_double_stream_release_cannot_unlock_another_resume():
     api.release_resume(lease)
     assert raw.locked()
     raw.release()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stream", [False, True])
+@pytest.mark.parametrize("shortcut", [False, True])
+async def test_old_confirmation_preserves_nested_task_input(monkeypatch, no_writes, stream, shortcut):
+    from app.api.v1 import routes
+
+    calls = {"decide": 0, "pause": 0, "finish": 0}
+    graph = graph_with_pause(calls, first="confirmation", second="input")
+    session = f"confirm-nested-{stream}-{shortcut}"
+    await run_agent_async(graph, {"timeout_budget": 3}, config={"configurable": {"thread_id": session}})
+    monkeypatch.setattr(api, "_graph", lambda: graph)
+    monkeypatch.setattr(routes, "AGENT", graph)
+    monkeypatch.setattr(api, "resolve_routing", Mock(side_effect=AssertionError("resume must skip classification")))
+    if shortcut:
+        endpoint = routes.stream_software_recommendation if stream else routes.get_software_recommendation
+        request = RecommendationRequest(session_id=session, query="确认")
+    else:
+        endpoint = routes.confirm_software_recommendation_stream if stream else routes.confirm_software_recommendation
+        request = RecommendationConfirmRequest(session_id=session)
+    response = await endpoint(request)
+    if stream:
+        frames = [frame async for frame in response.body_iterator]
+        assert "event: resume_accepted" in frames[0]
+        assert "event: awaiting_input" in frames[-1]
+        assert not any("event: final" in frame for frame in frames)
+    else:
+        assert response.status == "awaiting_input"
+        assert response.pending_input["clarification_id"] == "clarify-2"
+    assert calls["decide"] == 1
+    assert calls["finish"] == 0
+    no_writes[1].assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_no_pending_short_confirmation_does_not_create_session_or_classify(monkeypatch):
+    from app.api.v1 import routes
+
+    monkeypatch.setattr(api, "resolve_routing", Mock(side_effect=AssertionError("no classification")))
+    monkeypatch.setattr(routes, "_upsert_name_fact_from_query", Mock(side_effect=AssertionError("no session write")))
+    response = await routes.get_software_recommendation(RecommendationRequest(query="确认"))
+    assert response.status == "success"
+    assert response.session_id is None
+    assert "没有待确认任务" in response.final_answer
 
 
 def test_cohort_uses_same_unsigned_sha256_bucket_as_java(monkeypatch):
