@@ -4,6 +4,8 @@ import org.springframework.security.core.annotation.AuthenticationPrincipal;
 import org.springframework.security.oauth2.jwt.Jwt;
 import com.example.demo.auth.BusinessAccess;
 import com.example.demo.routing.RoutingPreflight;
+import com.example.demo.conversation.service.ChatSubmissionService;
+import com.example.demo.conversation.service.ChatSubmissionService.RequestKey;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.support.TransactionTemplate;
@@ -27,6 +29,7 @@ import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
+import org.springframework.web.bind.annotation.RequestHeader;
 import org.springframework.web.bind.annotation.RestController;
 import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 import org.springframework.web.server.ResponseStatusException;
@@ -83,6 +86,7 @@ public class ChatController {
     private final ConversationService conversationService;
     private final RecommendTaskStateService recommendTaskStateService;
     private final TransactionTemplate transactions;
+    private final ChatSubmissionService submissions;
 
     public ChatController(
             FastApiClient fastApiClient,
@@ -90,7 +94,8 @@ public class ChatController {
             RoutingPreflight routing,
             ConversationService conversationService,
             RecommendTaskStateService recommendTaskStateService,
-            PlatformTransactionManager transactionManager
+            PlatformTransactionManager transactionManager,
+            ChatSubmissionService submissions
     ) {
         this.fastApiClient = fastApiClient;
         this.access = access;
@@ -99,6 +104,7 @@ public class ChatController {
         this.recommendTaskStateService = recommendTaskStateService;
         this.transactions = new TransactionTemplate(transactionManager);
         this.transactions.setTimeout(15);
+        this.submissions = submissions;
     }
 
     @Transactional
@@ -232,10 +238,15 @@ public class ChatController {
     }
 
     @PostMapping(value = "/api/chat/stream", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
-    public SseEmitter chatStream(@RequestBody OllamaChatRequest request, @AuthenticationPrincipal Jwt jwt) {
+    public SseEmitter chatStream(@RequestBody OllamaChatRequest request, @AuthenticationPrincipal Jwt jwt,
+            @RequestHeader(value = "X-Request-Id", required = false) String requestId) {
         String owner = jwt.getSubject();
-        String correlationId = UUID.randomUUID().toString();
-        ChatPreparation result = routeAndPrepare(owner, correlationId, request);
+        RequestKey key = submissions.key(requestId, request);
+        String correlationId = requestId == null ? UUID.randomUUID().toString() : requestId;
+        var gate = submissions.prepareOnce(owner, key, ChatPreparation.class,
+                () -> routeAndPrepare(owner, key, correlationId, request));
+        ChatPreparation result = gate.value();
+        if (result instanceof ExistingChat existing) return submissions.replay(owner, existing.taskId());
         SseEmitter emitter = new SseEmitter(0L);
         if (result instanceof RoutingPrompt prompt) {
             sendSseEvent(emitter, "routing_clarification", prompt.payload());
@@ -243,6 +254,7 @@ public class ChatController {
             return emitter;
         }
         PreparedChat chat = (PreparedChat) result;
+        if (!gate.leader()) return submissions.replay(owner, chat.taskId());
         String conversationId = chat.conversationId();
         String taskId = chat.taskId();
         logger.info("chat.committed request_id={} conversation_id={} task_id={} stage=accept",
@@ -275,12 +287,15 @@ public class ChatController {
         return emitter;
     }
 
-    private sealed interface ChatPreparation permits PreparedChat, RoutingPrompt { }
+    private sealed interface ChatPreparation permits PreparedChat, ExistingChat, RoutingPrompt { }
+    private record ExistingChat(String taskId) implements ChatPreparation { }
     private record RoutingPrompt(Map<String, Object> payload) implements ChatPreparation { }
     private record PreparedChat(String taskId, String conversationId, Map<String, String> facts,
             RecommendRequest agentRequest, RecommendStreamEvent localEvent) implements ChatPreparation { }
 
-    private ChatPreparation routeAndPrepare(String owner, String correlationId, OllamaChatRequest request) {
+    private ChatPreparation routeAndPrepare(String owner, RequestKey key, String correlationId, OllamaChatRequest request) {
+        String original = submissions.findReplay(owner, key);
+        if (original != null) return new ExistingChat(original);
         List<ImageAttachment> images = normalizeImages(request.getImages());
         String rawQuery = extractLastUserMessage(request.getMessages());
         String query = MultimodalSupport.queryOrDefault(rawQuery, images);
@@ -290,7 +305,7 @@ public class ChatController {
                 request.getCurrentConversationId(), 60);
         if (route.needsClarification()) return new RoutingPrompt(route.clarificationPayload());
         try {
-            return transactions.execute(tx -> prepareChat(owner, request, route, query, images));
+            return transactions.execute(tx -> prepareChat(owner, key, request, route, query, images));
         } catch (RuntimeException error) {
             logChatFailure(correlationId, route.conversationId(), null, "accept", error);
             if (error instanceof ResponseStatusException statusError) throw statusError;
@@ -298,8 +313,10 @@ public class ChatController {
         }
     }
 
-    private ChatPreparation prepareChat(String owner, OllamaChatRequest request,
+    private ChatPreparation prepareChat(String owner, RequestKey key, OllamaChatRequest request,
             RoutingPreflight.Outcome route, String query, List<ImageAttachment> images) {
+        String replayId = submissions.reserve(owner, key);
+        if (replayId != null) return new ExistingChat(replayId);
         RecommendTaskStateResponse task = recommendTaskStateService.createStreamingTask(owner, route.conversationId(), query,
                 60, 3, request.getModel());
         String conversationId = task.getConversationId();
@@ -309,6 +326,7 @@ public class ChatController {
         extractFactsForSessionUpdate(query).forEach((factKey, value) ->
                 conversationService.upsertFact(conversationId, factKey, value, message.getId(), 0.99d));
         Map<String, String> facts = conversationService.getFacts(conversationId);
+        submissions.bind(owner, key, taskId);
         RecommendStreamEvent local = null;
         String knownName = facts.get("user_name");
         if (images.isEmpty() && isAskingUserName(query) && knownName != null && !knownName.isBlank()) {

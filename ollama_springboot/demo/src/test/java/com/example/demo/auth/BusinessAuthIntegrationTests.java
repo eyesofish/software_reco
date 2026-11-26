@@ -27,6 +27,8 @@ class BusinessAuthIntegrationTests {
     static final List<String> CALLS = new CopyOnWriteArrayList<>();
     static final List<String> KEYS = new CopyOnWriteArrayList<>();
     static final Map<String, Integer> CLARIFICATION_REJECTIONS = new java.util.concurrent.ConcurrentHashMap<>();
+    static final Map<String, Runnable> BEFORE_STREAM_REPLY = new java.util.concurrent.ConcurrentHashMap<>();
+    static final Map<String, Runnable> DURING_FACT_SYNC = new java.util.concurrent.ConcurrentHashMap<>();
     static final HttpServer AGENT = createAgent();
     @Autowired TestRestTemplate http;
     @Autowired JdbcTemplate database;
@@ -56,6 +58,10 @@ class BusinessAuthIntegrationTests {
                 }
                 JsonNode request = JSON.readTree(exchange.getRequestBody().readAllBytes());
                 String session = request == null ? "" : request.path("session_id").asText();
+                if (path.contains("/session-state/") && "PUT".equals(exchange.getRequestMethod())) {
+                    Runnable observer = DURING_FACT_SYNC.remove(path.substring(path.lastIndexOf('/') + 1));
+                    if (observer != null) observer.run();
+                }
                 Integer rejection = path.contains("clarify") ? CLARIFICATION_REJECTIONS.remove(session) : null;
                 if (rejection != null) {
                     if (rejection > 0) exchange.sendResponseHeaders(rejection, -1);
@@ -68,6 +74,8 @@ class BusinessAuthIntegrationTests {
                     exchange.sendResponseHeaders(200, image.length);
                     exchange.getResponseBody().write(image); exchange.close(); return;
                 } else if (path.endsWith("stream")) {
+                    Runnable observer = BEFORE_STREAM_REPLY.remove(session);
+                    if (observer != null) observer.run();
                     boolean pending = !path.contains("confirm") && request.path("query").asText().contains("needs confirmation");
                     result = "event: meta\ndata: {\"type\":\"meta\",\"session_id\":\"" + session + "\"}\n\n";
                     if (path.contains("clarify")) result = "event: resume_accepted\ndata: " + JSON.writeValueAsString(Map.of(
@@ -120,6 +128,124 @@ class BusinessAuthIntegrationTests {
         var response = call(HttpMethod.POST, "/api/v1/conversations", token, Map.of());
         assertThat(response.getStatusCode().value()).isEqualTo(201);
         return json(response).path("conversation_id").asText();
+    }
+
+    ResponseEntity<String> sendChat(String token, String conversationId, String text, String requestId) {
+        var body = new HashMap<String, Object>();
+        body.put("messages", List.of(Map.of("role", "user", "content", text)));
+        if (conversationId != null) body.put("conversation_id", conversationId);
+        var headers = new HttpHeaders();
+        headers.setContentType(MediaType.APPLICATION_JSON);
+        headers.setBearerAuth(token);
+        headers.set("X-Request-Id", requestId);
+        return http.postForEntity("/api/chat/stream", new HttpEntity<>(body, headers), String.class);
+    }
+
+    long messageCount(String conversationId, String role) {
+        return database.queryForObject("SELECT count(*) FROM conversation_messages WHERE conversation_id=? AND role=?",
+                Long.class, conversationId, role);
+    }
+
+    @Test void newChatRetriesReturnOriginalTaskAndDifferentKeysStartNewTurns() throws Exception {
+        String token = login("alice"), key = UUID.randomUUID().toString();
+        long initialConversations = conversations.count(), initialTasks = tasks.count();
+        int initialRuns = Collections.frequency(CALLS, "/api/v1/recommend/stream");
+        var first = sendChat(token, null, "normal question", key);
+        assertThat(first.getBody()).contains("event:final");
+        String taskId = database.queryForObject("SELECT task_id FROM chat_submissions WHERE request_id=?", String.class, key);
+        String conversationId = database.queryForObject("SELECT conversation_id FROM recommend_tasks WHERE id=?", String.class, taskId);
+        assertThat(sendChat(token, null, "normal question", key).getBody())
+                .contains("event:final", taskId, conversationId, "Hello world");
+        assertThat(sendChat(token, null, "changed question", key).getStatusCode().value()).isEqualTo(409);
+        assertThat(conversations.count()).isEqualTo(initialConversations + 1);
+        assertThat(tasks.count()).isEqualTo(initialTasks + 1);
+        assertThat(messageCount(conversationId, "user")).isOne();
+        assertThat(messageCount(conversationId, "assistant")).isOne();
+        assertThat(Collections.frequency(CALLS, "/api/v1/recommend/stream")).isEqualTo(initialRuns + 1);
+        assertThat(sendChat(token, conversationId, "normal question", UUID.randomUUID().toString()).getBody()).contains("event:final");
+        assertThat(messageCount(conversationId, "user")).isEqualTo(2);
+        assertThat(Collections.frequency(CALLS, "/api/v1/recommend/stream")).isEqualTo(initialRuns + 2);
+    }
+
+    @Test void runningRetryRestoresTheTaskWhileTheFirstStreamIsOpen() throws Exception {
+        String token = login("alice"), id = conversation(token), key = UUID.randomUUID().toString();
+        var generating = new java.util.concurrent.CountDownLatch(1);
+        var finish = new java.util.concurrent.CountDownLatch(1);
+        BEFORE_STREAM_REPLY.put(id, () -> {
+            generating.countDown();
+            try { finish.await(15, java.util.concurrent.TimeUnit.SECONDS); }
+            catch (InterruptedException error) { Thread.currentThread().interrupt(); }
+        });
+        var pool = java.util.concurrent.Executors.newFixedThreadPool(2);
+        try {
+            var first = pool.submit(() -> sendChat(token, id, "one logical send", key));
+            assertThat(generating.await(10, java.util.concurrent.TimeUnit.SECONDS)).isTrue();
+            var replay = pool.submit(() -> sendChat(token, id, "one logical send", key));
+            String task = database.queryForObject("SELECT task_id FROM chat_submissions WHERE request_id=?", String.class, key);
+            assertThat(replay.get(5, java.util.concurrent.TimeUnit.SECONDS).getBody()).contains(task, id, "replayed");
+            finish.countDown();
+            assertThat(first.get(10, java.util.concurrent.TimeUnit.SECONDS).getBody()).contains("event:final", task);
+            assertThat(tasks.findByConversation_IdOrderByCreatedAtDesc(id)).hasSize(1);
+            assertThat(messageCount(id, "user")).isOne();
+        } finally { finish.countDown(); pool.shutdownNow(); }
+    }
+
+    @Test void finalReplyPreservesEditsAndHonorsDeletionOrAnEarlierFailure() throws Exception {
+        String token = login("alice");
+        String renamed = conversation(token);
+        BEFORE_STREAM_REPLY.put(renamed, () -> database.update("UPDATE conversations SET title=?, pinned=true WHERE id=?", "edited", renamed));
+        assertThat(sendChat(token, renamed, "recommend", UUID.randomUUID().toString()).getBody()).contains("event:final");
+        var edited = conversations.findById(renamed).orElseThrow();
+        assertThat(edited.getTitle()).isEqualTo("edited");
+        assertThat(edited.isPinned()).isTrue();
+        for (boolean delete : List.of(false, true)) {
+            String id = conversation(token);
+            BEFORE_STREAM_REPLY.put(id, () -> {
+                if (delete) database.update("UPDATE conversations SET deleted=true, archived=true WHERE id=?", id);
+                else database.update("UPDATE recommend_tasks SET status='FAILED', error_message='stalled' WHERE conversation_id=?", id);
+            });
+            var stream = sendChat(token, id, "recommend", UUID.randomUUID().toString());
+            assertThat(stream.getBody()).contains("event:error").doesNotContain("event:final");
+            assertThat(tasks.findByConversation_IdOrderByCreatedAtDesc(id).getFirst().getStatus().name()).isEqualTo("FAILED");
+            assertThat(messageCount(id, "assistant")).isZero();
+            assertThat(conversations.findById(id).orElseThrow().isDeleted()).isEqualTo(delete);
+        }
+    }
+
+    @Test void cleanEofPersistsPartialTextAndReleasesTheConversation() throws Exception {
+        String token = login("alice"), id = conversation(token);
+        var stream = sendChat(token, id, "end before final", UUID.randomUUID().toString());
+        assertThat(stream.getBody()).contains("event:final", "\"incomplete\"", "Partial");
+        var task = tasks.findByConversation_IdOrderByCreatedAtDesc(id).getFirst();
+        assertThat(task.getStatus().name()).isEqualTo("INCOMPLETE");
+        assertThat(task.getFinalResult()).isEqualTo("Partial");
+        assertThat(messageCount(id, "assistant")).isOne();
+        assertThat(sendChat(token, id, "next question", UUID.randomUUID().toString()).getStatusCode().value()).isEqualTo(200);
+    }
+
+    @Test void failedTerminalWriteRollsBackTheAssistantMessage() throws Exception {
+        String token = login("alice"), id = conversation(token);
+        database.execute("ALTER TABLE recommend_tasks ADD CONSTRAINT test_final_write CHECK (conversation_id <> '" + id + "' OR status <> 'DONE')");
+        try {
+            var stream = sendChat(token, id, "recommend", UUID.randomUUID().toString());
+            assertThat(stream.getBody()).contains("event:error").doesNotContain("event:final", "test_final_write");
+            assertThat(messageCount(id, "assistant")).isZero();
+            assertThat(tasks.findByConversation_IdOrderByCreatedAtDesc(id).getFirst().getStatus().name()).isEqualTo("FAILED");
+        } finally {
+            database.execute("ALTER TABLE recommend_tasks DROP CONSTRAINT test_final_write");
+        }
+    }
+
+    @Test void remoteFactSyncCanAcquireTheCommittedConversationFromAnotherConnection() throws Exception {
+        String token = login("alice"), id = conversation(token);
+        var observed = new java.util.concurrent.atomic.AtomicBoolean();
+        DURING_FACT_SYNC.put(id, () -> {
+            // An independent connection during HTTP must see the task and acquire its conversation immediately.
+            var row = database.queryForList("SELECT id FROM conversations WHERE id=? FOR UPDATE NOWAIT", id);
+            observed.set(row.size() == 1 && tasks.findByConversation_IdOrderByCreatedAtDesc(id).size() == 1);
+        });
+        assertThat(sendChat(token, id, "recommend", UUID.randomUUID().toString()).getBody()).contains("event:final");
+        assertThat(observed.get()).isTrue();
     }
 
     @Test void loginHashesPasswordsAndRejectsAnonymousEntry() throws Exception {
