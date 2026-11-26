@@ -396,6 +396,12 @@ Business requests require the same Bearer header. Unauthorized resources return
 Unknown nonempty conversation IDs are no longer created automatically; create
 a conversation through Spring first, or omit the ID for a new chat.
 
+For `POST /api/chat/stream`, send one UUID in `X-Request-Id` per user turn.
+Reuse it after a lost response. The server returns the original task and returns
+HTTP 409 if that key is reused with a different payload. A running replay
+includes its task ID for polling `GET /api/v1/tasks/{taskId}`. Old clients can
+still send requests without the header. Those submissions have no retry guarantee.
+
 **Upgrading an existing Compose deployment.** The old Spring database lived
 inside its JVM. Export any history you need from the running instance before
 replacing it. An instance that already exited has no H2 data volume to restore.
@@ -406,6 +412,25 @@ Use the configured legacy paths if you moved these files. The first start import
 each store into SQLite in the `fastapi_chat` volume. Keep the originals until
 you have checked the imported sessions. Back up both the PostgreSQL and FastAPI
 stores. Removing the named volumes also removes their persisted data.
+
+Offline, repeatable verification without model-provider calls:
+
+```powershell
+python scripts/verify_auth_demo.py --build
+```
+
+It starts a temporary real Spring server and controlled HTTP Agent stub, logs in
+both users, checks data isolation and denied upstream calls, streams and resumes
+a task, and saves a credential-free report in `.runtime/auth-demo-verification.json`.
+See [the authentication implementation plan](plan/spring-business-auth/README.md) for design and verification details.
+
+To verify deployment storage, point `CHAT_TEST_DB_URL` (a JDBC URL), `DB_USER`
+and `DB_PASSWORD` at a **dedicated PostgreSQL test database**. Then run
+`python scripts/verify_auth_demo.py --build --postgres-restart`. It stops and
+starts the Spring JVM, signs in and reads the original task and reply. For the
+HTTP retry, rollback, soft deletion and long-history checks, use a separate test
+database with the same variables, set `SPRING_PROFILES_ACTIVE=postgres`, and run
+`mvn -f ollama_springboot/demo/pom.xml -Dtest=BusinessAuthIntegrationTests test`.
 
 ### Service authentication (FastAPI)
 
