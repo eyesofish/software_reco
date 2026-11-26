@@ -11,6 +11,7 @@ from evaluation.performance_runner import (
     execute_case,
     load_manifest,
     managed_server,
+    profile_settings,
     read_trace,
     request_stream,
     write_reports,
@@ -25,6 +26,7 @@ def server(tmp_path_factory):
         managed_server(output, offline=True) as (url, setup),
         httpx.Client(
             timeout=20,
+            headers={"X-API-Key": profile_settings(offline=True).API_KEY},
             trust_env=False,
         ) as client,
     ):
@@ -82,6 +84,12 @@ def test_model_failure_is_not_accepted_as_success(server):
     assert "missing_answer_token" in result["error"]
 
 
+def test_offline_server_keeps_service_key_authentication(server):
+    url, _, _, _ = server
+    response = httpx.post(url + "/api/v1/recommend", json={"query": "Hello"}, trust_env=False)
+    assert response.status_code == 401
+
+
 def test_http_stream_timeout_is_failure_even_with_http_200(server):
     url, client, _, _ = server
     observation, measurement = request_stream(
@@ -107,7 +115,9 @@ async def test_capacity_and_disconnect_cleanup(server):
     url, _, output, _ = server
     # Construct the shared client before the occupancy deadline. Client setup is
     # synchronous and can otherwise consume the timer while creating four clients.
-    async with httpx.AsyncClient(timeout=15, trust_env=False) as client:
+    async with httpx.AsyncClient(
+        timeout=15, headers={"X-API-Key": profile_settings(offline=True).API_KEY}, trust_env=False,
+    ) as client:
         started = [asyncio.Event() for _ in range(4)]
         release = asyncio.Event()
 

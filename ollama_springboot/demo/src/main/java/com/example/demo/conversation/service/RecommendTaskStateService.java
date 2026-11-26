@@ -78,9 +78,9 @@ public class RecommendTaskStateService {
     }
 
     @Transactional
-    public ConversationCreateResponse createConversation(String title, String modelName) {
-        ConversationEntity conversation = conversationService.ensureConversation(
-                null,
+    public ConversationCreateResponse createConversation(String owner, String title, String modelName) {
+        ConversationEntity conversation = conversationService.ensureOwnedConversation(
+                owner, null,
                 firstNonBlank(title, "New Conversation"),
                 modelName
         );
@@ -92,6 +92,7 @@ public class RecommendTaskStateService {
 
     @Transactional
     public RecommendTaskCreateOutcome createRecommendTask(
+            String owner,
             String conversationId,
             String query,
             Integer timeout,
@@ -99,6 +100,7 @@ public class RecommendTaskStateService {
             String modelName
     ) {
         return createRecommendTask(
+                owner,
                 conversationId,
                 query,
                 timeout,
@@ -110,6 +112,7 @@ public class RecommendTaskStateService {
 
     @Transactional
     public RecommendTaskCreateOutcome createRecommendTask(
+            String owner,
             String conversationId,
             String query,
             Integer timeout,
@@ -122,7 +125,7 @@ public class RecommendTaskStateService {
             throw new IllegalArgumentException("query is required");
         }
 
-        ConversationEntity conversation = conversationService.ensureConversation(conversationId, normalizedQuery, modelName);
+        ConversationEntity conversation = conversationService.ensureOwnedConversation(owner, conversationId, normalizedQuery, modelName);
 
         RecommendResponse fastapiResponse = null;
         String errorMessage = null;
@@ -195,6 +198,7 @@ public class RecommendTaskStateService {
 
     @Transactional
     public RecommendTaskStateResponse createStreamingTask(
+            String owner,
             String conversationId,
             String query,
             Integer timeout,
@@ -206,7 +210,7 @@ public class RecommendTaskStateService {
             throw new IllegalArgumentException("query is required");
         }
 
-        ConversationEntity conversation = conversationService.ensureConversation(conversationId, normalizedQuery, modelName);
+        ConversationEntity conversation = conversationService.ensureOwnedConversation(owner, conversationId, normalizedQuery, modelName);
 
         RecommendTaskEntity task = new RecommendTaskEntity();
         task.setConversation(conversation);

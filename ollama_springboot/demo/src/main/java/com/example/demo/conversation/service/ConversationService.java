@@ -44,6 +44,7 @@ public class ConversationService {
 
     @Transactional(readOnly = true)
     public ConversationApiModels.ListResponse list(
+            String ownerUserId,
             int page,
             int pageSize,
             String q,
@@ -54,6 +55,7 @@ public class ConversationService {
         Specification<ConversationEntity> spec = (root, query, cb) -> {
             List<Predicate> predicates = new ArrayList<>();
             predicates.add(cb.isFalse(root.get("deleted")));
+            predicates.add(cb.equal(root.get("ownerUserId"), ownerUserId));
             if (!includeArchived) {
                 predicates.add(cb.isFalse(root.get("archived")));
             }
@@ -98,7 +100,7 @@ public class ConversationService {
     }
 
     @Transactional
-    public ConversationApiModels.CreateResponse create(ConversationApiModels.CreateRequest request) {
+    public ConversationApiModels.CreateResponse create(String ownerUserId, ConversationApiModels.CreateRequest request) {
         String role = normalizeRole(request.firstMessage().role());
         if (!"user".equals(role)) {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "first_message.role must be user");
@@ -106,6 +108,7 @@ public class ConversationService {
         String content = request.firstMessage().content().trim();
 
         ConversationEntity conversation = new ConversationEntity();
+        conversation.setOwnerUserId(ownerUserId);
         conversation.setTitle(resolveTitle(request.title(), content));
         conversation.setPreview(content.length() > 500 ? content.substring(0, 500) : content);
         conversation.setModelName(trimToNull(request.model()));
@@ -185,20 +188,17 @@ public class ConversationService {
     }
 
     @Transactional
-    public ConversationEntity ensureConversation(String id, String titleSeed, String modelName) {
+    public ConversationEntity ensureOwnedConversation(String owner, String id, String titleSeed, String modelName) {
+        if (owner == null || owner.isBlank()) throw new IllegalArgumentException("owner is required");
         String normalizedId = trimToNull(id);
         if (normalizedId != null) {
-            return conversationRepository.findByIdAndDeletedFalse(normalizedId)
-                    .orElseGet(() -> {
-                        ConversationEntity created = new ConversationEntity();
-                        created.setId(normalizedId);
-                        created.setTitle(resolveTitle(titleSeed, titleSeed));
-                        created.setModelName(trimToNull(modelName));
-                        return conversationRepository.save(created);
-                    });
+            ConversationEntity existing = findActiveConversation(normalizedId);
+            if (!owner.equals(existing.getOwnerUserId()))
+                throw new ResponseStatusException(HttpStatus.NOT_FOUND, "Conversation not found");
+            return existing;
         }
-
         ConversationEntity created = new ConversationEntity();
+        created.setOwnerUserId(owner);
         created.setTitle(resolveTitle(titleSeed, titleSeed));
         created.setModelName(trimToNull(modelName));
         return conversationRepository.save(created);
@@ -207,6 +207,7 @@ public class ConversationService {
     @Transactional(readOnly = true)
     public ConversationEntity findActiveConversation(String id) {
         return conversationRepository.findByIdAndDeletedFalse(id)
+                .filter(c -> c.getOwnerUserId() != null)
                 .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Conversation not found"));
     }
 

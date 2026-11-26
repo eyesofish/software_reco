@@ -7,6 +7,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.core.ParameterizedTypeReference;
 import org.springframework.http.HttpEntity;
 import org.springframework.http.HttpHeaders;
@@ -19,6 +20,7 @@ import org.springframework.web.client.RestTemplate;
 import org.springframework.web.reactive.function.client.WebClient;
 import reactor.core.publisher.Flux;
 import reactor.core.Disposable;
+import reactor.core.scheduler.Schedulers;
 
 import java.util.HashMap;
 import java.util.LinkedHashMap;
@@ -39,17 +41,19 @@ public class FastApiClient {
     private final String confirmUrl;
     private final String confirmStreamUrl;
     private final String sessionStateUrl;
+    private final java.time.Duration sessionSyncTimeout;
 
     public FastApiClient(
-            RestTemplate restTemplate,
-            WebClient webClient,
+            @Qualifier("agentRestTemplate") RestTemplate restTemplate,
+            @Qualifier("agentWebClient") WebClient webClient,
             ObjectMapper objectMapper,
             @Value("${app.fastapi.base-url}") String baseUrl,
             @Value("${app.fastapi.recommend-path}") String recommendPath,
             @Value("${app.fastapi.recommend-stream-path:/api/v1/recommend/stream}") String recommendStreamPath,
             @Value("${app.fastapi.confirm-path:/api/v1/recommend/confirm}") String confirmPath,
             @Value("${app.fastapi.confirm-stream-path:/api/v1/recommend/confirm/stream}") String confirmStreamPath,
-            @Value("${app.fastapi.session-state-path:/api/v1/session-state}") String sessionStatePath) {
+            @Value("${app.fastapi.session-state-path:/api/v1/session-state}") String sessionStatePath,
+            @Value("${app.fastapi.session-sync-timeout:3s}") java.time.Duration sessionSyncTimeout) {
         this.restTemplate = restTemplate;
         this.webClient = webClient;
         this.objectMapper = objectMapper;
@@ -58,6 +62,7 @@ public class FastApiClient {
         this.confirmUrl = baseUrl + confirmPath;
         this.confirmStreamUrl = baseUrl + confirmStreamPath;
         this.sessionStateUrl = baseUrl + sessionStatePath;
+        this.sessionSyncTimeout = sessionSyncTimeout;
     }
 
     public RecommendResponse recommend(RecommendRequest request) {
@@ -125,7 +130,9 @@ public class FastApiClient {
                 .retrieve()
                 .bodyToFlux(new ParameterizedTypeReference<>() {});
 
-        return events.map(event -> {
+        return events.timeout(java.time.Duration.ofSeconds(request.getTimeout() + 5L))
+                .publishOn(Schedulers.boundedElastic(), 1)
+                .map(event -> {
                     String eventType = firstNonBlank(trimToNull(event.event()), "message");
                     return new RecommendStreamEvent(eventType, decodeSsePayload(event.data(), eventType));
                 })
@@ -188,7 +195,7 @@ public class FastApiClient {
                 .retrieve()
                 .bodyToFlux(new ParameterizedTypeReference<>() {});
 
-        return events.map(event -> {
+        return events.publishOn(Schedulers.boundedElastic(), 1).map(event -> {
                     String eventType = firstNonBlank(trimToNull(event.event()), "message");
                     return new RecommendStreamEvent(eventType, decodeSsePayload(event.data(), eventType));
                 })
@@ -246,19 +253,10 @@ public class FastApiClient {
         if (sessionId == null || sessionId.isBlank()) {
             return;
         }
-        HttpHeaders headers = new HttpHeaders();
-        headers.setContentType(MediaType.APPLICATION_JSON);
-
-        Map<String, Object> payload = new HashMap<>();
-        payload.put("facts", facts == null ? Map.of() : facts);
-        HttpEntity<Map<String, Object>> entity = new HttpEntity<>(payload, headers);
-
-        restTemplate.exchange(
-                sessionStateUrl + "/" + sessionId,
-                HttpMethod.PUT,
-                entity,
-                Map.class
-        );
+        webClient.put().uri(sessionStateUrl + "/" + sessionId)
+                .contentType(MediaType.APPLICATION_JSON)
+                .bodyValue(Map.of("facts", facts == null ? Map.of() : facts))
+                .retrieve().toBodilessEntity().block(sessionSyncTimeout);
     }
 
     private Map<String, Object> buildRecommendPayload(RecommendRequest request) {

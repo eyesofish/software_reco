@@ -21,6 +21,9 @@ public class ConversationEntity {
     @Column(length = 36, nullable = false, updatable = false)
     private String id;
 
+    @Column(name = "owner_user_id", length = 36, updatable = false)
+    private String ownerUserId;
+
     @Column(nullable = false, length = 200)
     private String title;
 

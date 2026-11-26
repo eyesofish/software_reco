@@ -1,5 +1,8 @@
 package com.example.demo.conversation.controller;
 
+import org.springframework.security.core.annotation.AuthenticationPrincipal;
+import org.springframework.security.oauth2.jwt.Jwt;
+
 import com.example.demo.conversation.dto.ConversationApiModels;
 import com.example.demo.conversation.service.ConversationService;
 import jakarta.validation.Valid;
@@ -35,33 +38,43 @@ public class ConversationController {
             @RequestParam(name = "page_size", defaultValue = "20") @Min(1) @Max(100) int pageSize,
             @RequestParam(required = false) String q,
             @RequestParam(name = "sort", defaultValue = "updated_at:desc") String sort,
-            @RequestParam(name = "include_archived", defaultValue = "false") boolean includeArchived
+            @RequestParam(name = "include_archived", defaultValue = "false") boolean includeArchived,
+            @AuthenticationPrincipal Jwt jwt
     ) {
-        return conversationService.list(page, pageSize, q, includeArchived, parseSort(sort));
+        return conversationService.list(jwt.getSubject(), page, pageSize, q, includeArchived, parseSort(sort));
     }
 
     @PostMapping
     @ResponseStatus(HttpStatus.CREATED)
     public ConversationApiModels.CreateResponse create(
-            @Valid @RequestBody ConversationApiModels.CreateRequest request
+            @Valid @RequestBody ConversationApiModels.CreateRequest request,
+            @AuthenticationPrincipal Jwt jwt
     ) {
-        return conversationService.create(request);
+        return conversationService.create(jwt.getSubject(), request);
     }
 
     @PatchMapping("/{id}")
     public ConversationApiModels.UpdateResponse patch(
             @PathVariable String id,
-            @Valid @RequestBody ConversationApiModels.UpdateRequest request
+            @Valid @RequestBody ConversationApiModels.UpdateRequest request,
+            @AuthenticationPrincipal Jwt jwt
     ) {
+        requireOwner(jwt.getSubject(), id);
         return conversationService.patch(id, request);
     }
 
     @DeleteMapping("/{id}")
     public ConversationApiModels.DeleteResponse delete(
             @PathVariable String id,
-            @RequestParam(defaultValue = "false") boolean hard
+            @RequestParam(defaultValue = "false") boolean hard,
+            @AuthenticationPrincipal Jwt jwt
     ) {
+        requireOwner(jwt.getSubject(), id);
         return conversationService.delete(id, hard);
+    }
+
+    private void requireOwner(String owner, String id) {
+        conversationService.ensureOwnedConversation(owner, id, null, null);
     }
 
     private Sort parseSort(String sort) {

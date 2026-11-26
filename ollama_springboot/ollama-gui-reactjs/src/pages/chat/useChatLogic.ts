@@ -1,3 +1,4 @@
+import { userStorageKey } from '~/services/auth'
 import { RefObject, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
 
@@ -205,7 +206,7 @@ function createEmptySnapshot (conversationId : string) : ConversationTaskSnapsho
 
 function readConversationIdsStorage () : string[] {
   try {
-    const raw = localStorage.getItem(CHAT_CONVERSATION_IDS_STORAGE_KEY)
+    const raw = localStorage.getItem(userStorageKey(CHAT_CONVERSATION_IDS_STORAGE_KEY) || 'reco:no-session')
     if (!raw) return []
     const parsed = JSON.parse(raw)
     if (!Array.isArray(parsed)) return []
@@ -218,7 +219,8 @@ function readConversationIdsStorage () : string[] {
 
 function writeConversationIdsStorage (value : string[]) {
   try {
-    localStorage.setItem(CHAT_CONVERSATION_IDS_STORAGE_KEY, JSON.stringify(value))
+    const key = userStorageKey(CHAT_CONVERSATION_IDS_STORAGE_KEY)
+    if (key) localStorage.setItem(key, JSON.stringify(value))
   }
   catch {
     // ignore storage failures

@@ -1,4 +1,4 @@
-"""Tests for app.api.v1.auth: dev-mode passthrough, header validation, admin path."""
+"""Tests for fail-closed service authentication, header validation and admin access."""
 
 from __future__ import annotations
 
@@ -16,9 +16,11 @@ def _run(coro):
 
 
 class RequireApiKeyTests(unittest.TestCase):
-    def test_dev_mode_no_key_configured_passes_through(self) -> None:
+    def test_empty_configuration_fails_closed(self) -> None:
         with patch.object(auth.settings, "API_KEY", ""):
-            _run(auth.require_api_key(x_api_key=None))  # no exception
+            with self.assertRaises(HTTPException) as ctx:
+                _run(auth.require_api_key(x_api_key=None))
+            self.assertEqual(ctx.exception.status_code, 503)
 
     def test_correct_header_passes(self) -> None:
         with patch.object(auth.settings, "API_KEY", "secret-key-123"):
@@ -38,11 +40,13 @@ class RequireApiKeyTests(unittest.TestCase):
 
 
 class RequireAdminApiKeyTests(unittest.TestCase):
-    def test_dev_mode_passes_through(self) -> None:
+    def test_empty_admin_configuration_fails_closed(self) -> None:
         with patch.object(auth.settings, "ADMIN_API_KEY", ""), patch.object(
             auth.settings, "API_KEY", ""
         ):
-            _run(auth.require_admin_api_key(x_api_key=None))
+            with self.assertRaises(HTTPException) as ctx:
+                _run(auth.require_admin_api_key(x_api_key=None))
+            self.assertEqual(ctx.exception.status_code, 503)
 
     def test_falls_back_to_api_key_when_admin_unset(self) -> None:
         with patch.object(auth.settings, "ADMIN_API_KEY", ""), patch.object(

@@ -1,0 +1,13 @@
+.loginPage { min-height: 100vh; display: grid; grid-template-columns: 1.2fr 1fr; align-items: center; gap: 6vw; padding: 8vw; box-sizing: border-box; color: var(--color-text); background: var(--color-bg); }
+.loginEyebrow { font-family: monospace; letter-spacing: .2em; font-size: .8rem; color: var(--color-text-muted); }
+.loginIntro h1 { font-size: clamp(2.2rem, 4vw, 4.5rem); font-weight: 500; line-height: 1.2; margin: 2rem 0; }
+.loginIntro p { color: var(--color-text-muted); line-height: 1.8; }
+.loginForm { max-width: 400px; width: 100%; border-top: 2px solid currentColor; padding-top: 1.5rem; display: grid; gap: 1rem; }
+.loginForm h2 { font-size: 1.3rem; margin: 0 0 1rem; }
+.loginForm label { font-size: .85rem; }
+.loginForm input { box-sizing: border-box; width: 100%; padding: .85rem; border: 1px solid var(--color-text-muted); background: transparent; color: inherit; border-radius: 4px; font: inherit; }
+.loginForm input:focus-visible, .loginForm button:focus-visible { outline: 2px solid currentColor; outline-offset: 4px; }
+.loginForm button { padding: 1rem; margin-top: .5rem; background: var(--color-text); color: var(--color-bg); border: 0; border-radius: 4px; cursor: pointer; font: inherit; }
+.loginForm button:disabled { opacity: .5; cursor: wait; }
+.loginError { color: #dd5b59; margin: 0; }
+@media (max-width: 700px) { .loginPage { grid-template-columns: 1fr; gap: 2rem; padding: 12vw 8vw; } .loginIntro h1 { margin: 1rem 0; } }

@@ -41,11 +41,7 @@ export function sanitizeConfig (raw: unknown): { config: AppConfig, changed: boo
       changed = true
     }
 
-    if (typeof maybe.modelUrl === 'string' && isValidUrl(maybe.modelUrl)) {
-      config.modelUrl = maybe.modelUrl
-    } else {
-      changed = true
-    }
+    if (maybe.modelUrl !== resolvedModelUrl) changed = true
   } else {
     changed = true
   }

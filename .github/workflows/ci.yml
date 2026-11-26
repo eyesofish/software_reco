@@ -42,6 +42,16 @@ jobs:
   java:
     name: Java (Spring Boot)
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_DB: chat_test
+          POSTGRES_USER: chat_test
+          POSTGRES_PASSWORD: chat_ci_password
+        ports:
+          - 5432:5432
+        options: --health-cmd "pg_isready -h 127.0.0.1 -U chat_test -d chat_test" --health-interval 5s --health-timeout 3s --health-retries 20
     defaults:
       run:
         working-directory: ollama_springboot/demo
@@ -53,4 +63,11 @@ jobs:
           distribution: temurin
           cache: maven
       - name: Build & test
-        run: mvn -B verify -DskipTests=false 2>&1 | tail -50
+        run: mvn -B verify
+      - name: Chat acceptance on PostgreSQL
+        env:
+          SPRING_PROFILES_ACTIVE: postgres
+          CHAT_TEST_DB_URL: jdbc:postgresql://127.0.0.1:5432/chat_test
+          DB_USER: chat_test
+          DB_PASSWORD: chat_ci_password
+        run: mvn -B -Dtest=BusinessAuthIntegrationTests test

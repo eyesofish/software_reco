@@ -1,6 +1,7 @@
 package com.example.demo.controller;
 
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.http.CacheControl;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
@@ -23,7 +24,7 @@ public class AssetProxyController {
     private final String fastApiBaseUrl;
 
     public AssetProxyController(
-            RestTemplate restTemplate,
+            @Qualifier("agentRestTemplate") RestTemplate restTemplate,
             @Value("${app.fastapi.base-url}") String fastApiBaseUrl
     ) {
         this.restTemplate = restTemplate;

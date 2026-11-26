@@ -538,7 +538,7 @@ def _heuristic_route_mode(query: str) -> tuple[str, list[str]]:
 
 def entry_node(state: AgentState) -> dict[str, Any]:
     """用户输入节点"""
-    logger.info(f"接收用户查询: {state.user_query[:50]}...")
+    logger.info("entry query_chars=%d", len(state.user_query))
 
     # 初始化时间戳
     messages = list(_get_field(state, "messages", []) or [])
@@ -728,7 +728,7 @@ def normalize_query_with_llm(model: str, prompt: str, query: str):
 def query_normalization_node(state: AgentState) -> dict[str, Any]:
     """查询规范化节点"""
     user_query = _extract_current_user_query(_get_field(state, "user_query", ""))
-    logger.info(f"规范化查询: {user_query}")
+    logger.info("normalizing query chars=%d", len(user_query))
 
     normalized_queries = []
     prompt = "\n".join([
@@ -981,7 +981,7 @@ def sub_question_generation_node(state: AgentState) -> dict[str, Any]:
         min_sub_questions = 1
         max_sub_questions = min(max_sub_questions, 2)
 
-    logger.info(f"Generating sub-questions for query: {normalized_query}")
+    logger.info("Generating sub-questions query_chars=%d", len(normalized_query))
 
     sub_questions = []
     planned_seed_questions = []
@@ -1001,11 +1001,10 @@ def sub_question_generation_node(state: AgentState) -> dict[str, Any]:
             max_count=max_sub_questions,
         )
         logger.warning(
-            "SUBQ_READY count=%d target=%d~%d preview=%s",
+            "SUBQ_READY count=%d target=%d~%d",
             len(sub_questions),
             min_sub_questions,
             max_sub_questions,
-            sub_questions[:3],
         )
         return {
             "sub_questions": sub_questions,
@@ -1108,11 +1107,10 @@ def sub_question_generation_node(state: AgentState) -> dict[str, Any]:
     )
 
     logger.warning(
-        "SUBQ_READY count=%d target=%d~%d preview=%s",
+        "SUBQ_READY count=%d target=%d~%d",
         len(sub_questions),
         min_sub_questions,
         max_sub_questions,
-        sub_questions[:3],
     )
 
     return {
@@ -1308,9 +1306,8 @@ def human_confirmation_node(state: AgentState) -> dict[str, Any]:
     }
 
     logger.warning(
-        "HITL_INTERRUPT_ENTER subq_count=%d preview=%s",
+        "HITL_INTERRUPT_ENTER subq_count=%d",
         len(original_sub_questions),
-        original_sub_questions[:3],
     )
 
     try:
