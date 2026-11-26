@@ -1,5 +1,6 @@
 import json
 import logging
+import sys
 import time
 import uuid
 from typing import Any
@@ -25,15 +26,20 @@ def elapsed_ms(started_at: float) -> int:
 
 
 def error_fields(exc: BaseException) -> dict[str, str]:
-    return {
-        "status": "error",
-        "error_type": type(exc).__name__,
-        "error": str(exc),
-    }
+    fields = {"status": "error", "error_type": type(exc).__name__}
+    tb = exc.__traceback__
+    if tb is not None:
+        while tb.tb_next is not None:
+            tb = tb.tb_next
+        fields["error_at"] = f"{tb.tb_frame.f_code.co_filename}:{tb.tb_lineno}"
+    return fields
 
 
 def _serialize_payload(payload: dict[str, Any]) -> str:
-    return json.dumps(payload, ensure_ascii=False, separators=(",", ":"), default=str)
+    # Tool requests, model rationales, retrieved documents and remote error text can contain the full chat.
+    private_fields = {"query", "request", "request_hint", "reason", "filename", "error", "top5", "top_urls"}
+    metadata = {key: value for key, value in payload.items() if key not in private_fields}
+    return json.dumps(metadata, ensure_ascii=False, separators=(",", ":"), default=str)
 
 
 def log_event(
@@ -56,6 +62,9 @@ def log_exception(
 ) -> None:
     payload: dict[str, Any] = {"event": event}
     payload.update({key: value for key, value in fields.items() if value is not None})
-    logger.exception(_serialize_payload(payload))
+    exc = sys.exception()
+    if exc is not None:
+        payload.update(error_fields(exc))
+    logger.error(_serialize_payload(payload))
     from .performance import record_elapsed_event
     record_elapsed_event(event, fields)

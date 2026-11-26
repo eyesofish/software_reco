@@ -59,18 +59,11 @@ app.include_router(v1_router, prefix="/api/v1")
 
 @app.exception_handler(RequestValidationError)
 async def validation_exception_handler(request: Request, exc: RequestValidationError):
-    body = await request.body()
-    if b"data:image/" in body:
-        body_text = f"<{len(body)} bytes; image data redacted>"
-    else:
-        body_text = body.decode("utf-8", errors="replace")[:2000]
     logger.warning(
-        "validation error: method=%s path=%s content_type=%s body=%r errors=%s",
+        "validation error method=%s path=%s error_types=%s",
         request.method,
         request.url.path,
-        request.headers.get("content-type"),
-        body_text,
-        exc.errors(),
+        [error["type"] for error in exc.errors()],
     )
     return JSONResponse(
         status_code=HTTP_422_UNPROCESSABLE_ENTITY,
