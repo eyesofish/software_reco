@@ -8,6 +8,7 @@ import ChatErrorBoundary from './components/ChatErrorBoundary'
 import ChatInput from './components/ChatInput'
 import ConfirmationPanel from './components/ConfirmationPanel'
 import ClarificationPanel from './components/ClarificationPanel'
+import { routeProgress } from '~/services/routing'
 import MessageList from './components/MessageList'
 import useChatLogic from './useChatLogic'
 import './index.css'
@@ -29,8 +30,12 @@ export default function Chat () {
     routingMode,
     setRoutingMode,
     routingClarification,
+    pendingInput,
+    nextStep,
     handleRoutingChoice,
     handleRoutingDismiss,
+    handleInputSubmit,
+    handleCancelWaiting,
     handleDeleteChat,
     requestHandler,
     handleConfirmClicked,
@@ -48,6 +53,7 @@ export default function Chat () {
         <ColumnContainer style={{ padding: 8, paddingRight: 0 }}>
           { (loading || showConfirming) && <Loading src={LOADING} /> }
           { hasTalk ? <MessageList apiBaseUrl={apiBaseUrl} messages={messages} /> : <About /> }
+          {nextStep && <p aria-live='polite' className='systemMessage'>{routeProgress(nextStep, language)}</p>}
 
           {routingClarification && <ClarificationPanel
             key={routingClarification.clarification_id}
@@ -57,6 +63,15 @@ export default function Chat () {
             onCancel={handleRoutingDismiss}
             onSubmit={(answer, option) => handleRoutingChoice(option, answer)}
           />}
+          {pendingInput && <ClarificationPanel
+            key={pendingInput.clarification_id}
+            busy={loading}
+            clarification={pendingInput}
+            language={language}
+            onCancel={() => { void handleCancelWaiting() }}
+            onSubmit={handleInputSubmit}
+          />}
+
           {showConfirming && (
             <div className='hitlPanel'>
               <div className='hitlPanelTitle'>Confirming...</div>
@@ -84,7 +99,7 @@ export default function Chat () {
             textAreaRef={textAreaRef}
             routingMode={routingMode}
             onRoutingModeChange={setRoutingMode}
-            disabled={loading || Boolean(routingClarification) || taskStatus === 'PENDING_CONFIRM'}
+            disabled={loading || Boolean(routingClarification) || taskStatus === 'PENDING_INPUT' || taskStatus === 'PENDING_CONFIRM'}
           />
         </ColumnContainer>
       </RowContainer>

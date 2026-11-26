@@ -12,8 +12,8 @@ import useChatLogic from './useChatLogic'
 
 jest.mock('~/services/requester', () => ({
   ...jest.requireActual('~/services/requester'),
-  streamChatRequester: jest.fn(), streamChatConfirmRequester: jest.fn(),
-  listConversationTasksRequester: jest.fn()
+  streamChatRequester: jest.fn(), streamChatConfirmRequester: jest.fn(), streamClarifyRequester: jest.fn(),
+  listConversationTasksRequester: jest.fn(), cancelWaitingTaskRequester: jest.fn()
 }))
 jest.mock('~/services/scroller', () => () => undefined)
 jest.mock('~/stores/config', () => ({ useConfig: () => ({ autoSaveChats: false, modelUrl: 'http://localhost:8080', modelName: 'test' }) }))
@@ -85,6 +85,47 @@ test('automatic new conversation creates a new local chat without rebinding old 
   expect(window.location.pathname).toBe('/ollama-gui-reactjs/chat/2')
 })
 
+test('runtime clarification blocks a new task and resumes the exact task and interruption', async () => {
+  ;(requester.streamChatRequester as jest.Mock).mockImplementation(async (_url, _payload, emit) => {
+    emit({ type: 'meta', conversation_id: 'old', task_id: 'task-1', status: 'GENERATING' })
+    emit({ type: 'awaiting_input', conversation_id: 'old', task_id: 'task-1', pending_input: { clarification_id: 'input-1', kind: 'execution', prompt: 'Which platform?' } })
+  })
+  ;(requester.streamClarifyRequester as jest.Mock).mockImplementation(async (_url, _payload, emit) => readyEvents(emit))
+  mount()
+  act(() => { logic.textAreaRef.current!.value = 'Design it'; logic.requestHandler() })
+  await waitFor(() => expect(logic.taskStatus).toBe('PENDING_INPUT'))
+  act(() => { logic.textAreaRef.current!.value = 'Another task'; logic.requestHandler() })
+  expect(requester.streamChatRequester).toHaveBeenCalledTimes(1)
+  await act(async () => { await logic.handleInputSubmit('Linux') })
+  expect((requester.streamClarifyRequester as jest.Mock).mock.calls[0][1]).toEqual({ task_id: 'task-1', clarification_id: 'input-1', answer: 'Linux' })
+  expect(logic.taskStatus).toBe('DONE')
+  expect(logic.taskId).toBe('task-1')
+})
+
+test('reload restores waiting input from server task state', async () => {
+  ;(requester.listConversationTasksRequester as jest.Mock).mockResolvedValue([{ task_id: 'task-2', status: 'PENDING_INPUT', pending_input: { clarification_id: 'input-2', prompt: 'More detail' } }])
+  mount()
+  await waitFor(() => expect(logic.pendingInput?.clarification_id).toBe('input-2'))
+  expect(logic.taskId).toBe('task-2')
+  expect(logic.loading).toBe(false)
+})
+
+test('a failed resume keeps the waiting task available for retry or cancellation', async () => {
+  ;(requester.listConversationTasksRequester as jest.Mock).mockResolvedValue([{ task_id: 'task-2', status: 'PENDING_INPUT', pending_input: { clarification_id: 'input-2', prompt: 'More detail' } }])
+  ;(requester.streamClarifyRequester as jest.Mock).mockRejectedValue(new Error('Network unavailable'))
+  ;(requester.cancelWaitingTaskRequester as jest.Mock).mockResolvedValue({ task_id: 'task-2', status: 'CANCELLED' })
+  mount()
+  await waitFor(() => expect(logic.pendingInput?.clarification_id).toBe('input-2'))
+  await act(async () => { await logic.handleInputSubmit('Linux') })
+  expect(logic.taskStatus).toBe('PENDING_INPUT')
+  expect(logic.pendingInput?.clarification_id).toBe('input-2')
+  expect(logic.error).toBe('Network unavailable')
+  await act(async () => { await logic.handleCancelWaiting() })
+  expect(requester.cancelWaitingTaskRequester).toHaveBeenCalledWith('http://localhost:8080', 'task-2')
+  expect(logic.taskStatus).toBe('CANCELLED')
+  expect(logic.pendingInput).toBeUndefined()
+})
+
 test('streaming continues after automatic navigation into a newly created conversation', async () => {
   let release : (() => void)|undefined
   let capturedSignal : AbortSignal|undefined
@@ -102,4 +143,48 @@ test('streaming continues after automatic navigation into a newly created conver
   await act(async () => { release!() })
   expect(logic.taskStatus).toBe('DONE')
   expect(storedChats[1][1].content).toBe('Later answer')
+})
+
+test('upstream rejection before resume acceptance preserves the form and retries one answer', async () => {
+  ;(requester.listConversationTasksRequester as jest.Mock).mockResolvedValue([{ task_id: 'task-2', status: 'PENDING_INPUT', pending_input: { clarification_id: 'input-2', prompt: 'More detail' } }])
+  ;(requester.streamClarifyRequester as jest.Mock)
+    .mockImplementationOnce(async (_url, _payload, emit) => emit({ type: 'error', conversation_id: 'old', task_id: 'task-2', message: 'Agent unavailable' }))
+    .mockImplementationOnce(async (_url, _payload, emit) => readyEvents(emit, 'old', 'task-2'))
+  mount()
+  await waitFor(() => expect(logic.pendingInput?.clarification_id).toBe('input-2'))
+  await act(async () => { await logic.handleInputSubmit('Linux') })
+  expect(logic.taskStatus).toBe('PENDING_INPUT')
+  expect(logic.pendingInput?.clarification_id).toBe('input-2')
+  expect(logic.error).toBe('Agent unavailable')
+  expect(storedChats[0]).toHaveLength(1)
+  act(() => { logic.textAreaRef.current!.value = 'Another task'; logic.requestHandler() })
+  expect(requester.streamChatRequester).not.toHaveBeenCalled()
+  await act(async () => { await logic.handleInputSubmit('Linux') })
+  expect(logic.taskStatus).toBe('DONE')
+  expect(storedChats[0].filter((message) => message.role === 'user' && message.content === 'Linux')).toHaveLength(1)
+})
+
+test('clarification limit is checked before the pending task is changed', async () => {
+  ;(requester.listConversationTasksRequester as jest.Mock).mockResolvedValue([{ task_id: 'task-2', status: 'PENDING_INPUT', pending_input: { clarification_id: 'input-2', prompt: 'More detail' } }])
+  mount()
+  await waitFor(() => expect(logic.pendingInput?.clarification_id).toBe('input-2'))
+  await act(async () => { await logic.handleInputSubmit('x'.repeat(4001)) })
+  expect(requester.streamClarifyRequester).not.toHaveBeenCalled()
+  expect(logic.taskStatus).toBe('PENDING_INPUT')
+  expect(logic.error).toContain('4000')
+  expect(storedChats[0]).toHaveLength(1)
+})
+
+test('failure after resume acceptance does not offer to replay consumed clarification', async () => {
+  ;(requester.listConversationTasksRequester as jest.Mock).mockResolvedValue([{ task_id: 'task-2', status: 'PENDING_INPUT', pending_input: { clarification_id: 'input-2', prompt: 'More detail' } }])
+  ;(requester.streamClarifyRequester as jest.Mock).mockImplementation(async (_url, _payload, emit) => {
+    emit({ type: 'meta', conversation_id: 'old', task_id: 'task-2', status: 'GENERATING' })
+    emit({ type: 'error', message: 'Generation failed' })
+  })
+  mount()
+  await waitFor(() => expect(logic.pendingInput?.clarification_id).toBe('input-2'))
+  await act(async () => { await logic.handleInputSubmit('Linux') })
+  expect(logic.taskStatus).toBe('ERROR')
+  expect(logic.pendingInput).toBeUndefined()
+  expect(storedChats[0].filter((message) => message.role === 'user' && message.content === 'Linux')).toHaveLength(1)
 })
