@@ -27,6 +27,21 @@ export type Messages = Message[]
 
 export type Chats = Message[][]
 
+export type RoutingMode = 'explicit' | 'auto' | 'new'
+
+export interface RoutingOption {
+  kind : 'existing' | 'new',
+  conversation_id ?: string,
+  title : string
+}
+
+export interface Clarification {
+  clarification_id : string,
+  kind : 'routing' | 'execution',
+  prompt : string,
+  options ?: RoutingOption[]
+}
+
 interface HitlEnvelope {
   status ?: string,
   awaiting_human_confirmation ?: boolean,
@@ -117,7 +132,7 @@ export interface RecommendTaskStateResponse {
   created_at ?: string,
   createdAt ?: string,
   updated_at ?: string,
-  updatedAt ?: string
+  updatedAt ?: string,
 }
 
 export interface ConversationCreateRequest {
@@ -136,7 +151,10 @@ export interface RecommendTaskCreateRequest {
   session_id ?: string,
   timeout ?: number,
   max_iterations ?: number,
-  images ?: ImageAttachment[]
+  images ?: ImageAttachment[],
+  routing_mode ?: RoutingMode,
+  current_conversation_id ?: string,
+  thread_id ?: string
 }
 
 export interface RecommendTaskConfirmRequest {
@@ -150,6 +168,7 @@ export type ChatStreamEventType =
   | 'token'
   | 'state'
   | 'awaiting_confirmation'
+  | 'routing_clarification'
   | 'final'
   | 'error'
 
@@ -204,6 +223,11 @@ export interface ChatStreamErrorEvent extends ChatStreamBaseEvent {
   elapsed_ms ?: number
 }
 
+export interface ChatStreamRoutingClarificationEvent extends ChatStreamBaseEvent {
+  type : 'routing_clarification',
+  clarification : Clarification
+}
+
 export type ChatStreamEvent =
   | ChatStreamMetaEvent
   | ChatStreamNodeEvent
@@ -212,6 +236,7 @@ export type ChatStreamEvent =
   | ChatStreamAwaitingConfirmationEvent
   | ChatStreamFinalEvent
   | ChatStreamErrorEvent
+  | ChatStreamRoutingClarificationEvent
 
 // Backward-compat alias for existing imports.
 export type RecommendStreamEventType = ChatStreamEventType
