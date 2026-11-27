@@ -99,13 +99,13 @@ class GovernedChatCompletionTests(unittest.TestCase):
         self.assertAlmostEqual(snap["overall"]["cost_usd"], 0.005, places=6)
         self.assertEqual(snap["by_scene"]["unit"]["calls"], 1)
 
-    def test_cost_is_zero_when_pricing_unset(self) -> None:
-        """No configured pricing must report 0, not a made-up number."""
+    def test_cost_is_unknown_when_pricing_unset(self) -> None:
+        """No configured pricing must not be reported as a free call."""
         client = _FakeClient([_response(prompt=1000, completion=1000)])
         gov.governed_chat_completion(
             client=client, scene="unit", model="m", messages=[], sleep=self._sleep
         )
-        self.assertEqual(gov.usage_snapshot()["overall"]["cost_usd"], 0.0)
+        self.assertIsNone(gov.usage_snapshot()["overall"]["cost_usd"])
 
     def test_retries_transient_then_succeeds(self) -> None:
         client = _FakeClient([_status_error(503), _status_error(429), _response()])

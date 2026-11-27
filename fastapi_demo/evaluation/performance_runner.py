@@ -487,7 +487,9 @@ def write_reports(output: Path, report: dict) -> None:
         request_ids = {request["request_id"] for case in row["cases"] for request in case["requests"]}
         stages = defaultdict(list)
         for record in row["trace"]:
-            if record.get("request_id") in request_ids and "elapsed_ms" in record:
+            # Usage ledger records share this JSONL but are not timing spans;
+            # retain them in the raw report without counting their call time twice.
+            if record.get("request_id") in request_ids and record.get("stage") and "elapsed_ms" in record:
                 label = record["stage"] + (":" + record["scene"] if record.get("scene") else "")
                 stages[(record["kind"], label)].append(record["elapsed_ms"])
         for (kind, name), values in sorted(stages.items()):

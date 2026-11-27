@@ -1,4 +1,5 @@
 import asyncio
+import json
 import subprocess
 import sys
 import time
@@ -8,6 +9,7 @@ import pytest
 
 from evaluation.performance_metrics import SSEParser, summarize
 from evaluation.performance_runner import (
+    environment_for_server,
     execute_case,
     load_manifest,
     managed_server,
@@ -16,6 +18,29 @@ from evaluation.performance_runner import (
     request_stream,
     write_reports,
 )
+
+
+def test_server_environment_preserves_optional_rates_and_isolates_knowledge(tmp_path, monkeypatch):
+    from app.core.config import Settings
+    from evaluation import performance_runner
+
+    configured = Settings(_env_file=None).model_copy(update={
+        "LLM_COST_PROMPT_PER_1K_USD": None,
+        "LLM_COST_COMPLETION_PER_1K_USD": None,
+        "LLM_COST_MODEL_RATES": {"test-model": {"prompt": 0.1, "completion": 0.2}},
+        "KB_MANIFEST_PATH": str(tmp_path / "parent-manifest.sqlite3"),
+    })
+    monkeypatch.setattr(performance_runner, "profile_settings", lambda offline: configured)
+    environment = environment_for_server(tmp_path / "child", offline=True)
+    for key, value in configured.model_dump().items():
+        if value is None and "COST_" in key:
+            assert key not in environment
+    assert environment["MEMORY_STORE_DB"] == str((tmp_path / "child" / "memory.sqlite3").resolve())
+    assert environment["SESSION_STATE_DB"] == str((tmp_path / "child" / "sessions.sqlite3").resolve())
+    assert json.loads(environment["LLM_COST_MODEL_RATES"]) == configured.LLM_COST_MODEL_RATES
+    assert environment["KB_MANIFEST_PATH"] == str((tmp_path / "child" / "kb_manifest.sqlite3").resolve())
+    assert environment["CHROMA_DB_PATH"] == str((tmp_path / "child" / "chroma").resolve())
+    assert environment["INGEST_PATH"] == str((tmp_path / "child" / "empty-ingest").resolve())
 
 
 @pytest.fixture(scope="module")
@@ -63,7 +88,10 @@ def test_fixed_http_scenarios(server, case):
         assert result["preparations"]
     if case["group"] in {"rag", "hitl"}:
         request_ids = {request["request_id"] for request in result["requests"]}
-        stages = {row["stage"] for row in read_trace(output / "spans.jsonl") if row.get("request_id") in request_ids}
+        stages = {
+            row["stage"] for row in read_trace(output / "spans.jsonl")
+            if row.get("request_id") in request_ids and row.get("stage")
+        }
         assert {"search.vector.embedding.done", "search.vector.query.done", "retrieval.rerank"} <= stages
 
 

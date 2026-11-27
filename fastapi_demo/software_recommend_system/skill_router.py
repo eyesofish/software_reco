@@ -10,6 +10,7 @@ import openai
 
 from .config import settings
 from .execution_control import current_request_timeout
+from .llm_governance import accounted_completion
 from .observability import wrap_openai
 from .skill_registry import DEFAULT_SKILL_ID, SkillSpec, get_skill, list_skills, validate_skill_id
 
@@ -151,9 +152,7 @@ def _get_router_client() -> openai.OpenAI:
         or "LOCAL_DUMMY_KEY"
     )
     base_url = _normalize_text(getattr(settings, "SKILL_ROUTER_BASE_URL", "")) or None
-    timeout_seconds = current_request_timeout(
-        max(0.05, float(getattr(settings, "SKILL_ROUTER_TIMEOUT_SECONDS", 8)))
-    )
+    timeout_seconds = current_request_timeout(max(0.05, float(getattr(settings, "SKILL_ROUTER_TIMEOUT_SECONDS", 8))))
     return wrap_openai(
         openai.OpenAI(
             api_key=api_key,
@@ -333,7 +332,9 @@ def _llm_route(
     )
 
     try:
-        response = active_client.chat.completions.create(
+        response = accounted_completion(
+            create=active_client.chat.completions.create,
+            scene="skill_router",
             model=model,
             messages=_build_llm_messages(
                 user_query=user_query,
@@ -345,9 +346,7 @@ def _llm_route(
         )
         first_choice = (getattr(response, "choices", None) or [{}])[0]
         message = (
-            first_choice.get("message", {})
-            if isinstance(first_choice, dict)
-            else getattr(first_choice, "message", {})
+            first_choice.get("message", {}) if isinstance(first_choice, dict) else getattr(first_choice, "message", {})
         )
         content = _extract_text_content(
             message.get("content", "") if isinstance(message, dict) else getattr(message, "content", "")
