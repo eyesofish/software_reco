@@ -399,6 +399,14 @@ a conversation through Spring first, or omit the ID for a new chat.
 **Upgrading an existing Compose deployment.** The old Spring database lived
 inside its JVM. Export any history you need from the running instance before
 replacing it. An instance that already exited has no H2 data volume to restore.
+For FastAPI, stop new traffic and finish pending writes, then copy any existing
+`/app/.runtime/fastapi_session_state.json` and `/app/.runtime/layered_memory_store.json`
+from the old container into `.runtime/legacy-agent/` on the host before recreating it.
+Use the configured legacy paths if you moved these files. The first start imports
+each store into SQLite in the `fastapi_chat` volume. Keep the originals until
+you have checked the imported sessions. Back up both the PostgreSQL and FastAPI
+stores. Removing the named volumes also removes their persisted data.
+
 ### Service authentication (FastAPI)
 
 All `/api/v1/*` endpoints require an `X-API-Key` header matching `API_KEY`.

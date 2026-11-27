@@ -1,19 +1,17 @@
-import json
 import logging
 import time
 from pathlib import Path
-from threading import RLock
 from typing import Any
 
 from software_recommend_system.config import settings as agent_settings
+from software_recommend_system.logging_utils import log_exception
 from software_recommend_system.memory_retriever import build_memory_context
 from software_recommend_system.memory_store import write_episode, write_fact, write_semantic
+from software_recommend_system.session_rows import SessionRows, open_session_rows
 
 logger = logging.getLogger(__name__)
 
-SESSION_STATE_FILE = Path(agent_settings.SESSION_STATE_FILE)
 SESSION_MAX_MESSAGES = agent_settings.SESSION_MAX_MESSAGES
-_SESSION_LOCK = RLock()
 
 INVALID_NAME_VALUES = {
     "什么",
@@ -60,21 +58,17 @@ def _safe_build_memory_context(
             facts=facts,
         )
     except Exception:
-        logger.exception("MEMORY_CONTEXT_BUILD_FAILED session_id=%s", session_id)
+        log_exception(logger, "MEMORY_CONTEXT_BUILD_FAILED", session_id=session_id)
         return []
 
 
-def _safe_write_fact_to_memory(session_id: str, key: str, value: str) -> None:
+def _safe_write_fact_to_memory(session_id: str, key: str, value: str, *, updated_at: float | None = None) -> None:
     if not _memory_writeback_enabled():
         return
     try:
-        write_fact(session_id, key, value)
+        write_fact(session_id, key, value, updated_at=updated_at)
     except Exception:
-        logger.exception(
-            "MEMORY_FACT_WRITE_FAILED session_id=%s key=%s",
-            session_id,
-            key,
-        )
+        log_exception(logger, "MEMORY_FACT_WRITE_FAILED", session_id=session_id)
 
 
 def _safe_write_turn_memories(
@@ -131,7 +125,7 @@ def _safe_write_turn_memories(
                 salience=0.72,
             )
     except Exception:
-        logger.exception("MEMORY_TURN_WRITEBACK_FAILED session_id=%s", session_id)
+        log_exception(logger, "MEMORY_TURN_WRITEBACK_FAILED", session_id=session_id)
 
 
 def _normalize_session_facts(raw: Any) -> dict[str, str]:
@@ -169,7 +163,7 @@ def _normalize_updated_at(raw: Any) -> float:
         return time.time()
 
 
-def _normalize_session_state(raw: Any) -> dict[str, Any]:
+def _normalize_session_state(_session_id: str, raw: Any) -> dict[str, Any]:
     state = raw if isinstance(raw, dict) else {}
     return {
         "facts": _normalize_session_facts(state.get("facts", {})),
@@ -192,93 +186,60 @@ def _normalize_candidate_name(raw: str) -> str | None:
     return candidate
 
 
-def _persist_session_state_store_locked() -> None:
-    SESSION_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
-    SESSION_STATE_FILE.write_text(
-        json.dumps(SESSION_STATE_STORE, ensure_ascii=False),
-        encoding="utf-8",
+def session_rows() -> SessionRows:
+    return open_session_rows(
+        Path(agent_settings.SESSION_STATE_FILE),
+        agent_settings.SESSION_STATE_DB,
+        "agent_session_state",
+        _normalize_session_state,
     )
 
 
-def _load_session_state_store() -> dict[str, dict[str, Any]]:
-    if not SESSION_STATE_FILE.exists():
-        return {}
-
-    try:
-        content = SESSION_STATE_FILE.read_text(encoding="utf-8")
-        raw = json.loads(content)
-    except Exception as exc:  # pragma: no cover - defensive logging
-        logger.warning("failed to load session state file %s: %s", SESSION_STATE_FILE, exc)
-        return {}
-
-    if not isinstance(raw, dict):
-        logger.warning("invalid session state payload, expected dict at root")
-        return {}
-
-    normalized: dict[str, dict[str, Any]] = {}
-    for session_id, state in raw.items():
-        sid = str(session_id or "").strip()
-        if not sid:
-            continue
-        normalized[sid] = _normalize_session_state(state)
-
-    return normalized
-
-
-SESSION_STATE_STORE: dict[str, dict[str, Any]] = _load_session_state_store()
+def peek_session_state(session_id: str) -> dict[str, Any]:
+    """Read an existing snapshot without creating or touching a session."""
+    state = session_rows().read(session_id)
+    if state is not None:
+        state["messages"] = state["messages"][-SESSION_MAX_MESSAGES:]
+    return state or {}
 
 
 def _get_or_create_session_state(session_id: str) -> dict[str, Any]:
     sid = (session_id or "").strip()
-    if not sid:
-        raise ValueError("session_id is required")
-
-    with _SESSION_LOCK:
-        existing = SESSION_STATE_STORE.get(sid)
-        if existing:
-            normalized = _normalize_session_state(existing)
-            SESSION_STATE_STORE[sid] = normalized
-            return normalized
-
-        created = {"facts": {}, "messages": [], "updated_at": time.time()}
-        SESSION_STATE_STORE[sid] = created
-        _persist_session_state_store_locked()
-        return created
+    existing = peek_session_state(sid)
+    if existing:
+        return existing
+    with session_rows().edit(sid) as state:
+        return state
 
 
 def _merge_session_facts(session_id: str, facts: dict[str, str]) -> dict[str, Any]:
-    with _SESSION_LOCK:
-        state = _get_or_create_session_state(session_id)
-        current_facts: dict[str, str] = state.setdefault("facts", {})
-        for key, value in (facts or {}).items():
-            fact_key = (key or "").strip()
-            fact_value = (value or "").strip()
-            if fact_key == "user_name":
-                normalized_name = _normalize_candidate_name(fact_value)
-                if not normalized_name:
-                    continue
-                fact_value = normalized_name
-            if fact_key and fact_value:
-                current_facts[fact_key] = fact_value
-                _safe_write_fact_to_memory(session_id, fact_key, fact_value)
+    updates: dict[str, str] = {}
+    for key, value in (facts or {}).items():
+        fact_key = (key or "").strip()
+        fact_value = (value or "").strip()
+        if fact_key == "user_name":
+            fact_value = _normalize_candidate_name(fact_value) or ""
+        if fact_key and fact_value:
+            updates[fact_key] = fact_value
+
+    with session_rows().edit(session_id) as state:
+        state["facts"].update(updates)
+        state["messages"] = state["messages"][-SESSION_MAX_MESSAGES:]
         state["updated_at"] = time.time()
-        _persist_session_state_store_locked()
-        return state
+
+    for key, value in updates.items():
+        _safe_write_fact_to_memory(session_id, key, value, updated_at=state["updated_at"])
+    return state
 
 
 def _append_session_messages(session_id: str, messages: list[dict[str, str]]) -> dict[str, Any]:
     updates = _normalize_session_messages(messages)
     if not updates:
         return _get_or_create_session_state(session_id)
-
-    with _SESSION_LOCK:
-        state = _get_or_create_session_state(session_id)
-        history = _normalize_session_messages(state.get("messages", []))
-        history.extend(updates)
-        state["messages"] = history[-SESSION_MAX_MESSAGES:]
+    with session_rows().edit(session_id) as state:
+        state["messages"] = (state["messages"] + updates)[-SESSION_MAX_MESSAGES:]
         state["updated_at"] = time.time()
-        _persist_session_state_store_locked()
-        return state
+    return state
 
 
 def _append_session_message_once(session_id: str, role: str, content: str) -> dict[str, Any]:
@@ -286,23 +247,11 @@ def _append_session_message_once(session_id: str, role: str, content: str) -> di
     if not updates:
         return _get_or_create_session_state(session_id)
 
-    candidate = updates[0]
-    with _SESSION_LOCK:
-        state = _get_or_create_session_state(session_id)
-        history = _normalize_session_messages(state.get("messages", []))
-        if (
-            history
-            and history[-1].get("role") == candidate["role"]
-            and history[-1].get("content") == candidate["content"]
-        ):
-            logger.info(
-                "SESSION_MESSAGE_DUPLICATE_SKIPPED session_id=%s role=%s",
-                session_id,
-                candidate["role"],
-            )
-            return state
-        history.append(candidate)
-        state["messages"] = history[-SESSION_MAX_MESSAGES:]
-        state["updated_at"] = time.time()
-        _persist_session_state_store_locked()
-        return state
+    with session_rows().edit(session_id) as state:
+        candidate = updates[0]
+        history = state["messages"][-SESSION_MAX_MESSAGES:]
+        if not history or history[-1] != candidate:
+            history = (history + updates)[-SESSION_MAX_MESSAGES:]
+            state["updated_at"] = time.time()
+        state["messages"] = history
+    return state

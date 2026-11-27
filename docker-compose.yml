@@ -47,11 +47,17 @@ services:
       - CHROMA_DB_PATH=/data/chroma
       - INGEST_PATH=/data/ingest
       - ELASTICSEARCH_URL=http://elasticsearch:9200
+      - SESSION_STATE_DB=/data/chat/session-state.sqlite3
+      - MEMORY_STORE_DB=/data/chat/layered-memory.sqlite3
+      - SESSION_STATE_FILE=/data/legacy/fastapi_session_state.json
+      - MEMORY_STORE_FILE=/data/legacy/layered_memory_store.json
     depends_on:
       elasticsearch:
         condition: service_started
     volumes:
       - fastapi_chroma:/data/chroma
+      - fastapi_chat:/data/chat
+      - ./.runtime/legacy-agent:/data/legacy:ro
       - ./fastapi_demo/ingest_docs:/data/ingest:ro
     restart: unless-stopped
 
@@ -90,6 +96,7 @@ services:
 
 volumes:
   postgres_data:
+  fastapi_chat:
   fastapi_chroma:
   elasticsearch_data:
 

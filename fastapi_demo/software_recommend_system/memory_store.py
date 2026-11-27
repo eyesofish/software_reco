@@ -1,23 +1,15 @@
 from __future__ import annotations
 
 import hashlib
-import json
-import logging
 import re
 import time
 from collections.abc import Iterable, Sequence
 from pathlib import Path
-from threading import RLock
 from typing import Any
 
 from .config import settings
 from .memory_schema import MemoryItem
-
-logger = logging.getLogger(__name__)
-
-_MEMORY_LOCK = RLock()
-_MEMORY_STORE_LOADED = False
-_MEMORY_STORE: dict[str, dict[str, Any]] = {}
+from .session_rows import SessionRows, open_session_rows
 
 
 def _get_store_path() -> Path:
@@ -144,58 +136,10 @@ def _normalize_session_payload(session_id: str, raw: Any) -> dict[str, Any]:
     return normalized
 
 
-def _persist_locked() -> None:
-    path = _get_store_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
-        json.dumps(_MEMORY_STORE, ensure_ascii=False),
-        encoding="utf-8",
+def memory_rows() -> SessionRows:
+    return open_session_rows(
+        _get_store_path(), settings.MEMORY_STORE_DB, "agent_layered_memory", _normalize_session_payload
     )
-
-
-def _load_locked() -> None:
-    global _MEMORY_STORE_LOADED, _MEMORY_STORE
-    if _MEMORY_STORE_LOADED:
-        return
-    path = _get_store_path()
-    if not path.exists():
-        _MEMORY_STORE = {}
-        _MEMORY_STORE_LOADED = True
-        return
-    try:
-        raw = json.loads(path.read_text(encoding="utf-8"))
-    except Exception as exc:
-        logger.warning("failed to load memory store from %s: %s", path, exc)
-        _MEMORY_STORE = {}
-        _MEMORY_STORE_LOADED = True
-        return
-
-    normalized: dict[str, dict[str, Any]] = {}
-    if isinstance(raw, dict):
-        for session_id, payload in raw.items():
-            sid = str(session_id or "").strip()
-            if not sid:
-                continue
-            normalized[sid] = _normalize_session_payload(sid, payload)
-
-    _MEMORY_STORE = normalized
-    _MEMORY_STORE_LOADED = True
-
-
-def _ensure_loaded() -> None:
-    with _MEMORY_LOCK:
-        _load_locked()
-
-
-def _ensure_session_locked(session_id: str) -> dict[str, Any]:
-    sid = str(session_id or "").strip()
-    if not sid:
-        raise ValueError("session_id is required")
-    state = _MEMORY_STORE.get(sid)
-    if state is None:
-        state = {"facts": {}, "episodes": [], "semantics": [], "updated_at": _now()}
-        _MEMORY_STORE[sid] = state
-    return state
 
 
 def _merge_tags(existing: Sequence[str], incoming: Sequence[str]) -> list[str]:
@@ -241,9 +185,7 @@ def _write_memory_item(
     max_items = max(20, int(getattr(settings, "MEMORY_MAX_ITEMS_PER_LEVEL", 200)))
     bucket_key = "episodes" if level_key == "episodic" else "semantics"
 
-    with _MEMORY_LOCK:
-        _load_locked()
-        session_state = _ensure_session_locked(sid)
+    with memory_rows().edit(sid) as session_state:
         bucket_raw = session_state.get(bucket_key, [])
         if not isinstance(bucket_raw, list):
             bucket_raw = []
@@ -261,7 +203,6 @@ def _write_memory_item(
             existing_item.tags = _merge_tags(existing_item.tags, normalized_tags)
             bucket_raw[index] = _memory_item_dump(existing_item)
             session_state["updated_at"] = now_ts
-            _persist_locked()
             return existing_item
 
         created = MemoryItem(
@@ -279,27 +220,26 @@ def _write_memory_item(
         bucket_raw.sort(key=lambda item: _safe_float(item.get("updated_at"), 0.0), reverse=True)
         session_state[bucket_key] = bucket_raw[:max_items]
         session_state["updated_at"] = now_ts
-        _persist_locked()
         return created
 
 
-def write_fact(session_id: str, key: str, value: str) -> None:
+def write_fact(session_id: str, key: str, value: str, *, updated_at: float | None = None) -> None:
     sid = str(session_id or "").strip()
     fact_key = str(key or "").strip()
     fact_value = str(value or "").strip()
     if not sid or not fact_key or not fact_value:
         return
 
-    now_ts = _now()
-    with _MEMORY_LOCK:
-        _load_locked()
-        session_state = _ensure_session_locked(sid)
+    now_ts = _now() if updated_at is None else updated_at
+    with memory_rows().edit(sid) as session_state:
         facts = session_state.get("facts", {})
         if not isinstance(facts, dict):
             facts = {}
             session_state["facts"] = facts
 
         existing = _normalize_fact_value(facts.get(fact_key))
+        if existing is not None and updated_at is not None and existing["updated_at"] > updated_at:
+            return
         if existing is None:
             facts[fact_key] = {
                 "value": fact_value,
@@ -312,7 +252,6 @@ def write_fact(session_id: str, key: str, value: str) -> None:
             facts[fact_key] = existing
 
         session_state["updated_at"] = now_ts
-        _persist_locked()
 
 
 def write_episode(
@@ -349,19 +288,17 @@ def get_facts(session_id: str) -> dict[str, str]:
     sid = str(session_id or "").strip()
     if not sid:
         return {}
-    with _MEMORY_LOCK:
-        _load_locked()
-        session_state = _MEMORY_STORE.get(sid, {})
-        raw_facts = session_state.get("facts", {})
-        if not isinstance(raw_facts, dict):
-            return {}
-        facts: dict[str, str] = {}
-        for key, raw_value in raw_facts.items():
-            fact_key = str(key or "").strip()
-            normalized = _normalize_fact_value(raw_value)
-            if fact_key and normalized is not None:
-                facts[fact_key] = normalized["value"]
-        return facts
+    session_state = memory_rows().read(sid) or {}
+    raw_facts = session_state.get("facts", {})
+    if not isinstance(raw_facts, dict):
+        return {}
+    facts: dict[str, str] = {}
+    for key, raw_value in raw_facts.items():
+        fact_key = str(key or "").strip()
+        normalized = _normalize_fact_value(raw_value)
+        if fact_key and normalized is not None:
+            facts[fact_key] = normalized["value"]
+    return facts
 
 
 def get_recent(
@@ -379,20 +316,18 @@ def get_recent(
     if not normalized_levels:
         return []
 
-    with _MEMORY_LOCK:
-        _load_locked()
-        session_state = _MEMORY_STORE.get(sid, {})
-        output: list[MemoryItem] = []
-        if "episodic" in normalized_levels:
-            for raw_item in session_state.get("episodes", []) or []:
-                parsed = _normalize_memory_item(raw_item, session_id=sid, level="episodic")
-                if parsed is not None:
-                    output.append(parsed)
-        if "semantic" in normalized_levels:
-            for raw_item in session_state.get("semantics", []) or []:
-                parsed = _normalize_memory_item(raw_item, session_id=sid, level="semantic")
-                if parsed is not None:
-                    output.append(parsed)
+    session_state = memory_rows().read(sid) or {}
+    output: list[MemoryItem] = []
+    if "episodic" in normalized_levels:
+        for raw_item in session_state.get("episodes", []) or []:
+            parsed = _normalize_memory_item(raw_item, session_id=sid, level="episodic")
+            if parsed is not None:
+                output.append(parsed)
+    if "semantic" in normalized_levels:
+        for raw_item in session_state.get("semantics", []) or []:
+            parsed = _normalize_memory_item(raw_item, session_id=sid, level="semantic")
+            if parsed is not None:
+                output.append(parsed)
 
     output.sort(key=lambda item: item.updated_at, reverse=True)
     return output[: max(1, int(limit))]
@@ -405,14 +340,12 @@ def semantic_search(session_id: str, query: str, top_k: int = 5) -> list[MemoryI
     limit = max(1, int(top_k))
     query_tokens = _tokenize(query)
 
-    with _MEMORY_LOCK:
-        _load_locked()
-        session_state = _MEMORY_STORE.get(sid, {})
-        semantic_items: list[MemoryItem] = []
-        for raw_item in session_state.get("semantics", []) or []:
-            parsed = _normalize_memory_item(raw_item, session_id=sid, level="semantic")
-            if parsed is not None:
-                semantic_items.append(parsed)
+    session_state = memory_rows().read(sid) or {}
+    semantic_items: list[MemoryItem] = []
+    for raw_item in session_state.get("semantics", []) or []:
+        parsed = _normalize_memory_item(raw_item, session_id=sid, level="semantic")
+        if parsed is not None:
+            semantic_items.append(parsed)
 
     if not semantic_items:
         return []
@@ -444,15 +377,8 @@ def clear_session(session_id: str) -> None:
     sid = str(session_id or "").strip()
     if not sid:
         return
-    with _MEMORY_LOCK:
-        _load_locked()
-        if sid in _MEMORY_STORE:
-            _MEMORY_STORE.pop(sid, None)
-            _persist_locked()
+    memory_rows().delete(sid)
 
 
 def reset_memory_store_for_tests() -> None:
-    global _MEMORY_STORE_LOADED, _MEMORY_STORE
-    with _MEMORY_LOCK:
-        _MEMORY_STORE = {}
-        _MEMORY_STORE_LOADED = False
+    open_session_rows.cache_clear()
