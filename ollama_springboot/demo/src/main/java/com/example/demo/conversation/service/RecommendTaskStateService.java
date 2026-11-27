@@ -120,6 +120,14 @@ public class RecommendTaskStateService {
             String modelName,
             List<ImageAttachment> images
     ) {
+        return createRecommendTask(owner, conversationId, query, timeout, maxIterations, modelName,
+                images, null, timeout == null ? DEFAULT_TIMEOUT_SECONDS : timeout);
+    }
+
+    @Transactional
+    public RecommendTaskCreateOutcome createRecommendTask(String owner, String conversationId, String query,
+            Integer timeout, Integer maxIterations, String modelName, List<ImageAttachment> images,
+            Map<String, Object> routingDecision, double executionBudgetSeconds) {
         String normalizedQuery = trimToNull(query);
         if (normalizedQuery == null) {
             throw new IllegalArgumentException("query is required");
@@ -138,7 +146,7 @@ public class RecommendTaskStateService {
                             maxIterations == null ? DEFAULT_MAX_ITERATIONS : maxIterations,
                             conversation.getId(),
                             images
-                    )
+                    ).routed(routingDecision, executionBudgetSeconds)
             );
         } catch (Exception ex) {
             errorMessage = toErrorMessage(ex);

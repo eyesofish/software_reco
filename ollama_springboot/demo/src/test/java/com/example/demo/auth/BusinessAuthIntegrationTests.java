@@ -21,7 +21,7 @@ import java.util.concurrent.CopyOnWriteArrayList;
 import static org.assertj.core.api.Assertions.assertThat;
 
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT,
-        properties = {"spring.datasource.url=${CHAT_TEST_DB_URL:jdbc:h2:mem:auth_integration;DB_CLOSE_DELAY=-1}"})
+        properties = {"spring.datasource.url=${CHAT_TEST_DB_URL:jdbc:h2:mem:auth_integration;DB_CLOSE_DELAY=-1}", "app.routing.mode=off"})
 class BusinessAuthIntegrationTests {
     static final ObjectMapper JSON = new ObjectMapper();
     static final List<String> CALLS = new CopyOnWriteArrayList<>();
@@ -213,6 +213,42 @@ class BusinessAuthIntegrationTests {
         assertThat(call(HttpMethod.DELETE, "/api/conversations/" + id, alice, null).getStatusCode().value()).isEqualTo(200);
         assertThat(call(HttpMethod.PUT, "/api/session-state/" + id, alice, Map.of("facts", Map.of())).getStatusCode().value()).isEqualTo(404);
         assertThat(conversations.findById(legacy.getId()).orElseThrow().getOwnerUserId()).isNull();
+    }
+
+    @Test void unresolvedRoutingDoesNotWriteOrStartTasks() throws Exception {
+        String alice = login("alice"), id = conversation(alice);
+        long conversationCount = conversations.count(), taskCount = tasks.count(), messageCount = messages.count();
+        int calls = CALLS.size();
+        for (String route : List.of("/api/chat", "/api/chat/stream")) {
+            var response = call(HttpMethod.POST, route, alice, Map.of("routing_mode", "auto", "current_conversation_id", id,
+                    "messages", List.of(Map.of("role", "user", "content", "continue or start something else"))));
+            assertThat(response.getStatusCode().value()).isEqualTo(200);
+            assertThat(response.getBody()).contains("routing_clarification", id);
+        }
+        for (String route : List.of("/api/v1/recommend", "/api/v1/recommend/stream")) {
+            var response = call(HttpMethod.POST, route, alice,
+                    Map.of("routing_mode", "auto", "current_conversation_id", id, "query", "ambiguous"));
+            assertThat(response.getStatusCode().value()).isEqualTo(200);
+            assertThat(response.getBody()).contains("routing_clarification", id);
+        }
+        assertThat(conversations.count()).isEqualTo(conversationCount);
+        assertThat(tasks.count()).isEqualTo(taskCount);
+        assertThat(messages.count()).isEqualTo(messageCount);
+        assertThat(CALLS).hasSize(calls);
+    }
+
+    @Test void structuredThreadWinsAndConflictingNewIsRejectedBeforeWrites() throws Exception {
+        String alice = login("alice"), bob = login("bob"), id = conversation(alice);
+        long taskCount = tasks.count(); int calls = CALLS.size();
+        assertThat(call(HttpMethod.POST, "/api/v1/recommend", alice,
+                Map.of("routing_mode", "new", "thread_id", id, "query", "test")).getStatusCode().value()).isEqualTo(400);
+        assertThat(call(HttpMethod.POST, "/api/v1/recommend", bob,
+                Map.of("routing_mode", "auto", "thread_id", id, "query", "test")).getStatusCode().value()).isEqualTo(404);
+        assertThat(tasks.count()).isEqualTo(taskCount); assertThat(CALLS).hasSize(calls);
+        var response = call(HttpMethod.POST, "/api/v1/recommend/stream", alice,
+                Map.of("routing_mode", "auto", "thread_id", id, "query", "test"));
+        assertThat(response.getStatusCode().value()).isEqualTo(200);
+        assertThat(response.getBody()).contains("event:final", id).doesNotContain("routing_clarification");
     }
 
     @Test void preflightAndHealthRemainAvailable() {

@@ -551,6 +551,13 @@ def entry_node(state: AgentState) -> dict[str, Any]:
 @traceable(name="routing_decision")
 def routing_node(state: AgentState) -> dict[str, Any]:
     """Routing node: decide between rag/direct/hitl."""
+    resolved = _get_field(state, "routing_decision", None)
+    if resolved:
+        from .intent_routing import RoutingResolution
+        decision = RoutingResolution.model_validate(resolved)
+        if decision.status != "ready":
+            raise ValueError("Unresolved routing must be clarified before graph execution")
+        return {"mode": decision.mode}
     user_query = _get_field(state, "user_query", "")
     routing_query = _extract_current_user_query(user_query)
     started_at = time.perf_counter()

@@ -6,6 +6,10 @@ import java.util.List;
 import java.util.Map;
 
 public class OllamaChatResponse {
+    private Map<String, Object> clarification;
+    public Map<String, Object> getClarification() { return clarification; }
+    public void setClarification(Map<String, Object> value) { clarification = value; }
+
     private String model;
     private Message message;
     private boolean done;

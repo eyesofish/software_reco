@@ -43,6 +43,8 @@ services:
         required: false
       - path: ./.runtime/auth-demo.env
         required: true
+      - path: ./.runtime/routing.env
+        required: false
     environment:
       - CHROMA_DB_PATH=/data/chroma
       - INGEST_PATH=/data/ingest
@@ -60,6 +62,7 @@ services:
       - ./.runtime/legacy-agent:/data/legacy:ro
       - ./fastapi_demo/ingest_docs:/data/ingest:ro
       - fastapi_versioned_assets:/data/ingest/.versions
+      - ./.runtime/routing:/data/routing:ro
     restart: unless-stopped
 
   spring-boot:
@@ -69,6 +72,8 @@ services:
     env_file:
       - path: ./.runtime/auth-demo.env
         required: true
+      - path: ./.runtime/routing.env
+        required: false
     environment:
       - APP_FASTAPI_BASE_URL=http://fastapi:8000
       - SPRING_PROFILES_ACTIVE=postgres
@@ -83,6 +88,8 @@ services:
         condition: service_started
       postgres:
         condition: service_healthy
+    volumes:
+      - ./.runtime/routing:/data/routing:ro
     restart: unless-stopped
 
   frontend:

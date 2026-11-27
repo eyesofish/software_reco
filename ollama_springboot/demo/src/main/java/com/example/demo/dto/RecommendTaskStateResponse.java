@@ -4,8 +4,13 @@ import com.fasterxml.jackson.annotation.JsonProperty;
 
 import java.time.Instant;
 import java.util.List;
+import java.util.Map;
 
 public class RecommendTaskStateResponse {
+    private Map<String, Object> clarification;
+    public Map<String, Object> getClarification() { return clarification; }
+    public void setClarification(Map<String, Object> value) { clarification = value; }
+
     @JsonProperty("task_id")
     private String taskId;
     @JsonProperty("conversation_id")

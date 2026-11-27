@@ -3,6 +3,7 @@ package com.example.demo.controller;
 import org.springframework.security.core.annotation.AuthenticationPrincipal;
 import org.springframework.security.oauth2.jwt.Jwt;
 import com.example.demo.auth.BusinessAccess;
+import com.example.demo.routing.RoutingPreflight;
 import com.example.demo.client.FastApiClient;
 import com.example.demo.client.FastApiClient.RecommendStreamEvent;
 import com.example.demo.conversation.entity.ConversationEntity;
@@ -75,17 +76,20 @@ public class ChatController {
 
     private final FastApiClient fastApiClient;
     private final BusinessAccess access;
+    private final RoutingPreflight routing;
     private final ConversationService conversationService;
     private final RecommendTaskStateService recommendTaskStateService;
 
     public ChatController(
             FastApiClient fastApiClient,
             BusinessAccess access,
+            RoutingPreflight routing,
             ConversationService conversationService,
             RecommendTaskStateService recommendTaskStateService
     ) {
         this.fastApiClient = fastApiClient;
         this.access = access;
+        this.routing = routing;
         this.conversationService = conversationService;
         this.recommendTaskStateService = recommendTaskStateService;
     }
@@ -93,7 +97,7 @@ public class ChatController {
     @PostMapping("/api/chat")
     public OllamaChatResponse chat(@RequestBody OllamaChatRequest request, @AuthenticationPrincipal Jwt jwt) {
         logIncomingMessages(request);
-        String requestConversationId = access.matchingConversation(jwt.getSubject(), request.getConversationId(), request.getSessionId());
+        String requestConversationId = null;
 
         List<ImageAttachment> images = normalizeImages(request.getImages());
         String rawQuery = extractLastUserMessage(request.getMessages());
@@ -107,6 +111,16 @@ public class ChatController {
             );
         }
 
+        RoutingPreflight.Outcome route = routing.resolve(jwt.getSubject(), rawQuery, !images.isEmpty(),
+                request.getRoutingMode(), request.getConversationId(), request.getSessionId(), request.getThreadId(),
+                request.getCurrentConversationId(), 60);
+        if (route.needsClarification()) {
+            OllamaChatResponse response = buildResponse(request, String.valueOf(route.clarification().get("prompt")), null, null);
+            response.setStatus("routing_clarification");
+            response.setClarification(route.clarification());
+            return response;
+        }
+        requestConversationId = route.conversationId();
         ConversationEntity conversation = conversationService.ensureOwnedConversation(
                 jwt.getSubject(),
                 requestConversationId,
@@ -177,7 +191,8 @@ public class ChatController {
                 60,
                 3,
                 request.getModel(),
-                images
+                images,
+                route.decision(), route.remainingSeconds()
         );
         RecommendTaskStateResponse taskState = taskOutcome.taskState();
         String status = firstNonBlank(taskState.getStatus(), "FAILED");
@@ -193,7 +208,7 @@ public class ChatController {
                 sessionId,
                 conversation.getId()
         );
-        return buildResponse(
+        OllamaChatResponse response = buildResponse(
                 request.getModel(),
                 content,
                 conversation.getId(),
@@ -203,13 +218,13 @@ public class ChatController {
                 pendingSubQuestions,
                 taskOutcome.retrievedImages()
         );
+        return response;
     }
 
     @PostMapping(value = "/api/chat/stream", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
     public SseEmitter chatStream(@RequestBody OllamaChatRequest request, @AuthenticationPrincipal Jwt jwt) {
         logIncomingMessages(request);
 
-        String requestConversationId = access.matchingConversation(jwt.getSubject(), request.getConversationId(), request.getSessionId());
         List<ImageAttachment> images = normalizeImages(request.getImages());
         String rawQuery = extractLastUserMessage(request.getMessages());
         String query = MultimodalSupport.queryOrDefault(rawQuery, images);
@@ -217,6 +232,16 @@ public class ChatController {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "user message or image is required");
         }
 
+        RoutingPreflight.Outcome route = routing.resolve(jwt.getSubject(), rawQuery, !images.isEmpty(),
+                request.getRoutingMode(), request.getConversationId(), request.getSessionId(), request.getThreadId(),
+                request.getCurrentConversationId(), 60);
+        if (route.needsClarification()) {
+            SseEmitter emitter = new SseEmitter(0L);
+            sendSseEvent(emitter, "routing_clarification", route.clarificationPayload());
+            emitter.complete();
+            return emitter;
+        }
+        String requestConversationId = route.conversationId();
         ConversationEntity conversation = conversationService.ensureOwnedConversation(
                 jwt.getSubject(),
                 requestConversationId,
@@ -317,7 +342,7 @@ public class ChatController {
         });
         StringBuilder tokenBuffer = new StringBuilder();
         Disposable subscription = fastApiClient.streamRecommendCancellable(
-                new RecommendRequest(enrichedQuery, 60, 3, conversation.getId(), images),
+                new RecommendRequest(enrichedQuery, 60, 3, conversation.getId(), images).routed(route.decision(), route.remainingSeconds()),
                 event -> forwardChatStreamEvent(
                         stream, event, streamTaskId, conversation, conversation.getId(), tokenBuffer
                 ),

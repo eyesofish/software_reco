@@ -7,6 +7,7 @@ import { Loading } from './style'
 import ChatErrorBoundary from './components/ChatErrorBoundary'
 import ChatInput from './components/ChatInput'
 import ConfirmationPanel from './components/ConfirmationPanel'
+import ClarificationPanel from './components/ClarificationPanel'
 import MessageList from './components/MessageList'
 import useChatLogic from './useChatLogic'
 import './index.css'
@@ -25,6 +26,11 @@ export default function Chat () {
     error,
     pendingImages,
     apiBaseUrl,
+    routingMode,
+    setRoutingMode,
+    routingClarification,
+    handleRoutingChoice,
+    handleRoutingDismiss,
     handleDeleteChat,
     requestHandler,
     handleConfirmClicked,
@@ -43,6 +49,14 @@ export default function Chat () {
           { (loading || showConfirming) && <Loading src={LOADING} /> }
           { hasTalk ? <MessageList apiBaseUrl={apiBaseUrl} messages={messages} /> : <About /> }
 
+          {routingClarification && <ClarificationPanel
+            key={routingClarification.clarification_id}
+            busy={loading}
+            clarification={routingClarification}
+            language={language}
+            onCancel={handleRoutingDismiss}
+            onSubmit={(answer, option) => handleRoutingChoice(option, answer)}
+          />}
           {showConfirming && (
             <div className='hitlPanel'>
               <div className='hitlPanelTitle'>Confirming...</div>
@@ -50,8 +64,8 @@ export default function Chat () {
             </div>
           )}
 
-          {(taskStatus === 'ERROR' || taskStatus === 'INCOMPLETE') && error && (
-            <p className='systemMessage'>{error}</p>
+          {error && (
+            <p className='systemMessage' role='alert'>{error}</p>
           )}
 
           <ConfirmationPanel
@@ -68,6 +82,9 @@ export default function Chat () {
             onImagesSelected={handleImagesSelected}
             onSend={requestHandler}
             textAreaRef={textAreaRef}
+            routingMode={routingMode}
+            onRoutingModeChange={setRoutingMode}
+            disabled={loading || Boolean(routingClarification) || taskStatus === 'PENDING_CONFIRM'}
           />
         </ColumnContainer>
       </RowContainer>

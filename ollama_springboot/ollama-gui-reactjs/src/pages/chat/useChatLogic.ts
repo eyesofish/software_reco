@@ -5,13 +5,15 @@ import { useNavigate, useParams } from 'react-router-dom'
 import ROUTES from '~/constants/routes'
 import {
   CHAT_CONVERSATION_IDS_STORAGE_KEY,
-  CONFIRM_FAILED_MESSAGE,
   CONFIRM_GUIDE_MESSAGE,
   CONFIRM_ONLY_PATTERN,
   REQUEST_FAILED_MESSAGE
 } from '~/constants/chat'
 import {
   ChatStreamEvent,
+  Clarification,
+  RoutingMode,
+  RoutingOption,
   ImageAttachment,
   Message,
   RetrievedImage,
@@ -25,11 +27,12 @@ import { disChats, useChats } from '~/stores/chats'
 import { addMessage, updateMessageContent } from '~/stores/chats/actions'
 import { useConfig } from '~/stores/config'
 import {
-  createConversationRequester,
+  listConversationTasksRequester,
   resolveApiBase,
   streamChatConfirmRequester,
   streamChatRequester
 } from '~/services/requester'
+import { routingFields } from '~/services/routing'
 
 export type TaskStatus =
   | 'IDLE'
@@ -48,7 +51,7 @@ export interface ChatState {
   subQuestions : string[],
   finalResult : string,
   loading : boolean,
-  error ?: string
+  error ?: string,
 }
 
 interface ConversationTaskSnapshot {
@@ -58,7 +61,7 @@ interface ConversationTaskSnapshot {
   subQuestions : string[],
   finalResult : string,
   loading : boolean,
-  error ?: string
+  error ?: string,
 }
 
 interface UseChatLogicResult {
@@ -74,6 +77,11 @@ interface UseChatLogicResult {
   error : string|undefined,
   pendingImages : ImageAttachment[],
   apiBaseUrl : string,
+  routingMode : RoutingMode,
+  routingClarification : Clarification|undefined,
+  setRoutingMode : (mode : RoutingMode) => void,
+  handleRoutingChoice : (option : RoutingOption|undefined, answer : string) => Promise<void>,
+  handleRoutingDismiss : () => void,
   handleDeleteChat : (chatId : number) => void,
   requestHandler : () => void,
   handleConfirmClicked : () => Promise<void>,
@@ -253,46 +261,49 @@ function resolveConversationIdFromMessages (messages : Message[]|undefined) : st
   return undefined
 }
 
-function streamEventType (event : ChatStreamEvent) {
-  return event.type
+interface PendingTurn {
+  chatId : number,
+  text : string,
+  images : ImageAttachment[],
+  message : Message,
+  originConversationId ?: string,
+  committed : boolean
 }
 
-function streamEventTaskId (event : ChatStreamEvent) {
-  return normalizeText(event.task_id) || undefined
-}
-
-function streamEventConversationId (event : ChatStreamEvent) {
-  return normalizeText(event.conversation_id || event.session_id) || undefined
-}
+type StreamSender = (onEvent : (event : ChatStreamEvent) => void, signal : AbortSignal) => Promise<void>
 
 export default function useChatLogic () : UseChatLogicResult {
   const navigate = useNavigate()
   const { chat } = useParams()
   const chats = useChats('chats')
   const { autoSaveChats, modelUrl, modelName } = useConfig('config')
-
   const [chatState, setChatState] = useState<ChatState>(DEFAULT_VIEW_STATE)
   const [pendingImages, setPendingImages] = useState<ImageAttachment[]>([])
-
+  const [routingMode, setRoutingMode] = useState<RoutingMode>('explicit')
+  const [routingClarification, setRoutingClarification] = useState<Clarification>()
+  const [pendingTurn, setPendingTurn] = useState<PendingTurn>()
   const rowContainerRef = useRef<HTMLDivElement>(null)
   const textAreaRef = useRef<HTMLTextAreaElement>(null)
-
   const chatsRef = useRef(chats)
-  const currentChatIdRef = useRef<number|null>(null)
-  const activeConversationIdRef = useRef<string|undefined>(undefined)
   const renderCountRef = useRef(0)
+  const currentChatIdRef = useRef<number|null>(null)
+  const activeConversationIdRef = useRef<string>()
   const activeStreamRunIdRef = useRef(0)
   const streamAbortControllerRef = useRef<AbortController|null>(null)
-  const confirmInFlightRef = useRef(false)
+  const pendingTurnRef = useRef<PendingTurn>()
+  const internalNavigationRef = useRef<number>()
   const conversationSnapshotsRef = useRef<Record<string, ConversationTaskSnapshot>>({})
+
+  const appendLocal = useCallback((chatId : number, message : Message) => {
+    const next = [...chatsRef.current]
+    next[chatId] = [...(next[chatId] || []), message]
+    chatsRef.current = next
+    disChats(addMessage({ index: chatId, message }))
+  }, [])
 
   const applySnapshot = useCallback((snapshot : ConversationTaskSnapshot) => {
     conversationSnapshotsRef.current[snapshot.conversationId] = snapshot
-
-    if (activeConversationIdRef.current !== snapshot.conversationId) {
-      return
-    }
-
+    if (activeConversationIdRef.current !== snapshot.conversationId) return
     setChatState((prev) => ({
       ...prev,
       conversationId: snapshot.conversationId,
@@ -301,755 +312,327 @@ export default function useChatLogic () : UseChatLogicResult {
       subQuestions: snapshot.subQuestions,
       finalResult: snapshot.finalResult,
       loading: snapshot.loading,
-      error: snapshot.error
+      error: snapshot.error,
     }))
   }, [])
 
   const setSnapshotPatch = useCallback((conversationId : string, patch : Partial<ConversationTaskSnapshot>) => {
     const current = conversationSnapshotsRef.current[conversationId] || createEmptySnapshot(conversationId)
-    const nextTaskStatus = patch.taskStatus ?? current.taskStatus
-    const nextLoading = patch.loading ?? current.loading
-
+    const status = patch.taskStatus ?? current.taskStatus
     applySnapshot({
-      ...current,
-      ...patch,
-      loading: nextTaskStatus === 'PENDING_CONFIRM' ? false : nextLoading,
-      conversationId
+      ...current, ...patch, conversationId,
+      loading: status === 'PENDING_CONFIRM' ? false : (patch.loading ?? current.loading)
     })
   }, [applySnapshot])
 
+  const setConversationIdForChat = useCallback((chatId : number, conversationId : string) => {
+    const ids = readConversationIdsStorage()
+    while (ids.length <= chatId) ids.push('')
+    ids[chatId] = conversationId
+    writeConversationIdsStorage(ids)
+  }, [])
+
   const stopActiveStream = useCallback(() => {
-    const controller = streamAbortControllerRef.current
     const conversationId = activeConversationIdRef.current
-    if (controller && conversationId) {
-      const snapshot = conversationSnapshotsRef.current[conversationId]
-      if (snapshot?.loading) {
-        setSnapshotPatch(conversationId, {
-          loading: false,
-          taskStatus: 'INCOMPLETE',
-          error: 'Generation stopped before completion; partial text is preserved.'
-        })
-      }
+    if (streamAbortControllerRef.current && conversationId && conversationSnapshotsRef.current[conversationId]?.loading) {
+      setSnapshotPatch(conversationId, {
+        loading: false, taskStatus: 'INCOMPLETE',
+        error: 'Generation stopped before completion; partial text is preserved.'
+      })
     }
     activeStreamRunIdRef.current += 1
-    controller?.abort()
+    streamAbortControllerRef.current?.abort()
     streamAbortControllerRef.current = null
   }, [setSnapshotPatch])
 
-  const beginStream = useCallback(() => {
-    const runId = activeStreamRunIdRef.current + 1
-    activeStreamRunIdRef.current = runId
+  const clearTurn = useCallback(() => {
+    pendingTurnRef.current = undefined
+    setPendingTurn(undefined)
+    setRoutingClarification(undefined)
+  }, [])
+
+  const restoreTurn = useCallback(() => {
+    const turn = pendingTurnRef.current
+    if (turn && !turn.committed) {
+      if (textAreaRef.current) textAreaRef.current.value = turn.text
+      setPendingImages(turn.images)
+    }
+    clearTurn()
+  }, [clearTurn])
+
+  // Routing can finish before a conversation exists. Do not persist a local user
+  // message until the server names its actual destination; a clarification can
+  // then be retried without duplicating or moving committed history.
+  const runStream = useCallback(async (
+    send : StreamSender,
+    turn ?: PendingTurn,
+    resumeConversationId ?: string,
+    resumeTaskId ?: string
+  ) => {
+    if (streamAbortControllerRef.current) return
     const controller = new AbortController()
     streamAbortControllerRef.current = controller
-    return {
-      runId,
-      controller
+    const runId = ++activeStreamRunIdRef.current
+    let chatId = turn?.chatId ?? currentChatIdRef.current ?? 0
+    let conversationId = resumeConversationId
+    let taskId = resumeTaskId
+    let text = ''
+    let images : RetrievedImage[] = []
+    let assistantTime : number|undefined
+    let terminal = false
+    const active = () => activeStreamRunIdRef.current === runId
+    const update = (patch : Partial<ConversationTaskSnapshot>) => {
+      if (conversationId) setSnapshotPatch(conversationId, { activeTaskId: taskId, ...patch })
+      else setChatState((prev) => ({ ...prev, ...patch, taskId, loading: patch.loading ?? prev.loading }))
     }
-  }, [])
-
-  const isStreamActive = useCallback((runId : number) => {
-    return activeStreamRunIdRef.current === runId
-  }, [])
-
-  const getConversationIdForChat = useCallback((chatId : number) => {
-    const messages = chatsRef.current[chatId] || []
-    const fromMessages = resolveConversationIdFromMessages(messages)
-    if (fromMessages) return fromMessages
-
-    const mapping = readConversationIdsStorage()
-    const fromStorage = normalizeText(mapping[chatId])
-    return fromStorage || undefined
-  }, [])
-
-  const setConversationIdForChat = useCallback((chatId : number, conversationId : string) => {
-    const mapping = readConversationIdsStorage()
-    while (mapping.length <= chatId) {
-      mapping.push('')
-    }
-    mapping[chatId] = conversationId
-    writeConversationIdsStorage(mapping)
-  }, [])
-
-  const deleteConversationIdForChat = useCallback((chatId : number) => {
-    const mapping = readConversationIdsStorage()
-    if (chatId < 0 || chatId >= mapping.length) return
-    mapping.splice(chatId, 1)
-    writeConversationIdsStorage(mapping)
-  }, [])
-
-  const appendAssistantMessage = useCallback((
-    chatId : number,
-    content : string,
-    conversationId ?: string,
-    taskId ?: string,
-    retrievedImages : RetrievedImage[] = []
-  ) => {
-    const text = normalizeText(content)
-    if (!text) return
-
-    const existing = chatsRef.current[chatId] || []
-    const duplicated = existing.some(
-      (message) => message.role === 'assistant' && normalizeText(message.content) === text
-    )
-    if (duplicated) return
-
-    disChats(addMessage({
-      index: chatId,
-      message: createAssistantMessage(text, conversationId, taskId, retrievedImages)
-    }))
-  }, [])
-
-  const handleImagesSelected = useCallback((images : ImageAttachment[]) => {
-    setPendingImages((current) => [...current, ...images].slice(0, 4))
-  }, [])
-
-  const handleImageRemoved = useCallback((index : number) => {
-    setPendingImages((current) => current.filter((_, imageIndex) => imageIndex !== index))
-  }, [])
-
-  const handleDeleteChat = useCallback((chatId : number) => {
-    const deletedConversationId = getConversationIdForChat(chatId)
-    deleteConversationIdForChat(chatId)
-    if (deletedConversationId) {
-      delete conversationSnapshotsRef.current[deletedConversationId]
-    }
-
-    if (currentChatIdRef.current !== chatId) return
-
-    stopActiveStream()
-    setPendingImages([])
-    activeConversationIdRef.current = undefined
-    setChatState({
-      ...DEFAULT_VIEW_STATE,
-      currentChatId: null
-    })
-  }, [deleteConversationIdForChat, getConversationIdForChat, stopActiveStream])
-
-  const tryConfirmCurrentTask = useCallback(async () : Promise<boolean> => {
-    const chatId = currentChatIdRef.current
-    const conversationId = activeConversationIdRef.current
-    if (chatId === null || !conversationId) return false
-
-    const snapshot = conversationSnapshotsRef.current[conversationId]
-    const taskId = normalizeText(snapshot?.activeTaskId || chatState.taskId || conversationId)
-    const subQuestions = snapshot?.subQuestions || chatState.subQuestions
-    const status = snapshot?.taskStatus || chatState.taskStatus
-
-    if (!taskId || status !== 'PENDING_CONFIRM' || subQuestions.length === 0) {
-      return false
-    }
-
-    if (confirmInFlightRef.current) {
-      return true
-    }
-
-    stopActiveStream()
-    confirmInFlightRef.current = true
-    setSnapshotPatch(conversationId, {
-      activeTaskId: taskId,
-      loading: true,
-      taskStatus: 'CONFIRMING',
-      error: undefined
-    })
-
-    const {
-      runId: streamRunId,
-      controller: streamAbort
-    } = beginStream()
-
-    let streamedTaskId : string|undefined = taskId
-    let streamedConversationId = conversationId
-    let streamedText = ''
-    let streamedRetrievedImages : RetrievedImage[] = []
-    let streamMessageTime : number|undefined
-    let streamReachedTerminal = false
-
-    const ensureStreamAssistant = () => {
-      if (streamMessageTime !== undefined) return
-      const draft = createAssistantMessage('', streamedConversationId, streamedTaskId)
-      streamMessageTime = draft.time
-      disChats(addMessage({
-        index: chatId,
-        message: draft
-      }))
-    }
-
-    const syncStreamAssistant = () => {
-      if (streamMessageTime === undefined) return
-      disChats(updateMessageContent({
-        index: chatId,
-        time: streamMessageTime,
-        content: streamedText,
-        conversationId: streamedConversationId,
-        sessionId: streamedTaskId,
-        retrievedImages: streamedRetrievedImages
-      }))
-    }
-
-    try {
-      await streamChatConfirmRequester(
-        modelUrl,
-        {
-          model: modelName,
-          task_id: taskId,
-          session_id: taskId,
-          conversation_id: conversationId,
-          action: 'confirm',
-          sub_questions: subQuestions,
-          comment: 'confirm'
-        },
-        (event : ChatStreamEvent) => {
-          if (!isStreamActive(streamRunId)) {
-            return
-          }
-
-          const eventType = streamEventType(event)
-          const eventTaskId = streamEventTaskId(event)
-          const eventConversationId = streamEventConversationId(event)
-
-          if (eventTaskId) {
-            streamedTaskId = eventTaskId
-          }
-          if (eventConversationId) {
-            streamedConversationId = eventConversationId
-          }
-
-          if (eventType === 'meta' || eventType === 'node' || eventType === 'state') {
-            setSnapshotPatch(streamedConversationId, {
-              activeTaskId: streamedTaskId,
-              taskStatus: 'GENERATING',
-              loading: true,
-              error: undefined
-            })
-            return
-          }
-
-          if (event.type === 'token') {
-            if (!event.delta) return
-            streamedText += event.delta
-            ensureStreamAssistant()
-            syncStreamAssistant()
-            setSnapshotPatch(streamedConversationId, {
-              activeTaskId: streamedTaskId,
-              taskStatus: 'GENERATING',
-              finalResult: streamedText,
-              loading: true,
-              error: undefined
-            })
-            return
-          }
-
-          if (event.type === 'awaiting_confirmation') {
-            streamReachedTerminal = true
-            setSnapshotPatch(streamedConversationId, {
-              activeTaskId: streamedTaskId,
-              taskStatus: 'PENDING_CONFIRM',
-              subQuestions: normalizeSubQuestions(event.sub_questions),
-              finalResult: '',
-              loading: false,
-              error: undefined
-            })
-            return
-          }
-
-          if (event.type === 'final') {
-            streamReachedTerminal = true
-            const finalAnswer = normalizeText(event.final_answer) || streamedText
-            streamedRetrievedImages = event.retrieved_images
-            if (finalAnswer) {
-              streamedText = finalAnswer
-              if (streamMessageTime !== undefined) {
-                syncStreamAssistant()
-              } else {
-                appendAssistantMessage(
-                  chatId,
-                  finalAnswer,
-                  streamedConversationId,
-                  streamedTaskId,
-                  streamedRetrievedImages
-                )
-              }
-            }
-
-            setSnapshotPatch(streamedConversationId, {
-              activeTaskId: streamedTaskId,
-              taskStatus: 'DONE',
-              subQuestions: [],
-              finalResult: finalAnswer,
-              loading: false,
-              error: undefined
-            })
-            return
-          }
-
-          if (event.type === 'error') {
-            streamReachedTerminal = true
-            setSnapshotPatch(streamedConversationId, {
-              activeTaskId: streamedTaskId,
-              taskStatus: 'ERROR',
-              loading: false,
-              error: toErrorMessage(event.message, CONFIRM_FAILED_MESSAGE)
-            })
-          }
-        },
-        streamAbort.signal
-      )
-
-      if (!isStreamActive(streamRunId)) {
-        return true
+    const commitDestination = (destination ?: string) => {
+      if (!destination) return
+      conversationId = destination
+      if (!turn || turn.committed) return
+      const source = turn.originConversationId
+      if (source && source !== destination) {
+        const ids = readConversationIdsStorage()
+        const existing = chatsRef.current.findIndex((messages, index) =>
+          (resolveConversationIdFromMessages(messages) || ids[index]) === destination)
+        chatId = existing >= 0 ? existing : chatsRef.current.length
       }
-
-      if (!streamReachedTerminal && normalizeText(streamedText)) {
-        if (streamMessageTime !== undefined) {
-          syncStreamAssistant()
-        } else {
-          appendAssistantMessage(
-            chatId,
-            streamedText,
-            streamedConversationId,
-            streamedTaskId,
-            streamedRetrievedImages
-          )
+      turn.chatId = chatId
+      turn.committed = true
+      turn.message = { ...turn.message, conversationId: destination, sessionId: taskId }
+      setConversationIdForChat(chatId, destination)
+      activeConversationIdRef.current = destination
+      const changedChat = currentChatIdRef.current !== chatId
+      currentChatIdRef.current = chatId
+      setChatState((prev) => ({ ...prev, currentChatId: chatId, conversationId: destination }))
+      appendLocal(chatId, turn.message)
+      setPendingTurn(undefined)
+      if (changedChat) {
+        internalNavigationRef.current = chatId
+        navigate(`${ROUTES.CHAT}/${chatId + 1}`)
+      }
+    }
+    const syncAssistant = () => {
+      if (!text) return
+      if (assistantTime === undefined) {
+        const message = createAssistantMessage(text, conversationId, taskId, images)
+        // Timestamp identity must differ even when a stub sends both turns in one tick.
+        message.time = Math.max(message.time, (turn?.message.time || 0) + 1)
+        assistantTime = message.time
+        appendLocal(chatId, message)
+      } else {
+        disChats(updateMessageContent({
+          index: chatId, time: assistantTime, content: text,
+          conversationId, sessionId: taskId, retrievedImages: images
+        }))
+      }
+    }
+    update({ loading: true, taskStatus: 'GENERATING', error: undefined })
+    try {
+      await send((event) => {
+        if (!active() || terminal) return
+        if (event.type === 'routing_clarification') {
+          terminal = true
+          setRoutingClarification(event.clarification)
+          setChatState((prev) => ({ ...prev, loading: false, taskStatus: 'IDLE', taskId: undefined, error: undefined }))
+          return
         }
-        setSnapshotPatch(streamedConversationId, {
-          activeTaskId: streamedTaskId,
-          taskStatus: 'INCOMPLETE',
-          subQuestions: [],
-          finalResult: streamedText,
-          loading: false,
+        taskId = normalizeText(event.task_id) || taskId
+        commitDestination(normalizeText(event.conversation_id) || undefined)
+        if (event.type === 'meta' || event.type === 'node' || event.type === 'state') {
+          update({ loading: true, taskStatus: 'GENERATING' })
+          return
+        }
+        if (event.type === 'token') {
+          text += event.delta
+          syncAssistant()
+          update({ finalResult: text })
+          return
+        }
+        if (event.type === 'awaiting_confirmation') {
+          terminal = true
+          update({ loading: false, taskStatus: 'PENDING_CONFIRM', subQuestions: normalizeSubQuestions(event.sub_questions) })
+          clearTurn()
+          return
+        }
+        if (event.type === 'final') {
+          terminal = true
+          text = event.final_answer || text
+          images = event.retrieved_images
+          syncAssistant()
+          const incomplete = ['incomplete', 'expired', 'cancelled'].includes(event.status.toLowerCase())
+          update({ loading: false, taskStatus: incomplete ? 'INCOMPLETE' : 'DONE', finalResult: text, subQuestions: [] })
+          clearTurn()
+          return
+        }
+        if (event.type === 'error') {
+          terminal = true
+          update({ loading: false, taskStatus: 'ERROR', error: event.message })
+          if (turn && !turn.committed) restoreTurn()
+          else clearTurn()
+        }
+      }, controller.signal)
+      if (active() && !terminal) {
+        update({
+          loading: false, taskStatus: 'INCOMPLETE',
           error: 'Stream ended before a completion event; partial text is preserved.'
         })
+        if (turn && !turn.committed) restoreTurn()
+        else clearTurn()
       }
-
-      return true
-    }
-    catch (streamError) {
-      if (!streamAbort.signal.aborted && isStreamActive(streamRunId)) {
-        setSnapshotPatch(conversationId, {
-          activeTaskId: taskId,
-          loading: false,
-          taskStatus: 'ERROR',
-          error: toErrorMessage(streamError, CONFIRM_FAILED_MESSAGE)
+    } catch (error) {
+      if (active() && !controller.signal.aborted) {
+        update({
+          loading: false, taskStatus: 'ERROR',
+          error: toErrorMessage(error)
         })
+        if (turn && !turn.committed) restoreTurn()
+        else clearTurn()
       }
-      return true
+    } finally {
+      if (streamAbortControllerRef.current === controller) streamAbortControllerRef.current = null
     }
-    finally {
-      if (streamAbortControllerRef.current === streamAbort) {
-        streamAbortControllerRef.current = null
-      }
-      confirmInFlightRef.current = false
-    }
-  }, [
-    appendAssistantMessage,
-    chatState.subQuestions,
-    chatState.taskId,
-    chatState.taskStatus,
-    modelName,
-    modelUrl,
-    beginStream,
-    isStreamActive,
-    setSnapshotPatch,
-    stopActiveStream
-  ])
+  }, [appendLocal, clearTurn, navigate, restoreTurn, setConversationIdForChat, setSnapshotPatch])
+
+  const submitTurn = useCallback(async (turn : PendingTurn, mode : RoutingMode, destination ?: string) => {
+    setRoutingClarification(undefined)
+    await runStream(async (onEvent, signal) => {
+      const payload = { model: modelName, stream: true, messages: [{ role: 'user' as const, content: turn.text }], images: turn.images }
+      await streamChatRequester(modelUrl, { ...payload, ...routingFields(mode, destination) }, onEvent, signal)
+    }, turn)
+  }, [modelName, modelUrl, runStream])
+
+  const handleConfirmClicked = useCallback(async () => {
+    const conversationId = activeConversationIdRef.current
+    const snapshot = conversationId ? conversationSnapshotsRef.current[conversationId] : undefined
+    if (!conversationId || !snapshot?.activeTaskId || snapshot.taskStatus !== 'PENDING_CONFIRM') return
+    await runStream((onEvent, signal) => streamChatConfirmRequester(modelUrl, {
+      model: modelName, task_id: snapshot.activeTaskId, session_id: snapshot.activeTaskId,
+      conversation_id: conversationId, action: 'confirm', sub_questions: snapshot.subQuestions, comment: 'confirm'
+    }, onEvent, signal), undefined, conversationId, snapshot.activeTaskId)
+  }, [modelName, modelUrl, runStream])
 
   const requestHandler = useCallback(() => {
     const chatId = currentChatIdRef.current
-    if (chatId === null) return
-    if (chatState.taskStatus === 'CONFIRMING') return
-
+    if (chatId === null || streamAbortControllerRef.current || pendingTurnRef.current) return
     const text = normalizeText(textAreaRef.current?.value)
     const images = [...pendingImages]
-    if (!text && images.length === 0) return
-
-    if (images.length === 0 && CONFIRM_ONLY_PATTERN.test(text)) {
-      if (textAreaRef.current) {
-        textAreaRef.current.value = ''
-        textAreaRef.current.focus()
-      }
-
-      void (async () => {
-        const handled = await tryConfirmCurrentTask()
-        if (handled) {
-          return
-        }
-        appendAssistantMessage(chatId, CONFIRM_GUIDE_MESSAGE, activeConversationIdRef.current, chatState.taskId)
-      })()
+    if (!text && !images.length) return
+    if (!images.length && CONFIRM_ONLY_PATTERN.test(text)) {
+      if (chatState.taskStatus === 'PENDING_CONFIRM') void handleConfirmClicked()
+      else appendLocal(chatId, createAssistantMessage(CONFIRM_GUIDE_MESSAGE, activeConversationIdRef.current))
+      if (textAreaRef.current) textAreaRef.current.value = ''
       return
     }
+    if (chatState.taskStatus === 'PENDING_CONFIRM') return
+    const turn : PendingTurn = {
+      chatId, text, images, committed: false,
+      originConversationId: activeConversationIdRef.current,
+      message: createUserMessage(text || 'Analyze the attached image.', undefined, undefined, images)
+    }
+    pendingTurnRef.current = turn
+    setPendingTurn({ ...turn })
+    if (textAreaRef.current) textAreaRef.current.value = ''
+    setPendingImages([])
+    // A blank chat is an explicit new-conversation action unless auto was chosen.
+    void submitTurn(turn, routingMode, turn.originConversationId)
+  }, [appendLocal, chatState.taskStatus, handleConfirmClicked, pendingImages, routingMode, submitTurn])
 
-    stopActiveStream()
+  const handleRoutingChoice = useCallback(async (option : RoutingOption|undefined, answer : string) => {
+    const turn = pendingTurnRef.current
+    if (!turn || turn.committed || streamAbortControllerRef.current) return
+    if (answer.trim()) {
+      turn.text = `${turn.text}\n\n${answer.trim()}`.trim()
+      turn.message = { ...turn.message, content: turn.text }
+      setPendingTurn({ ...turn })
+    }
+    if (option) await submitTurn(turn, option.kind === 'new' ? 'new' : 'explicit', option.conversation_id)
+    else if (answer.trim()) await submitTurn(turn, routingMode, turn.originConversationId)
+  }, [routingMode, submitTurn])
 
-    void (async () => {
-      let conversationId = activeConversationIdRef.current
-      if (!conversationId) {
-        try {
-          const createdConversation = await createConversationRequester(modelUrl)
-          conversationId = normalizeText(createdConversation.conversation_id)
-          if (!conversationId) {
-            throw new Error('Invalid conversation id returned from backend')
-          }
-          activeConversationIdRef.current = conversationId
-          setConversationIdForChat(chatId, conversationId)
-        }
-        catch (error) {
-          setChatState((prev) => ({
-            ...prev,
-            taskStatus: 'ERROR',
-            loading: false,
-            error: toErrorMessage(error)
-          }))
-          return
-        }
-      }
-
-      const taskConversationId = conversationId
-      const displayText = text || 'Analyze the attached image.'
-      const displayContent = images.length > 0
-        ? `${displayText}\n\n[Attached images: ${images.map((image) => image.name).join(', ')}]`
-        : displayText
-
-      disChats(addMessage({
-        index: chatId,
-        message: createUserMessage(
-          displayContent,
-          taskConversationId,
-          taskConversationId,
-          images
-        )
-      }))
-
-      if (textAreaRef.current) {
-        textAreaRef.current.value = ''
-        textAreaRef.current.focus()
-      }
+  const handleDeleteChat = useCallback((chatId : number) => {
+    const ids = readConversationIdsStorage()
+    const conversationId = resolveConversationIdFromMessages(chatsRef.current[chatId]) || ids[chatId]
+    ids.splice(chatId, 1)
+    writeConversationIdsStorage(ids)
+    if (conversationId) delete conversationSnapshotsRef.current[conversationId]
+    if (currentChatIdRef.current === chatId) {
+      stopActiveStream()
+      clearTurn()
       setPendingImages([])
-
-      setSnapshotPatch(taskConversationId, {
-        activeTaskId: taskConversationId,
-        taskStatus: 'GENERATING',
-        loading: true,
-        error: undefined,
-        subQuestions: [],
-        finalResult: ''
-      })
-
-      const {
-        runId: streamRunId,
-        controller: streamAbort
-      } = beginStream()
-
-      let streamedTaskId : string|undefined = taskConversationId
-      let streamedConversationId = taskConversationId
-      let streamedText = ''
-      let streamedRetrievedImages : RetrievedImage[] = []
-      let streamMessageTime : number|undefined
-      let streamReachedTerminal = false
-
-      const ensureStreamAssistant = () => {
-        if (streamMessageTime !== undefined) return
-        const draft = createAssistantMessage('', streamedConversationId, streamedTaskId)
-        streamMessageTime = draft.time
-        disChats(addMessage({
-          index: chatId,
-          message: draft
-        }))
-      }
-
-      const syncStreamAssistant = () => {
-        if (streamMessageTime === undefined) return
-        disChats(updateMessageContent({
-          index: chatId,
-          time: streamMessageTime,
-          content: streamedText,
-          conversationId: streamedConversationId,
-          sessionId: streamedTaskId,
-          retrievedImages: streamedRetrievedImages
-        }))
-      }
-
-      try {
-        await streamChatRequester(
-          modelUrl,
-          {
-            model: modelName,
-            stream: true,
-            conversation_id: taskConversationId,
-            session_id: taskConversationId,
-            messages: [{ role: 'user', content: text }],
-            images
-          },
-          (event : ChatStreamEvent) => {
-            if (!isStreamActive(streamRunId)) {
-              return
-            }
-
-            const eventType = streamEventType(event)
-            const eventTaskId = streamEventTaskId(event)
-            const eventConversationId = streamEventConversationId(event)
-
-            if (eventTaskId) {
-              streamedTaskId = eventTaskId
-            }
-            if (eventConversationId) {
-              streamedConversationId = eventConversationId
-            }
-
-            if (eventType === 'meta' || eventType === 'node' || eventType === 'state') {
-              setSnapshotPatch(streamedConversationId, {
-                activeTaskId: streamedTaskId,
-                taskStatus: 'GENERATING',
-                loading: true,
-                error: undefined
-              })
-              return
-            }
-
-            if (event.type === 'token') {
-              if (!event.delta) return
-              streamedText += event.delta
-              ensureStreamAssistant()
-              syncStreamAssistant()
-              setSnapshotPatch(streamedConversationId, {
-                activeTaskId: streamedTaskId,
-                taskStatus: 'GENERATING',
-                finalResult: streamedText,
-                loading: true,
-                error: undefined
-              })
-              return
-            }
-
-            if (event.type === 'awaiting_confirmation') {
-              streamReachedTerminal = true
-              setSnapshotPatch(streamedConversationId, {
-                activeTaskId: streamedTaskId,
-                taskStatus: 'PENDING_CONFIRM',
-                subQuestions: normalizeSubQuestions(event.sub_questions),
-                finalResult: streamedText,
-                loading: false,
-                error: undefined
-              })
-              return
-            }
-
-            if (event.type === 'final') {
-              streamReachedTerminal = true
-              const finalAnswer = normalizeText(event.final_answer) || streamedText
-              streamedRetrievedImages = event.retrieved_images
-              if (finalAnswer) {
-                streamedText = finalAnswer
-                if (streamMessageTime !== undefined) {
-                  syncStreamAssistant()
-                } else {
-                  appendAssistantMessage(
-                    chatId,
-                    finalAnswer,
-                    streamedConversationId,
-                    streamedTaskId,
-                    streamedRetrievedImages
-                  )
-                }
-              }
-              setSnapshotPatch(streamedConversationId, {
-                activeTaskId: streamedTaskId,
-                taskStatus: 'DONE',
-                subQuestions: [],
-                finalResult: finalAnswer,
-                loading: false,
-                error: undefined
-              })
-              return
-            }
-
-            if (event.type === 'error') {
-              streamReachedTerminal = true
-              setSnapshotPatch(streamedConversationId, {
-                activeTaskId: streamedTaskId,
-                taskStatus: 'ERROR',
-                loading: false,
-                error: toErrorMessage(event.message, REQUEST_FAILED_MESSAGE)
-              })
-            }
-          },
-          streamAbort.signal
-        )
-
-        if (!isStreamActive(streamRunId)) {
-          return
-        }
-
-        if (!streamReachedTerminal && normalizeText(streamedText)) {
-          if (streamMessageTime !== undefined) {
-            syncStreamAssistant()
-          } else {
-            appendAssistantMessage(
-              chatId,
-              streamedText,
-              streamedConversationId,
-              streamedTaskId,
-              streamedRetrievedImages
-            )
-          }
-          setSnapshotPatch(streamedConversationId, {
-            activeTaskId: streamedTaskId,
-            taskStatus: 'INCOMPLETE',
-            subQuestions: [],
-            finalResult: streamedText,
-            loading: false,
-            error: 'Stream ended before a completion event; partial text is preserved.'
-          })
-        }
-      }
-      catch (streamError) {
-        if (!streamAbort.signal.aborted && isStreamActive(streamRunId)) {
-          setSnapshotPatch(taskConversationId, {
-            activeTaskId: streamedTaskId,
-            loading: false,
-            taskStatus: 'ERROR',
-            error: toErrorMessage(streamError)
-          })
-        }
-      }
-      finally {
-        if (streamAbortControllerRef.current === streamAbort) {
-          streamAbortControllerRef.current = null
-        }
-      }
-    })()
-  }, [
-    appendAssistantMessage,
-    chatState.taskId,
-    chatState.taskStatus,
-    modelName,
-    modelUrl,
-    pendingImages,
-    beginStream,
-    isStreamActive,
-    setConversationIdForChat,
-    setSnapshotPatch,
-    stopActiveStream,
-    tryConfirmCurrentTask
-  ])
-
-  const handleConfirmClicked = useCallback(async () => {
-    const handled = await tryConfirmCurrentTask()
-    if (handled) {
-      return
+      activeConversationIdRef.current = undefined
+      setChatState(DEFAULT_VIEW_STATE)
     }
+  }, [clearTurn, stopActiveStream])
 
-    const conversationId = activeConversationIdRef.current
-    if (!conversationId) {
-      return
-    }
-
-    setSnapshotPatch(conversationId, {
-      taskStatus: 'ERROR',
-      loading: false,
-      error: 'No pending confirmation task found. Please submit a new query first.'
-    })
-  }, [
-    setSnapshotPatch,
-    tryConfirmCurrentTask
-  ])
-
-  useEffect(() => {
-    chatsRef.current = chats
-  }, [chats])
-
+  useEffect(() => { chatsRef.current = chats }, [chats])
   useEffect(() => {
     if (!autoSaveChats) return
     renderCountRef.current += 1
     if (renderCountRef.current < 3) return
-    Store.set(
-      'chats',
-      chats.map((chatMessages) => chatMessages.map((message) => ({
-        ...message,
-        images: undefined
-      })))
-    )
+    Store.set('chats', chats.map((messages) => messages.map((message) => ({ ...message, images: undefined }))))
   }, [autoSaveChats, chats])
 
   useEffect(() => {
-    stopActiveStream()
-    setPendingImages([])
-  }, [chat, stopActiveStream])
-
-  useEffect(() => {
     const chatId = getChatIndex()
+    if (internalNavigationRef.current === chatId) {
+      internalNavigationRef.current = undefined
+      return
+    }
+    stopActiveStream()
+    clearTurn()
+    setPendingImages([])
     if (chatId < 0 || chatId > chatsRef.current.length) {
       navigate(ROUTES.ROOT)
       return
     }
-
     currentChatIdRef.current = chatId
-    const currentMessages = chatsRef.current[chatId] || []
-    const resolvedConversationId = resolveConversationIdFromMessages(currentMessages) || getConversationIdForChat(chatId)
-
-    if (!resolvedConversationId) {
-      activeConversationIdRef.current = undefined
-      setChatState({
-        ...DEFAULT_VIEW_STATE,
-        currentChatId: chatId,
-        loading: false
+    const conversationId = resolveConversationIdFromMessages(chatsRef.current[chatId]) || readConversationIdsStorage()[chatId]
+    setRoutingMode('explicit')
+    activeConversationIdRef.current = conversationId
+    setChatState({ ...DEFAULT_VIEW_STATE, currentChatId: chatId, conversationId })
+    if (!conversationId) return
+    const snapshot = conversationSnapshotsRef.current[conversationId]
+    if (snapshot) {
+      applySnapshot(snapshot)
+      return
+    }
+    const controller = new AbortController()
+    void listConversationTasksRequester(modelUrl, conversationId, controller.signal).then((tasks) => {
+      if (controller.signal.aborted || conversationSnapshotsRef.current[conversationId] || !tasks.length) return
+      const task = tasks[0]
+      const rawStatus = String(task.status).toUpperCase()
+      const status : TaskStatus = rawStatus === 'PENDING_CONFIRM' ? 'PENDING_CONFIRM'
+          : rawStatus === 'GENERATING' || rawStatus === 'CONFIRMED' ? 'GENERATING'
+            : rawStatus === 'DONE' ? 'DONE' : 'INCOMPLETE'
+      applySnapshot({
+        ...createEmptySnapshot(conversationId),
+        activeTaskId: task.task_id || task.taskId, taskStatus: status,
+        subQuestions: normalizeSubQuestions(task.sub_questions ?? task.subQuestions ?? task.pending_sub_questions),
+        finalResult: task.final_result || task.finalResult || '',
+        error: task.error_message || task.errorMessage
       })
-      return
-    }
+    }).catch(() => { /* Existing local history stays usable if refresh fails. */ })
+    return () => controller.abort()
+  }, [chat, applySnapshot, clearTurn, modelUrl, navigate, stopActiveStream])
 
-    activeConversationIdRef.current = resolvedConversationId
-    setConversationIdForChat(chatId, resolvedConversationId)
-
-    const existingSnapshot = conversationSnapshotsRef.current[resolvedConversationId]
-    if (existingSnapshot) {
-      applySnapshot(existingSnapshot)
-      return
-    }
-
-    setChatState((prev) => ({
-      ...prev,
-      currentChatId: chatId,
-      conversationId: resolvedConversationId,
-      taskId: resolvedConversationId,
-      taskStatus: 'IDLE',
-      subQuestions: [],
-      finalResult: '',
-      loading: false,
-      error: undefined
-    }))
-  }, [chat, chats.length, applySnapshot, getConversationIdForChat, navigate, setConversationIdForChat])
-
-  useEffect(() => {
-    scroller(rowContainerRef, 1)
-  }, [chats, chatState.currentChatId])
-
-  useEffect(() => {
-    return () => {
-      stopActiveStream()
-    }
-  }, [stopActiveStream])
+  useEffect(() => { scroller(rowContainerRef, 1) }, [chats, chatState.currentChatId, pendingTurn])
+  useEffect(() => () => { stopActiveStream() }, [stopActiveStream])
 
   const messages = useMemo(() => {
-    if (chatState.currentChatId === null) return []
-    return chats[chatState.currentChatId] || []
-  }, [chatState.currentChatId, chats])
+    const committed = chatState.currentChatId === null ? [] : (chats[chatState.currentChatId] || [])
+    return pendingTurn && !pendingTurn.committed && pendingTurn.chatId === chatState.currentChatId
+      ? [...committed, pendingTurn.message] : committed
+  }, [chatState.currentChatId, chats, pendingTurn])
 
   return {
-    rowContainerRef,
-    textAreaRef,
-    messages,
-    hasTalk: messages.length > 0,
-    taskId: chatState.taskId,
-    taskStatus: chatState.taskStatus,
-    subQuestions: chatState.subQuestions,
-    finalResult: chatState.finalResult,
-    loading: chatState.loading,
-    error: chatState.error,
-    pendingImages,
-    apiBaseUrl: resolveApiBase(modelUrl),
-    handleDeleteChat,
-    requestHandler,
-    handleConfirmClicked,
-    handleImagesSelected,
-    handleImageRemoved
+    rowContainerRef, textAreaRef, messages, hasTalk: messages.length > 0,
+    taskId: chatState.taskId, taskStatus: chatState.taskStatus, subQuestions: chatState.subQuestions,
+    finalResult: chatState.finalResult, loading: chatState.loading, error: chatState.error,
+    pendingImages, apiBaseUrl: resolveApiBase(modelUrl), routingMode, setRoutingMode,
+    routingClarification,
+    handleDeleteChat, requestHandler, handleConfirmClicked, handleRoutingChoice,
+    handleRoutingDismiss: restoreTurn,
+    handleImagesSelected: (images) => setPendingImages((current) => [...current, ...images].slice(0, 4)),
+    handleImageRemoved: (index) => setPendingImages((current) => current.filter((_, i) => i !== index))
   }
 }

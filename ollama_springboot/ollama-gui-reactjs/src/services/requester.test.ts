@@ -45,3 +45,20 @@ describe('recommendation stream failures', () => {
     })
   })
 })
+
+test('preserves terminal routing clarification without manufacturing a task', async () => {
+  global.TextDecoder = TextDecoder as typeof global.TextDecoder
+  const frame = new TextEncoder().encode(`event: routing_clarification\ndata: ${JSON.stringify({
+    clarification: {
+      clarification_id: 'route-1', prompt: 'Which conversation?',
+      options: [{ kind: 'existing', conversation_id: 'a', title: 'Redis' }, { kind: 'new', title: 'New' }]
+    }
+  })}\n\n`)
+  global.fetch = jest.fn().mockResolvedValue({ ok: true, body: { getReader: () => ({
+    read: jest.fn().mockResolvedValueOnce({ done: false, value: frame }).mockResolvedValueOnce({ done: true })
+  }) } })
+  const events : unknown[] = []
+  await streamRecommendRequester('http://localhost:8080', { query: 'continue', routing_mode: 'auto' }, (event) => events.push(event))
+  expect(events[0]).toMatchObject({ type: 'routing_clarification', clarification: { clarification_id: 'route-1', options: [{ conversation_id: 'a' }, { kind: 'new' }] } })
+  expect(events[0]).not.toHaveProperty('task_id')
+})

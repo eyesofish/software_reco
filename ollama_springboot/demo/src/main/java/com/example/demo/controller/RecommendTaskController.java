@@ -3,6 +3,11 @@ package com.example.demo.controller;
 import org.springframework.security.core.annotation.AuthenticationPrincipal;
 import org.springframework.security.oauth2.jwt.Jwt;
 import com.example.demo.auth.BusinessAccess;
+import com.example.demo.routing.RoutingPreflight;
+import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.support.TransactionSynchronization;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
+
 import com.example.demo.client.FastApiClient;
 import com.example.demo.conversation.service.RecommendTaskStateService;
 import com.example.demo.dto.ConversationCreateRequest;
@@ -36,6 +41,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.atomic.AtomicBoolean;
 import reactor.core.Disposable;
 
 @RestController
@@ -46,22 +52,26 @@ public class RecommendTaskController {
     private final RecommendTaskStateService recommendTaskStateService;
     private final FastApiClient fastApiClient;
     private final BusinessAccess access;
+    private final RoutingPreflight routing;
 
     public RecommendTaskController(
             RecommendTaskStateService recommendTaskStateService,
             FastApiClient fastApiClient,
-            BusinessAccess access
+            BusinessAccess access,
+            RoutingPreflight routing
     ) {
         this.recommendTaskStateService = recommendTaskStateService;
         this.fastApiClient = fastApiClient;
         this.access = access;
+        this.routing = routing;
     }
 
     @PostMapping("/conversations")
     @ResponseStatus(HttpStatus.CREATED)
     public ConversationCreateResponse createConversation(
-            @RequestBody(required = false) ConversationCreateRequest request
-    , @AuthenticationPrincipal Jwt jwt) {
+            @RequestBody(required = false) ConversationCreateRequest request,
+            @AuthenticationPrincipal Jwt jwt
+    ) {
         String title = request == null ? null : request.getTitle();
         String modelName = request == null ? null : request.getModelName();
         ConversationCreateResponse response = recommendTaskStateService.createConversation(jwt.getSubject(), title, modelName);
@@ -69,6 +79,7 @@ public class RecommendTaskController {
         return response;
     }
 
+    @Transactional
     @PostMapping("/recommend")
     public RecommendTaskStateResponse recommend(@RequestBody RecommendTaskCreateRequest request, @AuthenticationPrincipal Jwt jwt) {
         if (request == null) {
@@ -80,7 +91,15 @@ public class RecommendTaskController {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "query or image is required");
         }
 
-        String conversationId = access.matchingConversation(jwt.getSubject(), request.getConversationId(), request.getSessionId());
+        RoutingPreflight.Outcome route = routing.resolve(jwt.getSubject(), request.getQuery(), !images.isEmpty(),
+                request.getRoutingMode(), request.getConversationId(), request.getSessionId(), request.getThreadId(),
+                request.getCurrentConversationId(), request.getTimeout() == null ? 60 : request.getTimeout());
+        if (route.needsClarification()) {
+            RecommendTaskStateResponse response = new RecommendTaskStateResponse();
+            response.setStatus("routing_clarification"); response.setClarification(route.clarification());
+            return response;
+        }
+        String conversationId = route.conversationId();
 
         RecommendTaskStateService.RecommendTaskCreateOutcome outcome = recommendTaskStateService.createRecommendTask(
                 jwt.getSubject(),
@@ -89,7 +108,8 @@ public class RecommendTaskController {
                 request.getTimeout(),
                 request.getMaxIterations(),
                 null,
-                images
+                images,
+                route.decision(), route.remainingSeconds()
         );
 
         RecommendTaskStateResponse response = outcome.taskState();
@@ -103,6 +123,7 @@ public class RecommendTaskController {
         return response;
     }
 
+    @Transactional
     @PostMapping(value = "/recommend/stream", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
     public SseEmitter recommendStream(@RequestBody RecommendTaskCreateRequest request, @AuthenticationPrincipal Jwt jwt) {
         if (request == null) {
@@ -114,7 +135,15 @@ public class RecommendTaskController {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "query or image is required");
         }
 
-        String conversationId = access.matchingConversation(jwt.getSubject(), request.getConversationId(), request.getSessionId());
+        RoutingPreflight.Outcome route = routing.resolve(jwt.getSubject(), request.getQuery(), !images.isEmpty(),
+                request.getRoutingMode(), request.getConversationId(), request.getSessionId(), request.getThreadId(),
+                request.getCurrentConversationId(), request.getTimeout() == null ? 60 : request.getTimeout());
+        if (route.needsClarification()) {
+            SseEmitter emitter = new SseEmitter(0L);
+            sendSseEvent(emitter, "routing_clarification", route.clarificationPayload());
+            emitter.complete(); return emitter;
+        }
+        String conversationId = route.conversationId();
         RecommendTaskStateResponse taskState = recommendTaskStateService.createStreamingTask(
                 jwt.getSubject(),
                 conversationId,
@@ -144,30 +173,33 @@ public class RecommendTaskController {
             );
             recommendTaskStateService.applyStreamEvent(taskId, "error", disconnected);
         });
-        Disposable subscription = fastApiClient.streamRecommendCancellable(
-                new RecommendRequest(
-                        query,
-                        request.getTimeout() == null ? 60 : request.getTimeout(),
-                        request.getMaxIterations() == null ? 3 : request.getMaxIterations(),
-                        resolvedConversationId,
-                        images
-                ),
-                event -> {
-                    try {
-                        Map<String, Object> payload = normalizeStreamPayload(
-                                event.type(), event.payload(), taskId, resolvedConversationId, resolvedConversationId
-                        );
-                        String eventType = firstNonBlank(asText(payload.get("type")), "state");
-                        recommendTaskStateService.applyStreamEvent(taskId, eventType, payload);
-                        stream.send(eventType, payload);
-                    } catch (RuntimeException error) {
-                        stream.fail(error);
-                    }
-                },
-                stream::fail,
-                stream::complete
-        );
-        stream.attach(subscription);
+        startAfterCommit(() -> {
+            Disposable subscription = fastApiClient.streamRecommendCancellable(
+                    new RecommendRequest(
+                            query,
+                            request.getTimeout() == null ? 60 : request.getTimeout(),
+                            request.getMaxIterations() == null ? 3 : request.getMaxIterations(),
+                            resolvedConversationId,
+                            images
+                    ).routed(route.decision(), route.remainingSeconds()),
+                    event -> {
+                        try {
+                            Map<String, Object> payload = normalizeStreamPayload(
+                                    event.type(), event.payload(), taskId, resolvedConversationId, resolvedConversationId
+                            );
+                            String eventType = firstNonBlank(asText(payload.get("type")), "state");
+                            recommendTaskStateService.applyStreamEvent(taskId, eventType, payload);
+                            stream.send(eventType, payload);
+                            if ("awaiting_confirmation".equals(eventType)) stream.complete();
+                        } catch (RuntimeException error) {
+                            stream.fail(error);
+                        }
+                    },
+                    error -> failStream(stream, taskId, error),
+                    stream::complete
+            );
+            stream.attach(subscription);
+        });
 
         return emitter;
     }
@@ -176,8 +208,9 @@ public class RecommendTaskController {
     public SseEmitter confirmStream(
             @RequestParam("taskId") String taskId,
             @RequestParam(name = "action", defaultValue = "confirm") String action,
-            @RequestBody(required = false) RecommendTaskConfirmRequest request
-    , @AuthenticationPrincipal Jwt jwt) {
+            @RequestBody(required = false) RecommendTaskConfirmRequest request,
+            @AuthenticationPrincipal Jwt jwt
+    ) {
         access.task(jwt.getSubject(), taskId);
         List<String> subQuestions = request == null ? List.of() : request.getSubQuestions();
         String comment = request == null ? null : request.getComment();
@@ -228,11 +261,12 @@ public class RecommendTaskController {
                         String eventType = firstNonBlank(asText(payload.get("type")), "state");
                         recommendTaskStateService.applyStreamEvent(resolvedTaskId, eventType, payload);
                         stream.send(eventType, payload);
+                        if ("awaiting_confirmation".equals(eventType)) stream.complete();
                     } catch (RuntimeException error) {
                         stream.fail(error);
                     }
                 },
-                stream::fail,
+                error -> failStream(stream, resolvedTaskId, error),
                 stream::complete
         );
         stream.attach(subscription);
@@ -244,8 +278,9 @@ public class RecommendTaskController {
     public RecommendTaskStateResponse confirm(
             @RequestParam("taskId") String taskId,
             @RequestParam(name = "action", defaultValue = "confirm") String action,
-            @RequestBody(required = false) RecommendTaskConfirmRequest request
-    , @AuthenticationPrincipal Jwt jwt) {
+            @RequestBody(required = false) RecommendTaskConfirmRequest request,
+            @AuthenticationPrincipal Jwt jwt
+    ) {
         access.task(jwt.getSubject(), taskId);
         List<String> subQuestions = request == null ? List.of() : request.getSubQuestions();
         String comment = request == null ? null : request.getComment();
@@ -284,6 +319,18 @@ public class RecommendTaskController {
     public RecommendTaskStateResponse getTaskStateCompatibility(@PathVariable String taskId, @AuthenticationPrincipal Jwt jwt) {
         access.task(jwt.getSubject(), taskId);
         return recommendTaskStateService.getTaskState(taskId);
+    }
+
+    private void startAfterCommit(Runnable start) {
+        if (!TransactionSynchronizationManager.isActualTransactionActive()) { start.run(); return; }
+        TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
+            @Override public void afterCommit() { start.run(); }
+        });
+    }
+
+    private void failStream(SseStreamHandle stream, String taskId, Throwable error) {
+        recommendTaskStateService.applyStreamEvent(taskId, "error", Map.of("message", "Agent stream failed"));
+        stream.fail(error);
     }
 
     private Map<String, Object> normalizeStreamPayload(
@@ -333,11 +380,16 @@ public class RecommendTaskController {
                 );
             }
             case "token" -> {
-                normalized.put(
-                        "delta",
-                        firstNonBlank(asText(source.get("delta")), asText(source.get("message")), "")
-                );
+                Object delta = source.getOrDefault("delta", source.get("message"));
+                normalized.put("delta", delta == null ? "" : String.valueOf(delta));
                 normalized.put("node", firstNonBlank(asText(source.get("node")), ""));
+            }
+            case "routing_clarification", "route_decision" -> {
+                normalized.putAll(source);
+                normalized.put("type", eventType);
+                normalized.put("task_id", taskId);
+                normalized.put("conversation_id", resolvedConversationId);
+                normalized.put("session_id", resolvedSessionId);
             }
             case "awaiting_confirmation" -> normalized.put(
                     "sub_questions",
@@ -353,6 +405,7 @@ public class RecommendTaskController {
             );
             case "final" -> {
                 normalized.put("status", firstNonBlank(asText(source.get("status")), "success"));
+                if (source.get("stop_reason") != null) normalized.put("stop_reason", source.get("stop_reason"));
                 normalized.put(
                         "final_answer",
                         firstNonBlank(
@@ -404,7 +457,7 @@ public class RecommendTaskController {
     private String normalizeEventType(String rawType) {
         String normalized = firstNonBlank(rawType, "state").toLowerCase(Locale.ROOT);
         return switch (normalized) {
-            case "meta", "node", "token", "state", "awaiting_confirmation", "final", "error" -> normalized;
+            case "meta", "node", "token", "state", "awaiting_confirmation", "routing_clarification", "route_decision", "final", "error" -> normalized;
             default -> "state";
         };
     }

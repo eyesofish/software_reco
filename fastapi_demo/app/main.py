@@ -21,6 +21,7 @@ from software_recommend_system.performance import TimingMiddleware
 configure_runtime_file_logging()
 
 from app.api.v1.routes import router as v1_router  # noqa: E402  (must follow configure_runtime_file_logging)
+from app.api.v1.routing_api import router as routing_router  # noqa: E402
 
 
 @asynccontextmanager
@@ -60,6 +61,7 @@ app.add_middleware(
 app.add_middleware(TimingMiddleware)
 
 app.include_router(v1_router, prefix="/api/v1")
+app.include_router(routing_router, prefix="/api/v1")
 
 
 @app.exception_handler(RequestValidationError)

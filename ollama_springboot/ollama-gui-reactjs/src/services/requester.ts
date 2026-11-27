@@ -1,6 +1,7 @@
 import { authenticatedFetch } from '~/services/auth'
 import {
   ChatStreamEvent,
+  Clarification,
   ConversationCreateRequest,
   ConversationCreateResponse,
   ImageAttachment,
@@ -8,7 +9,8 @@ import {
   RecommendTaskConfirmRequest,
   RecommendTaskCreateRequest,
   RecommendTaskStateResponse,
-  RetrievedImage
+  RetrievedImage,
+  RoutingMode
 } from '~/entities/messages'
 
 function trimUrl (value : string) {
@@ -125,7 +127,10 @@ export interface ChatStreamRequest {
   stream ?: boolean,
   conversation_id ?: string,
   session_id ?: string,
-  images ?: ImageAttachment[]
+  images ?: ImageAttachment[],
+  routing_mode ?: RoutingMode,
+  current_conversation_id ?: string,
+  thread_id ?: string
 }
 
 export interface ChatConfirmStreamRequest {
@@ -194,9 +199,30 @@ const STREAM_EVENT_TYPES = [
   'token',
   'state',
   'awaiting_confirmation',
+  'routing_clarification',
   'final',
   'error'
 ] as const
+
+export function normalizeClarification (raw : unknown, kind : Clarification['kind']) : Clarification {
+  const value = isRecord(raw) ? raw : {}
+  const options = Array.isArray(value.options) ? value.options : []
+  return {
+    clarification_id: asTrimmedText(value.clarification_id) || '',
+    kind,
+    prompt: asTrimmedText(value.prompt) || 'Please provide more information to continue.',
+    options: options.filter(isRecord).flatMap((option) => {
+      if (option.kind !== 'existing' && option.kind !== 'new') return []
+      const conversationId = asTrimmedText(option.conversation_id)
+      if (option.kind === 'existing' && !conversationId) return []
+      return [{
+        kind: option.kind as 'existing' | 'new',
+        conversation_id: conversationId,
+        title: asTrimmedText(option.title) || (option.kind === 'new' ? 'New conversation' : 'Current conversation')
+      }]
+    })
+  }
+}
 
 function isStreamEventType (value : string) : value is ChatStreamEvent['type'] {
   return (STREAM_EVENT_TYPES as readonly string[]).includes(value)
@@ -219,6 +245,10 @@ function normalizeStreamEvent (
   const taskId = asTrimmedText(payload.task_id ?? payload.taskId)
   const conversationId = asTrimmedText(payload.conversation_id ?? payload.conversationId)
   const sessionId = asTrimmedText(payload.session_id ?? payload.sessionId)
+
+  if (type === 'routing_clarification') {
+    return { type, clarification: normalizeClarification(payload.clarification ?? payload, 'routing') }
+  }
 
   if (type === 'meta') {
     return {
@@ -454,4 +484,11 @@ export async function confirmTaskRequester (
     body: JSON.stringify(payload),
     signal
   })
+}
+
+export async function listConversationTasksRequester (modelUrl : string, conversationId : string, signal ?: AbortSignal) {
+  return await requestJson<RecommendTaskStateResponse[]>(
+    `${resolveApiBase(modelUrl)}/api/v1/conversations/${encodeURIComponent(conversationId)}/tasks`,
+    { signal }
+  )
 }
