@@ -27,6 +27,10 @@ def test_server_environment_preserves_optional_rates_and_isolates_knowledge(tmp_
     configured = Settings(_env_file=None).model_copy(update={
         "LLM_COST_PROMPT_PER_1K_USD": None,
         "LLM_COST_COMPLETION_PER_1K_USD": None,
+        "JEV_INPUT_COST_PER_MILLION_USD": None,
+        "JEV_OUTPUT_COST_PER_MILLION_USD": None,
+        "ROUTING_REVIEW_INPUT_COST_PER_MILLION_USD": None,
+        "ROUTING_REVIEW_OUTPUT_COST_PER_MILLION_USD": None,
         "LLM_COST_MODEL_RATES": {"test-model": {"prompt": 0.1, "completion": 0.2}},
         "KB_MANIFEST_PATH": str(tmp_path / "parent-manifest.sqlite3"),
     })

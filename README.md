@@ -508,6 +508,7 @@ Evaluation utilities live in `fastapi_demo/evaluation/`, including:
 - retrieval benchmark scripts
 - smoke and real end-to-end evaluation scripts
 - LangSmith export/evaluation helpers
+- [Intent routing, guarded query expansion, and KB snapshot rollout](fastapi_demo/evaluation/ROUTING.md)
 
 ## Repository Notes
 

@@ -179,3 +179,51 @@ def test_single_call_wrapper_preserves_arguments_and_does_not_retry(monkeypatch)
         gov.accounted_completion(create=create, scene="router", model="m", timeout=2)
     assert create.call_count == 2
     assert gov.usage_snapshot()["overall"]["cost_usd"] is None
+
+
+def test_live_routing_usage_counts_once_and_shadow_ledger_stays_separate(monkeypatch):
+    from software_recommend_system import intent_routing as routing
+
+    questions = {"intent": {"type": "choice", "criteria": {"yes": "yes", "no": "no"}}}
+    raw = {
+        "answers": {
+            "intent": {
+                "type": "choice",
+                "choice": "yes",
+                "probabilities": {"yes": 0.99, "no": 0.01},
+                "confidence": 0.99,
+            }
+        },
+        "_routing_usage": {
+            "provider": "typesafe",
+            "model": "jev",
+            "input_tokens": 2,
+            "output_tokens": 1,
+            "cost_usd": 0.001,
+        },
+    }
+    provider = SimpleNamespace(decide=Mock(return_value=raw))
+    monkeypatch.setattr(routing, "LIVE_PROVIDER", provider)
+    routing.decide_choices(questions, {}, request_id="routing-request")
+    assert gov.usage_snapshot(request_id="routing-request")["overall"]["calls"] == 1
+    shadow_provider = SimpleNamespace(decide=Mock(return_value=raw))
+    result = routing.decide_choices(questions, {}, client=shadow_provider, request_id="shadow-request")
+    assert result.usage[0]["cost_usd"] == 0.001
+    assert gov.usage_snapshot(request_id="shadow-request")["overall"]["calls"] == 0
+
+
+def test_legacy_offline_adapter_includes_only_its_actual_calls(monkeypatch):
+    from evaluation.routing_evaluate import _legacy
+    from software_recommend_system import router
+
+    priced(monkeypatch)
+    gov.record_response_usage(scene="unrelated", model="m", response={})
+
+    def route(*args, **kwargs):
+        gov.record_response_usage(scene="legacy_router", model="m", response=response())
+        return SimpleNamespace(mode="rag", fallback_used=False)
+
+    monkeypatch.setattr(router, "route_query", route)
+    result = _legacy({"query": "q", "binding": "new"})
+    assert len(result["usage"]) == 1
+    assert result["usage"][0]["cost_usd"] == 0.02

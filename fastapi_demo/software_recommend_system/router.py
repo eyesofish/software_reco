@@ -4,10 +4,10 @@ import json
 import logging
 import re
 import time
-from dataclasses import dataclass
-from typing import Any
+from typing import Any, Literal
 
 import openai
+from pydantic import BaseModel, Field
 
 from .config import settings
 from .execution_control import current_request_timeout
@@ -118,7 +118,13 @@ def _build_router_messages(user_query: str, context_hint: str | None) -> list[di
             "- rag: needs external retrieval/evidence to answer reliably.",
             "- direct: can be answered directly without retrieval.",
             "- hitl: ambiguous/high-risk query requiring human review.",
-            "Return JSON object only with keys: mode, confidence, reason.",
+            "Return JSON object only. It must conform to this schema:",
+            json.dumps(RoutingDecision.model_json_schema(), ensure_ascii=False),
+            "The required semantic fields are user_intent, target_objects, and tasks.",
+            (
+                "Each task must contain action, description, and target; use an empty string "
+                "when a value is not applicable."
+            ),
             "confidence must be in [0,1].",
             "Use the labeled examples below as guidance; assess confidence for the actual input independently.",
             "Do not output markdown.",
@@ -207,27 +213,27 @@ def _is_transient_connection_error(exc: Exception) -> bool:
     error_name = type(exc).__name__.lower()
     message = str(exc or "").lower()
     return (
-        "timeout" in error_name
-        or "connection" in error_name
-        or "connection error" in message
-        or "timed out" in message
+        "timeout" in error_name or "connection" in error_name or "connection error" in message or "timed out" in message
     )
 
 
-@dataclass(frozen=True)
-class RoutingDecision:
-    mode: str
-    confidence: float
-    reason: str
-    fallback_used: bool
+class IntentTask(BaseModel):
+    action: str = Field(default="", description="Action to execute for this task")
+    description: str = Field(default="", description="Concrete task description")
+    target: str = Field(default="", description="Specific target for this task")
+
+
+class RoutingDecision(BaseModel):
+    mode: Literal["rag", "direct", "hitl"]
+    confidence: float = Field(default=0.0, ge=0.0, le=1.0)
+    reason: str = ""
+    fallback_used: bool = False
+    user_intent: str = "unknown"
+    target_objects: list[str] = Field(default_factory=list)
+    tasks: list[IntentTask] = Field(default_factory=list)
 
     def as_dict(self) -> dict[str, Any]:
-        return {
-            "mode": self.mode,
-            "confidence": self.confidence,
-            "reason": self.reason,
-            "fallback_used": self.fallback_used,
-        }
+        return self.model_dump()
 
 
 def route_query(
@@ -285,30 +291,22 @@ def route_query(
             first_choice = (_get_field(response, "choices", []) or [{}])[0]
             content = _extract_text_content(_get_field(first_choice, "text", ""))
         parsed = _parse_json_object(content)
+        decision = RoutingDecision.model_validate(parsed)
 
-        parsed_mode = _normalize_mode(parsed.get("mode"), default="")
-        if not parsed_mode:
-            raise ValueError("router_invalid_mode")
-
-        confidence = _clamp_confidence(parsed.get("confidence", 0.0))
-        reason = str(parsed.get("reason", "") or "").strip() or "router_model_decision"
-
-        if confidence < threshold:
+        if decision.confidence < threshold:
             return RoutingDecision(
                 mode=fallback_mode,
-                confidence=confidence,
-                reason=f"below_threshold:{confidence:.3f}",
+                confidence=decision.confidence,
+                reason=f"below_threshold:{decision.confidence:.3f}",
                 fallback_used=True,
+                user_intent=decision.user_intent,
+                target_objects=decision.target_objects,
+                tasks=decision.tasks,
             )
 
         if client is None:
             _close_router_circuit()
-        return RoutingDecision(
-            mode=parsed_mode,
-            confidence=confidence,
-            reason=reason,
-            fallback_used=False,
-        )
+        return decision
     except Exception as exc:
         if client is None and _is_transient_connection_error(exc):
             _open_router_circuit()
