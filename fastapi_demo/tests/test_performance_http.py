@@ -163,7 +163,8 @@ async def test_capacity_and_disconnect_cleanup(server):
             ) as response:
                 async for chunk in response.aiter_bytes():
                     for event, payload in parser.feed(chunk):
-                        if event == "node" and payload.get("node") == "routing":
+                        # A routing update can arrive before the generation node starts.
+                        if event == "token" and payload.get("node") == "chat_answer_generation":
                             started[index].set()
                             await release.wait()
                             return
@@ -180,7 +181,7 @@ async def test_capacity_and_disconnect_cleanup(server):
                 },
             )
             events = SSEParser().feed(response.content, final=True)
-            assert any(event == "error" for event, _ in events)
+            assert [payload.get("session_id") for event, payload in events if event == "error"] == ["capacity-overflow"]
         finally:
             release.set()
             await asyncio.gather(*tasks, return_exceptions=True)
@@ -199,9 +200,10 @@ async def test_capacity_and_disconnect_cleanup(server):
             if len(workers) == 4 and len(cleanups) == 4:
                 break
             await asyncio.sleep(0.05)
-        assert len(workers) == 4
+        expected_ids = [f"capacity-{index}" for index in range(4)]
+        assert sorted(row["request_id"] for row in workers) == expected_ids
         assert all(row["outcome"] == "error" for row in workers)
-        assert len(cleanups) == 4
+        assert sorted(row["request_id"] for row in cleanups) == expected_ids
         assert all(row["outcome"] == "success" for row in cleanups)
         assert all(row["stop_reason"] == "cancelled" for row in cleanups)
         response = await client.post(
