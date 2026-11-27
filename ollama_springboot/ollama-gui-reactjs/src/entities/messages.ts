@@ -122,6 +122,7 @@ export interface RecommendTaskStateResponse {
   subQuestions ?: unknown,
   final_result ?: string,
   finalResult ?: string,
+  result_metadata ?: Record<string, unknown>,
   error_message ?: string,
   errorMessage ?: string,
   progress ?: number,
@@ -186,6 +187,7 @@ interface ChatStreamBaseEvent {
 
 export interface ChatStreamMetaEvent extends ChatStreamBaseEvent {
   type : 'meta',
+  replayed ?: boolean,
   status : string
 }
 

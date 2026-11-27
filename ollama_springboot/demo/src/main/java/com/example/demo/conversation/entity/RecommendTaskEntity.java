@@ -46,6 +46,9 @@ public class RecommendTaskEntity {
     @Column(name = "final_result", columnDefinition = "TEXT")
     private String finalResult;
 
+    @Column(name = "result_metadata", columnDefinition = "TEXT")
+    private String resultMetadata;
+
     @Column(name = "error_message", columnDefinition = "TEXT")
     private String errorMessage;
 

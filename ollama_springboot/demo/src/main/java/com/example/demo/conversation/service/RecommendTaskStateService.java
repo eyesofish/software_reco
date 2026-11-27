@@ -332,6 +332,9 @@ public class RecommendTaskStateService {
                 };
                 applyCanonicalTaskState(task, finalStatus, List.of(), finalAnswer,
                         isFailureStatus(finalStatus) ? "Agent could not complete" : null);
+                if (finalStatus == RecommendTaskStatus.DONE || finalStatus == RecommendTaskStatus.INCOMPLETE) {
+                    task.setResultMetadata(serializeResultMetadata(payload));
+                }
                 task.setProgress(progressForStatus(finalStatus));
                 task.setLastHeartbeatAt(now);
                 if ((finalStatus == RecommendTaskStatus.DONE || finalStatus == RecommendTaskStatus.INCOMPLETE)
@@ -547,6 +550,15 @@ public class RecommendTaskStateService {
         task.setLastHeartbeatAt(Instant.now());
         cancelHeartbeat(taskId);
         return toResponse(recommendTaskRepository.save(task));
+    }
+
+    private String serializeResultMetadata(Map<String, Object> payload) {
+        if (payload == null) return null;
+        Map<String, Object> metadata = new LinkedHashMap<>();
+        for (String key : List.of("retrieved_doc_ids", "retrieved_images", "run_id", "elapsed_ms", "stop_reason")) {
+            if (payload.get(key) != null) metadata.put(key, payload.get(key));
+        }
+        return metadata.isEmpty() ? null : serializeMap(metadata);
     }
 
     private String serializeMap(Map<?, ?> value) {
@@ -892,6 +904,9 @@ public class RecommendTaskStateService {
         response.setPendingInput(status == RecommendTaskStatus.PENDING_INPUT ? deserializeMap(task.getPendingInput()) : null);
         response.setSubQuestions(subQuestions);
         response.setFinalResult(finalResult);
+        if (status == RecommendTaskStatus.DONE || status == RecommendTaskStatus.INCOMPLETE) {
+            response.setResultMetadata(deserializeMap(task.getResultMetadata()));
+        }
         response.setErrorMessage(errorMessage);
         response.setProgress(task.getProgress());
         response.setLastHeartbeatAt(task.getLastHeartbeatAt());

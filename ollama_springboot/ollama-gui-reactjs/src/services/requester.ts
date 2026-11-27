@@ -273,6 +273,7 @@ function normalizeStreamEvent (
       task_id: taskId,
       conversation_id: conversationId,
       session_id: sessionId,
+      replayed: payload.replayed === true,
       status: asTrimmedText(payload.status) || 'GENERATING'
     }
   }
@@ -396,13 +397,15 @@ async function streamSseRequester (
   url : string,
   payload : unknown,
   onEvent : (event : ChatStreamEvent) => void,
-  signal ?: AbortSignal
+  signal ?: AbortSignal,
+  requestId ?: string
 ) : Promise<void> {
   const response = await authenticatedFetch(url, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
-      Accept: 'text/event-stream'
+      Accept: 'text/event-stream',
+      ...(requestId ? { 'X-Request-Id': requestId } : {})
     },
     body: JSON.stringify(payload),
     signal
@@ -464,9 +467,57 @@ export async function streamChatRequester (
   modelUrl : string,
   payload : ChatStreamRequest,
   onEvent : (event : ChatStreamEvent) => void,
-  signal ?: AbortSignal
+  signal ?: AbortSignal,
+  requestId ?: string
 ) : Promise<void> {
-  return await streamSseRequester(resolveChatStreamUrl(modelUrl), payload, onEvent, signal)
+  let runningReplay : string|undefined
+  await streamSseRequester(resolveChatStreamUrl(modelUrl), payload, event => {
+    if (event.type === 'meta' && event.replayed) runningReplay = event.task_id
+    onEvent(event)
+  }, signal, requestId)
+  if (!runningReplay) return
+
+  const url = `${resolveApiBase(modelUrl)}/api/v1/tasks/${encodeURIComponent(runningReplay)}`
+  while (true) {
+    const task = await requestJson<RecommendTaskStateResponse>(url, { signal })
+    const event = settledTaskEvent(task)
+    if (event) {
+      onEvent(event)
+      return
+    }
+    await waitForTaskPoll(signal)
+  }
+}
+
+function settledTaskEvent (task : RecommendTaskStateResponse) : ChatStreamEvent|undefined {
+  const ids = { task_id: task.task_id ?? task.taskId, conversation_id: task.conversation_id ?? task.conversationId }
+  switch (task.status) {
+    case 'GENERATING': case 'CONFIRMED': return undefined
+    case 'PENDING_INPUT':
+      return { ...ids, type: 'awaiting_input', pending_input: normalizeClarification(task.pending_input ?? task.pendingInput, 'execution') }
+    case 'PENDING_CONFIRM':
+      return { ...ids, type: 'awaiting_confirmation', sub_questions: normalizeStringArray(task.sub_questions ?? task.subQuestions) }
+    case 'DONE': case 'INCOMPLETE':
+      return normalizeStreamEvent({ ...task.result_metadata, ...ids, type: 'final', status: task.status === 'DONE' ? 'success' : 'incomplete',
+        final_answer: task.final_result ?? task.finalResult ?? '' }, 'final')
+    default:
+      return { ...ids, type: 'error', message: `Chat task ended with status ${task.status} (${ids.task_id})` }
+  }
+}
+
+function waitForTaskPoll (signal ?: AbortSignal) {
+  return new Promise<void>((resolve, reject) => {
+    const abort = () => {
+      clearTimeout(timer)
+      reject(new DOMException('Chat was closed', 'AbortError'))
+    }
+    const timer = setTimeout(() => {
+      signal?.removeEventListener('abort', abort)
+      resolve()
+    }, 1000)
+    if (signal?.aborted) abort()
+    else signal?.addEventListener('abort', abort, { once: true })
+  })
 }
 
 export async function streamChatConfirmRequester (
