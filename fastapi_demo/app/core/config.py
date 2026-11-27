@@ -83,6 +83,9 @@ class Settings(BaseSettings):
     ROUTING_REVIEW_OUTPUT_COST_PER_MILLION_USD: float | None = None
     ROUTING_SHADOW_QUEUE_CAPACITY: int = Field(default=100, ge=1)
     ROUTING_SHADOW_TRACE_FILE: str = ".runtime/routing_shadow.jsonl"
+    DYNAMIC_ROUTING_ENABLE: bool = False
+    DYNAMIC_MAX_CLARIFICATIONS: int = Field(default=2, ge=0, le=2)
+    DYNAMIC_MAX_REFINEMENTS: int = Field(default=1, ge=0, le=1)
 
     # ---- vector / chunking ----
     CHROMA_DB_PATH: str = "./chroma_db"

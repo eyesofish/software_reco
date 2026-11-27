@@ -22,6 +22,7 @@ from app.core.config import settings
 from software_recommend_system.document_schema import Document
 from software_recommend_system.execution_control import RunStopped
 from software_recommend_system.image_embedder import ImageEmbeddingError
+from software_recommend_system.logging_utils import log_exception
 from software_recommend_system.multimodal import (
     IMAGE_MEDIA_TYPE_BY_SUFFIX,
     MultimodalInputError,
@@ -35,7 +36,7 @@ from software_recommend_system.retrieval_channels import recall_image_vector
 from software_recommend_system.state import AgentState
 from software_recommend_system.utils import initialize_vector_store
 
-from .handlers._agent import AGENT
+from .handlers._agent import AGENT as AGENT
 from .handlers.normalizers import (
     _build_human_confirmation_ack,
     _extract_eval_payload,
@@ -45,7 +46,6 @@ from .handlers.normalizers import (
     _is_asking_user_name,
     _is_confirmation_short_query,
     _iter_awaiting_confirmation_sse,
-    _normalize_candidates,
     _normalize_hitl_payload,
     _normalize_pending_sub_questions,
 )
@@ -61,7 +61,7 @@ from .handlers.recommend_orchestrator import (
 from .handlers.recommend_orchestrator import (
     upsert_name_fact_from_query as _upsert_name_fact_from_query,
 )
-from .routing_api import preflight
+from .routing_api import graph_routing_fields, preflight
 from .session_store import (
     _append_session_message_once,
     _append_session_messages,
@@ -77,7 +77,6 @@ from .stream_utils import (
     _merge_stream_updates,
     _sse,
     _to_stream_mode_chunk,
-    run_agent_async,
     run_agent_stream_async,
 )
 
@@ -111,8 +110,8 @@ async def _prepare_multimodal_request(
             )
         except ImageEmbeddingError as exc:
             logger.warning(
-                "native image query embedding unavailable; continuing caption-only: %s",
-                exc,
+                "native image query embedding unavailable error_type=%s",
+                type(exc).__name__,
             )
     effective_query = build_multimodal_query(query, image_descriptions)
     persisted_message = build_persisted_user_message(query, image_descriptions)
@@ -168,31 +167,40 @@ async def get_software_recommendation(request_data: RecommendationRequest):
     clarification = await preflight(request_data)
     if clarification is not None:
         return clarification
+    if not request_data.images and _is_confirmation_short_query(request_data.query):
+        return await _confirmation_shortcut(request_data, stream=False)
     session_id = request_data.session_id or uuid4().hex
     try:
-        kb_snapshot_id, effective_query, persisted_user_message, image_descriptions, query_image_candidates = (
-            await _prepare_pinned_request(request_data)
-        )
-        session_state = _upsert_name_fact_from_query(session_id, request_data.query)
+        (
+            kb_snapshot_id,
+            effective_query,
+            persisted_user_message,
+            image_descriptions,
+            query_image_candidates,
+        ) = await _prepare_pinned_request(request_data)
+        session_state = await asyncio.to_thread(_upsert_name_fact_from_query, session_id, request_data.query)
         known_name = (session_state.get("facts") or {}).get("user_name")
         session_messages = _normalize_session_messages(session_state.get("messages", []))
 
         logger.info(
-            "recommend request: session_id=%s timeout=%s max_iterations=%s images=%s query=%r",
+            "recommend request: session_id=%s timeout=%s max_iterations=%s images=%s query_chars=%d",
             session_id,
             request_data.timeout,
             request_data.max_iterations,
             len(image_descriptions),
-            request_data.query,
+            len(request_data.query),
         )
 
         # Persist user message before workflow execution so disconnected clients can recover.
-        _append_session_messages(session_id, [{"role": "user", "content": persisted_user_message}])
+        await asyncio.to_thread(
+            _append_session_messages, session_id, [{"role": "user", "content": persisted_user_message}]
+        )
 
         if not image_descriptions and known_name and _is_asking_user_name(request_data.query):
             memory_answer = f"你叫{known_name}。"
-            _append_session_message_once(session_id, "assistant", memory_answer)
-            _safe_write_turn_memories(
+            await asyncio.to_thread(_append_session_message_once, session_id, "assistant", memory_answer)
+            await asyncio.to_thread(
+                _safe_write_turn_memories,
                 session_id=session_id,
                 request_query=request_data.query,
                 final_answer=memory_answer,
@@ -220,33 +228,6 @@ async def get_software_recommendation(request_data: RecommendationRequest):
                 ),
             )
 
-        if not image_descriptions and _is_confirmation_short_query(request_data.query):
-            logger.warning(
-                "HITL_CONFIRM_SHORTCUT session_id=%s query=%r",
-                session_id,
-                request_data.query,
-            )
-            config = {"configurable": {"thread_id": session_id}}
-            resume_payload = {
-                "action": "confirm",
-                "sub_questions": [],
-                "comment": request_data.query,
-            }
-            task = _create_recommend_task(
-                _execute_recommend_turn(
-                    session_id=session_id,
-                    request_query=request_data.query,
-                    graph_input=Command(resume=resume_payload),
-                    config=config,
-                    fallback_answer="当前没有待确认任务，请直接提交新的需求问题。",
-                    fallback_mode="direct",
-                    interrupt_source="confirm_shortcut",
-                ),
-                session_id=session_id,
-                source="confirm_shortcut",
-            )
-            return await _await_recommend_task(task, session_id, "confirm_shortcut")
-
         if known_name:
             effective_query = (
                 f"{effective_query}\n\n"
@@ -257,7 +238,8 @@ async def get_software_recommendation(request_data: RecommendationRequest):
 
         memory_seed_messages = list(session_messages)
         memory_seed_messages.append({"role": "user", "content": persisted_user_message})
-        memory_context = _safe_build_memory_context(
+        memory_context = await asyncio.to_thread(
+            _safe_build_memory_context,
             session_id=session_id,
             query=effective_query,
             messages=memory_seed_messages,
@@ -265,14 +247,14 @@ async def get_software_recommendation(request_data: RecommendationRequest):
         )
 
         state = AgentState(
-            routing_decision=request_data.routing_decision,
+            **graph_routing_fields(request_data),
             kb_snapshot_id=kb_snapshot_id,
             user_query=effective_query,
             messages=session_messages,
             input_images=image_descriptions,
             query_image_candidates=query_image_candidates,
             memory_context=memory_context,
-            timeout_budget=request_data.execution_budget_seconds or request_data.timeout,
+            timeout_budget=request_data.timeout,
             max_iterations=request_data.max_iterations,
             start_time=time.time(),
             hitl_policy=request_data.hitl_policy or "human",
@@ -293,6 +275,8 @@ async def get_software_recommendation(request_data: RecommendationRequest):
             source="recommend",
         )
         return await _await_recommend_task(task, session_id, "recommend")
+    except HTTPException:
+        raise
     except MultimodalInputError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except VisionProcessingError as exc:
@@ -313,28 +297,35 @@ async def stream_software_recommendation(request_data: RecommendationRequest):
             yield _sse("routing_clarification", clarification.model_dump())
 
         return StreamingResponse(clarification_events(), media_type="text/event-stream")
+    if not request_data.images and _is_confirmation_short_query(request_data.query):
+        return await _confirmation_shortcut(request_data, stream=True)
 
     async def event_gen() -> AsyncIterator[str]:
         session_id = request_data.session_id or uuid4().hex
         try:
-            kb_snapshot_id, effective_query, persisted_user_message, image_descriptions, query_image_candidates = (
-                await _prepare_pinned_request(request_data)
-            )
-            session_state = _upsert_name_fact_from_query(session_id, request_data.query)
+            (
+                kb_snapshot_id,
+                effective_query,
+                persisted_user_message,
+                image_descriptions,
+                query_image_candidates,
+            ) = await _prepare_pinned_request(request_data)
+            session_state = await asyncio.to_thread(_upsert_name_fact_from_query, session_id, request_data.query)
             known_name = (session_state.get("facts") or {}).get("user_name")
             session_messages = _normalize_session_messages(session_state.get("messages", []))
 
             logger.info(
-                "recommend stream request: session_id=%s timeout=%s max_iterations=%s images=%s query=%r",
+                "recommend stream request: session_id=%s timeout=%s max_iterations=%s images=%s query_chars=%d",
                 session_id,
                 request_data.timeout,
                 request_data.max_iterations,
                 len(image_descriptions),
-                request_data.query,
+                len(request_data.query),
             )
 
             # Persist user message before workflow execution so disconnected clients can recover.
-            _append_session_messages(
+            await asyncio.to_thread(
+                _append_session_messages,
                 session_id,
                 [{"role": "user", "content": persisted_user_message}],
             )
@@ -349,8 +340,9 @@ async def stream_software_recommendation(request_data: RecommendationRequest):
 
             if not image_descriptions and known_name and _is_asking_user_name(request_data.query):
                 memory_answer = f"你叫{known_name}。"
-                _append_session_message_once(session_id, "assistant", memory_answer)
-                _safe_write_turn_memories(
+                await asyncio.to_thread(_append_session_message_once, session_id, "assistant", memory_answer)
+                await asyncio.to_thread(
+                    _safe_write_turn_memories,
                     session_id=session_id,
                     request_query=request_data.query,
                     final_answer=memory_answer,
@@ -369,44 +361,6 @@ async def stream_software_recommendation(request_data: RecommendationRequest):
                 )
                 return
 
-            if not image_descriptions and _is_confirmation_short_query(request_data.query):
-                config = {"configurable": {"thread_id": session_id}}
-                resume_payload = {
-                    "action": "confirm",
-                    "sub_questions": [],
-                    "comment": request_data.query,
-                }
-                response = await _execute_recommend_turn(
-                    session_id=session_id,
-                    request_query=request_data.query,
-                    graph_input=Command(resume=resume_payload),
-                    config=config,
-                    fallback_answer="当前没有待确认任务，请直接提交新的需求问题。",
-                    fallback_mode="direct",
-                    interrupt_source="confirm_shortcut_stream",
-                )
-                if response.awaiting_human_confirmation:
-                    async for frame in _iter_awaiting_confirmation_sse(
-                        session_id,
-                        response.pending_sub_questions or [],
-                    ):
-                        yield frame
-                else:
-                    yield _sse(
-                        "final",
-                        {
-                            "status": response.status,
-                            "session_id": session_id,
-                            "final_answer": response.final_answer,
-                            "retrieved_doc_ids": response.retrieved_doc_ids or [],
-                            "retrieved_images": [
-                                item.model_dump()
-                                for item in (response.retrieved_images or [])
-                            ],
-                        },
-                    )
-                return
-
             if known_name:
                 effective_query = (
                     f"{effective_query}\n\n"
@@ -417,7 +371,8 @@ async def stream_software_recommendation(request_data: RecommendationRequest):
 
             memory_seed_messages = list(session_messages)
             memory_seed_messages.append({"role": "user", "content": persisted_user_message})
-            memory_context = _safe_build_memory_context(
+            memory_context = await asyncio.to_thread(
+                _safe_build_memory_context,
                 session_id=session_id,
                 query=effective_query,
                 messages=memory_seed_messages,
@@ -425,14 +380,14 @@ async def stream_software_recommendation(request_data: RecommendationRequest):
             )
 
             state = AgentState(
-                routing_decision=request_data.routing_decision,
+                **graph_routing_fields(request_data),
                 kb_snapshot_id=kb_snapshot_id,
                 user_query=effective_query,
                 messages=session_messages,
                 input_images=image_descriptions,
                 query_image_candidates=query_image_candidates,
                 memory_context=memory_context,
-                timeout_budget=request_data.execution_budget_seconds or request_data.timeout,
+                timeout_budget=request_data.timeout,
                 max_iterations=request_data.max_iterations,
                 start_time=time.time(),
                 hitl_policy=request_data.hitl_policy or "human",
@@ -466,37 +421,19 @@ async def stream_software_recommendation(request_data: RecommendationRequest):
                             "status": "end",
                         }
                         if isinstance(payload, dict):
-                            keys = [
-                                str(key)
-                                for key in payload
-                                if not str(key).startswith("__")
-                            ]
+                            keys = [str(key) for key in payload if not str(key).startswith("__")]
                             if keys:
                                 node_payload["payload_keys"] = keys[:12]
                         yield _sse("node", node_payload)
 
-                    interrupt_payload = _extract_interrupt_payload(chunk)
-                    if (
-                        not awaiting_emitted
-                        and interrupt_payload
-                        and interrupt_payload.get("type") == "human_confirmation"
-                    ):
-                        pending_sub_questions = _normalize_pending_sub_questions(
-                            interrupt_payload.get("sub_questions", [])
-                        )
-                        if pending_sub_questions:
-                            awaiting_emitted = True
-                            async for frame in _iter_awaiting_confirmation_sse(
-                                session_id,
-                                pending_sub_questions,
-                            ):
-                                yield frame
                 elif mode == "custom":
                     for custom_event in _iter_custom_events(chunk):
                         event_type = str(custom_event.get("type", "state") or "state").strip()
                         if not event_type:
                             event_type = "state"
                         normalized_event_type = event_type.lower()
+                        if normalized_event_type in {"awaiting_input", "awaiting_confirmation", "final"}:
+                            continue
                         if normalized_event_type == "token":
                             delta = str(custom_event.get("delta", "") or "")
                             if not delta:
@@ -516,14 +453,22 @@ async def stream_software_recommendation(request_data: RecommendationRequest):
                             awaiting_emitted = True
 
             interrupt_payload = _extract_interrupt_payload(merged_result)
+            if interrupt_payload and interrupt_payload.get("type") == "awaiting_input":
+                yield _sse(
+                    "awaiting_input",
+                    {
+                        "status": "awaiting_input",
+                        "session_id": session_id,
+                        "pending_input": interrupt_payload.get("pending_input"),
+                    },
+                )
+                return
             if interrupt_payload and interrupt_payload.get("type") == "human_confirmation":
                 if not awaiting_emitted:
-                    pending_sub_questions = _normalize_pending_sub_questions(
-                        interrupt_payload.get("sub_questions", [])
-                    )
+                    pending_sub_questions = _normalize_pending_sub_questions(interrupt_payload.get("sub_questions", []))
                     if pending_sub_questions:
                         ack_message = _build_human_confirmation_ack(pending_sub_questions)
-                        _append_session_message_once(session_id, "assistant", ack_message)
+                        await asyncio.to_thread(_append_session_message_once, session_id, "assistant", ack_message)
                         async for frame in _iter_awaiting_confirmation_sse(
                             session_id,
                             pending_sub_questions,
@@ -537,7 +482,7 @@ async def stream_software_recommendation(request_data: RecommendationRequest):
                 final_answer = "".join(token_parts)
 
             if final_answer:
-                _append_session_message_once(session_id, "assistant", final_answer)
+                await asyncio.to_thread(_append_session_message_once, session_id, "assistant", final_answer)
 
             hitl_policy = str(_get_value(state, "hitl_policy", "human") or "human").strip()
             if hitl_policy not in {"human", "auto_confirm", "oracle_edit"}:
@@ -553,8 +498,9 @@ async def stream_software_recommendation(request_data: RecommendationRequest):
             )
             skill_planner_payload = _extract_skill_planner_payload(merged_result)
 
-            if final_answer:
-                _safe_write_turn_memories(
+            if final_answer and not merged_result.get("evidence_incomplete", False):
+                await asyncio.to_thread(
+                    _safe_write_turn_memories,
                     session_id=session_id,
                     request_query=persisted_user_message,
                     final_answer=final_answer,
@@ -565,13 +511,17 @@ async def stream_software_recommendation(request_data: RecommendationRequest):
             yield _sse(
                 "final",
                 {
-                    "status": "success",
+                    "status": "incomplete" if merged_result.get("evidence_incomplete", False) else "success",
                     "session_id": session_id,
                     "final_answer": final_answer,
+                    "stop_reason": (merged_result.get("dynamic_stop_reason") or "insufficient_evidence")
+                    if merged_result.get("evidence_incomplete", False)
+                    else None,
                     "retrieved_doc_ids": eval_payload["retrieved_doc_ids"],
                     "retrieved_images": eval_payload["retrieved_images"],
                     "selected_skill": skill_planner_payload["selected_skill"],
                     "hitl": eval_payload["hitl"],
+                    "evidence_incomplete": merged_result.get("evidence_incomplete", False),
                     **execution_meta,
                 },
             )
@@ -595,9 +545,9 @@ async def stream_software_recommendation(request_data: RecommendationRequest):
             )
         except (MultimodalInputError, VisionProcessingError) as exc:
             logger.warning(
-                "RECOMMEND_STREAM_MULTIMODAL_FAILED session_id=%s error=%s",
+                "RECOMMEND_STREAM_MULTIMODAL_FAILED session_id=%s error_type=%s",
                 session_id,
-                exc,
+                type(exc).__name__,
             )
             yield _sse(
                 "error",
@@ -606,13 +556,13 @@ async def stream_software_recommendation(request_data: RecommendationRequest):
                     "message": str(exc),
                 },
             )
-        except Exception as exc:
-            logger.exception("RECOMMEND_STREAM_FAILED session_id=%s error=%s", session_id, exc)
+        except Exception:
+            log_exception(logger, "RECOMMEND_STREAM_FAILED", session_id=session_id)
             yield _sse(
                 "error",
                 {
                     "session_id": session_id,
-                    "message": f"Error processing stream request: {exc}",
+                    "message": "Error processing stream request.",
                 },
             )
 
@@ -627,425 +577,93 @@ async def stream_software_recommendation(request_data: RecommendationRequest):
     )
 
 
+async def _confirmation_shortcut(request_data: RecommendationRequest, *, stream: bool):
+    if request_data.session_id:
+        confirmation = RecommendationConfirmRequest(session_id=request_data.session_id, comment=request_data.query)
+        try:
+            if stream:
+                return await confirm_software_recommendation_stream(confirmation)
+            return await confirm_software_recommendation(confirmation)
+        except HTTPException as exc:
+            if exc.status_code != 409 or exc.detail != "No pending human confirmation":
+                raise
+    response = RecommendationResponse(
+        status="success",
+        final_answer="当前没有待确认任务，请直接提交新的需求问题。",
+        mode="direct",
+        session_id=request_data.session_id,
+    )
+    if not stream:
+        return response
+
+    async def events():
+        yield _sse("final", response.model_dump())
+
+    return StreamingResponse(events(), media_type="text/event-stream")
+
+
+def _confirmation_payload(request_data: RecommendationConfirmRequest) -> dict[str, Any]:
+    questions = _normalize_pending_sub_questions(request_data.sub_questions or [])
+    action = request_data.action if request_data.action != "edit" or questions else "confirm"
+    return {
+        "action": action,
+        "sub_questions": questions if action == "edit" else [],
+        "comment": request_data.comment or "",
+    }
+
+
 @router.post("/recommend/confirm/stream")
 async def confirm_software_recommendation_stream(request_data: RecommendationConfirmRequest):
-    async def event_gen() -> AsyncIterator[str]:
-        session_id = request_data.session_id
+    from starlette.background import BackgroundTask
+
+    from .handlers.recommend_orchestrator import stream_recommend_turn
+    from .routing_api import release_resume, reserve_resume
+
+    _, lock = await reserve_resume(request_data.session_id, kind="confirmation")
+
+    async def events():
         try:
-            edited_sub_questions = _normalize_pending_sub_questions(request_data.sub_questions or [])
-            effective_action = request_data.action
-            if effective_action == "edit" and not edited_sub_questions:
-                logger.warning(
-                    "HITL_EDIT_EMPTY_SUBQ_STREAM session_id=%s action=edit treated_as=confirm",
-                    request_data.session_id,
-                )
-                effective_action = "confirm"
-
-            logger.warning(
-                "HITL_CONFIRM_STREAM_REQUEST_RECEIVED session_id=%s action=%s pending_count=%d comment=%r",
-                request_data.session_id,
-                effective_action,
-                len(edited_sub_questions),
-                request_data.comment or "",
-            )
-
-            yield _sse(
-                "meta",
-                {
-                    "session_id": session_id,
-                    "conversation_id": session_id,
-                },
-            )
-
-            config = {"configurable": {"thread_id": request_data.session_id}}
-            resume_payload = {
-                "action": effective_action,
-                "sub_questions": edited_sub_questions if effective_action == "edit" else [],
-                "comment": request_data.comment or "",
-            }
-
-            merged_result: dict[str, Any] = {}
-            token_parts: list[str] = []
-            awaiting_emitted = False
-            execution_meta: dict[str, Any] = {}
-
-            async for stream_item in run_agent_stream_async(
-                AGENT,
-                Command(resume=resume_payload),
-                config=config,
-                stream_mode=["updates", "custom"],
-            ):
-                mode, chunk = _to_stream_mode_chunk(stream_item)
-
-                if mode == "__execution__":
-                    execution_meta = dict(chunk or {})
-                    continue
-
-                if mode == "updates":
-                    _merge_stream_updates(merged_result, chunk)
-                    for node_name, payload in _iter_update_nodes(chunk):
-                        node_payload: dict[str, Any] = {
-                            "node": node_name,
-                            "status": "end",
-                        }
-                        if isinstance(payload, dict):
-                            keys = [
-                                str(key)
-                                for key in payload
-                                if not str(key).startswith("__")
-                            ]
-                            if keys:
-                                node_payload["payload_keys"] = keys[:12]
-                        yield _sse("node", node_payload)
-
-                    interrupt_payload = _extract_interrupt_payload(chunk)
-                    if (
-                        not awaiting_emitted
-                        and interrupt_payload
-                        and interrupt_payload.get("type") == "human_confirmation"
-                    ):
-                        pending_sub_questions = _normalize_pending_sub_questions(
-                            interrupt_payload.get("sub_questions", [])
-                        )
-                        if pending_sub_questions:
-                            awaiting_emitted = True
-                            async for frame in _iter_awaiting_confirmation_sse(
-                                session_id,
-                                pending_sub_questions,
-                            ):
-                                yield frame
-                elif mode == "custom":
-                    for custom_event in _iter_custom_events(chunk):
-                        event_type = str(custom_event.get("type", "state") or "state").strip()
-                        if not event_type:
-                            event_type = "state"
-                        normalized_event_type = event_type.lower()
-                        if normalized_event_type == "token":
-                            delta = str(custom_event.get("delta", "") or "")
-                            if not delta:
-                                continue
-                            token_parts.append(delta)
-                            yield _sse(
-                                "token",
-                                {
-                                    "delta": delta,
-                                    "node": str(custom_event.get("node", "") or ""),
-                                },
-                            )
-                            continue
-
-                        yield _sse(normalized_event_type, custom_event)
-                        if normalized_event_type == "awaiting_confirmation":
-                            awaiting_emitted = True
-
-            interrupt_payload = _extract_interrupt_payload(merged_result)
-
-            # Defensive loop breaker: confirm should consume the pending interrupt and continue.
-            if effective_action == "confirm":
-                for retry in range(2):
-                    if not (interrupt_payload and interrupt_payload.get("type") == "human_confirmation"):
-                        break
-                    logger.warning(
-                        "HITL_CONFIRM_STREAM_REINTERRUPT session_id=%s retry=%d",
-                        request_data.session_id,
-                        retry + 1,
-                    )
-                    retry_result = await run_agent_async(
-                        AGENT,
-                        Command(resume=resume_payload),
-                        config=config,
-                    )
-                    if isinstance(retry_result, dict):
-                        merged_result = retry_result
-                    interrupt_payload = _extract_interrupt_payload(retry_result)
-
-            eval_payload = _extract_eval_payload(
-                merged_result,
-                hitl_fallback={
-                    "policy": "human",
-                    "decision": effective_action,
-                    "edited_subqueries": edited_sub_questions if effective_action == "edit" else [],
-                },
-            )
-            skill_planner_payload = _extract_skill_planner_payload(merged_result)
-
-            if interrupt_payload and interrupt_payload.get("type") == "human_confirmation":
-                if effective_action == "confirm":
-                    logger.error(
-                        "HITL_CONFIRM_STREAM_LOOP_DETECTED session_id=%s payload=%s",
-                        request_data.session_id,
-                        interrupt_payload,
-                    )
-                    raise RuntimeError(
-                        "Human confirmation loop detected: confirm action re-entered interrupt."
-                    )
-
-                pending_sub_questions = _normalize_pending_sub_questions(
-                    interrupt_payload.get("sub_questions", [])
-                )
-                if not pending_sub_questions:
-                    logger.error(
-                        "HITL_ACK_STREAM_ABORT session_id=%s reason=empty_sub_questions payload=%s",
-                        request_data.session_id,
-                        interrupt_payload,
-                    )
-                    raise RuntimeError(
-                        "Interrupted for human confirmation but no sub-questions were produced."
-                    )
-
-                if not awaiting_emitted:
-                    async for frame in _iter_awaiting_confirmation_sse(
-                        session_id,
-                        pending_sub_questions,
-                    ):
-                        yield frame
-                ack_message = _build_human_confirmation_ack(pending_sub_questions)
-                _append_session_message_once(session_id, "assistant", ack_message)
-                return
-
-            final_answer = str(_get_value(merged_result, "final_answer", "") or "")
-            if not final_answer and token_parts:
-                final_answer = "".join(token_parts)
-
-            if final_answer:
-                _append_session_message_once(
-                    request_data.session_id,
-                    "assistant",
-                    final_answer,
-                )
-
-            _safe_write_turn_memories(
+            yield _sse("resume_accepted", {"session_id": request_data.session_id, "kind": "confirmation"})
+            async for frame in stream_recommend_turn(
+                agent=AGENT,
                 session_id=request_data.session_id,
                 request_query=request_data.comment or "confirm",
-                final_answer=final_answer,
-                selected_skill=skill_planner_payload["selected_skill"],
-                retrieved_doc_ids=list(eval_payload["retrieved_doc_ids"] or []),
-            )
-
-            yield _sse(
-                "final",
-                {
-                    "status": "success",
-                    "session_id": session_id,
-                    "final_answer": final_answer,
-                    "retrieved_doc_ids": eval_payload["retrieved_doc_ids"],
-                    "retrieved_images": eval_payload["retrieved_images"],
-                    "selected_skill": skill_planner_payload["selected_skill"],
-                    "hitl": eval_payload["hitl"],
-                    **execution_meta,
-                },
-            )
-        except RunStopped as exc:
-            logger.warning(
-                "HITL_CONFIRM_STREAM_STOPPED session_id=%s run_id=%s reason=%s elapsed_ms=%d",
-                request_data.session_id,
-                exc.run_id,
-                exc.stop_reason,
-                exc.elapsed_ms,
-            )
-            yield _sse(
-                "error",
-                {
-                    "session_id": request_data.session_id,
-                    "run_id": exc.run_id,
-                    "stop_reason": exc.stop_reason,
-                    "elapsed_ms": exc.elapsed_ms,
-                    "message": f"Request stopped: {exc.stop_reason}.",
-                },
-            )
-        except Exception as exc:
-            logger.exception(
-                "HITL_CONFIRM_STREAM_REQUEST_FAILED session_id=%s action=%s error=%s",
-                getattr(request_data, "session_id", None),
-                getattr(request_data, "action", None),
-                exc,
-            )
-            yield _sse(
-                "error",
-                {
-                    "session_id": session_id,
-                    "message": f"Error processing confirm stream request: {exc}",
-                },
-            )
+                graph_input=Command(resume=_confirmation_payload(request_data)),
+                config={"configurable": {"thread_id": request_data.session_id}},
+            ):
+                yield frame
+        finally:
+            release_resume(lock)
 
     return StreamingResponse(
-        event_gen(),
+        events(),
         media_type="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache",
-            "Connection": "keep-alive",
-            "X-Accel-Buffering": "no",
-        },
+        background=BackgroundTask(release_resume, lock),
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
 
 
 @router.post("/recommend/confirm", response_model=RecommendationResponse)
 async def confirm_software_recommendation(request_data: RecommendationConfirmRequest):
+    from .routing_api import release_resume, reserve_resume
+
+    _, lock = await reserve_resume(request_data.session_id, kind="confirmation")
     try:
-        edited_sub_questions = _normalize_pending_sub_questions(request_data.sub_questions or [])
-        effective_action = request_data.action
-        if effective_action == "edit" and not edited_sub_questions:
-            logger.warning(
-                "HITL_EDIT_EMPTY_SUBQ session_id=%s action=edit treated_as=confirm",
-                request_data.session_id,
-            )
-            effective_action = "confirm"
-        logger.warning(
-            "HITL_CONFIRM_REQUEST_RECEIVED session_id=%s action=%s pending_count=%d comment=%r",
-            request_data.session_id,
-            effective_action,
-            len(edited_sub_questions),
-            request_data.comment or "",
-        )
-
-        config = {"configurable": {"thread_id": request_data.session_id}}
-
-        resume_payload = {
-            "action": effective_action,
-            "sub_questions": edited_sub_questions if effective_action == "edit" else [],
-            "comment": request_data.comment or "",
-        }
-        result = await run_agent_async(AGENT, Command(resume=resume_payload), config=config)
-        interrupt_payload = _extract_interrupt_payload(result)
-
-        # Defensive loop breaker: confirm should consume the pending interrupt and continue.
-        if effective_action == "confirm":
-            for retry in range(2):
-                if not (interrupt_payload and interrupt_payload.get("type") == "human_confirmation"):
-                    break
-                logger.warning(
-                    "HITL_CONFIRM_REINTERRUPT session_id=%s retry=%d",
-                    request_data.session_id,
-                    retry + 1,
-                )
-                result = await run_agent_async(AGENT, Command(resume=resume_payload), config=config)
-                interrupt_payload = _extract_interrupt_payload(result)
-
-        eval_payload = _extract_eval_payload(
-            result,
-            hitl_fallback={
-                "policy": "human",
-                "decision": effective_action,
-                "edited_subqueries": edited_sub_questions if effective_action == "edit" else [],
-            },
-        )
-        skill_planner_payload = _extract_skill_planner_payload(result)
-
-        if interrupt_payload and interrupt_payload.get("type") == "human_confirmation":
-            if effective_action == "confirm":
-                logger.error(
-                    "HITL_CONFIRM_LOOP_DETECTED session_id=%s payload=%s",
-                    request_data.session_id,
-                    interrupt_payload,
-                )
-                raise RuntimeError(
-                    "Human confirmation loop detected: confirm action re-entered interrupt."
-                )
-
-            pending_sub_questions = _normalize_pending_sub_questions(
-                interrupt_payload.get("sub_questions", [])
-            )
-            if not pending_sub_questions:
-                logger.error(
-                    "HITL_ACK_ABORT session_id=%s reason=empty_sub_questions payload=%s",
-                    request_data.session_id,
-                    interrupt_payload,
-                )
-                raise RuntimeError(
-                    "Interrupted for human confirmation but no sub-questions were produced."
-                )
-            ack_message = _build_human_confirmation_ack(pending_sub_questions)
-            logger.warning(
-                "HITL_ACK_RETURN session_id=%s pending_count=%d",
-                request_data.session_id,
-                len(pending_sub_questions),
-            )
-            _append_session_messages(
-                request_data.session_id,
-                [{"role": "assistant", "content": ack_message}],
-            )
-            logger.warning(
-                "HITL_CONFIRM_RESPONSE session_id=%s status=awaiting_human_confirmation pending_count=%d",
-                request_data.session_id,
-                len(pending_sub_questions),
-            )
-            return RecommendationResponse(
-                status="awaiting_human_confirmation",
-                final_answer=ack_message,
-                candidates=[],
-                mode="rag",
-                iteration_count=0,
-                coverage=0.0,
-                session_id=request_data.session_id,
-                awaiting_human_confirmation=True,
-                pending_sub_questions=pending_sub_questions,
-                retrieval_records=eval_payload["retrieval_records"],
-                retrieved_doc_ids=eval_payload["retrieved_doc_ids"],
-                retrieved_images=eval_payload["retrieved_images"],
-                selected_skill=skill_planner_payload["selected_skill"],
-                plan_steps=skill_planner_payload["plan_steps"],
-                hitl=eval_payload["hitl"]
-                or _normalize_hitl_payload(
-                    {
-                        "policy": "human",
-                        "decision": "awaiting_confirmation",
-                        "edited_subqueries": [],
-                    }
-                ),
-            )
-
-        final_answer = _get_value(result, "final_answer", "")
-        if final_answer:
-            _append_session_messages(
-                request_data.session_id,
-                [{"role": "assistant", "content": final_answer}],
-            )
-
-        logger.warning(
-            "HITL_CONFIRM_RESPONSE session_id=%s status=success final_answer_len=%d",
-            request_data.session_id,
-            len(final_answer or ""),
-        )
-        response = RecommendationResponse(
-            status="success",
-            final_answer=final_answer,
-            candidates=_normalize_candidates(_get_value(result, "candidates", [])),
-            mode=_get_value(result, "mode", ""),
-            iteration_count=_get_value(result, "iteration_count", 0),
-            coverage=_get_value(result, "coverage", 0.0),
-            session_id=request_data.session_id,
-            awaiting_human_confirmation=False,
-            retrieval_records=eval_payload["retrieval_records"],
-            retrieved_doc_ids=eval_payload["retrieved_doc_ids"],
-            retrieved_images=eval_payload["retrieved_images"],
-            selected_skill=skill_planner_payload["selected_skill"],
-            plan_steps=skill_planner_payload["plan_steps"],
-            hitl=eval_payload["hitl"],
-        )
-        _safe_write_turn_memories(
+        return await _execute_recommend_turn(
             session_id=request_data.session_id,
             request_query=request_data.comment or "confirm",
-            final_answer=response.final_answer,
-            selected_skill=response.selected_skill,
-            retrieved_doc_ids=list(response.retrieved_doc_ids or []),
+            graph_input=Command(resume=_confirmation_payload(request_data)),
+            config={"configurable": {"thread_id": request_data.session_id}},
+            interrupt_source="confirmation",
+            agent=AGENT,
         )
-        return response
-    except Exception as exc:
-        logger.exception(
-            "HITL_CONFIRM_REQUEST_FAILED session_id=%s action=%s error=%s",
-            getattr(request_data, "session_id", None),
-            getattr(request_data, "action", None),
-            exc,
-        )
-        raise HTTPException(
-            status_code=500,
-            detail=f"Error processing request: {exc}",
-        ) from exc
+    finally:
+        release_resume(lock)
 
 
 @router.get("/session-state/{session_id}", response_model=SessionStateResponse)
 async def get_session_state(session_id: str):
-    state = _get_or_create_session_state(session_id)
+    state = await asyncio.to_thread(_get_or_create_session_state, session_id)
     messages = _normalize_session_messages(state.get("messages", []))
     return SessionStateResponse(
         session_id=session_id,
@@ -1057,7 +675,7 @@ async def get_session_state(session_id: str):
 
 @router.put("/session-state/{session_id}", response_model=SessionStateResponse)
 async def upsert_session_state(session_id: str, request_data: SessionStateUpdateRequest):
-    state = _merge_session_facts(session_id, request_data.facts or {})
+    state = await asyncio.to_thread(_merge_session_facts, session_id, request_data.facts or {})
     messages = _normalize_session_messages(state.get("messages", []))
     return SessionStateResponse(
         session_id=session_id,

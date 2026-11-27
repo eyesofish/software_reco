@@ -1,4 +1,5 @@
 import json
+import logging
 import os
 import sqlite3
 import subprocess
@@ -130,3 +131,37 @@ def test_update_touches_one_of_ten_thousand_real_sessions(legacy):
         assert db.execute("SELECT COUNT(*) FROM agent_session_state").fetchone() == (10_000,)
         unchanged = db.execute("SELECT COUNT(*) FROM agent_session_state WHERE state_json=?", (initial,)).fetchone()
         assert unchanged == (9999,)
+
+
+async def test_stream_logs_keep_session_id_without_query_history_or_failure_text(legacy, monkeypatch, caplog):
+    from app.api.v1 import routes
+    from app.api.v1.models import RecommendationRequest
+    from software_recommend_system.logging_utils import log_event
+
+    async def allow(request):
+        return None
+
+    async def prepare(request):
+        return "test-kb", request.query, request.query, [], []
+
+    marker = "CHAT_PRIVATE_SENTINEL_372"
+    monkeypatch.setattr(routes, "preflight", allow)
+    monkeypatch.setattr(routes, "_prepare_pinned_request", prepare)
+    monkeypatch.setattr(settings, "FEATURE_LAYERED_MEMORY", False)
+    sessions._merge_session_facts("log-test", {"user_name": "Alice"})
+    request = RecommendationRequest(query=f"what is my name? {marker}", session_id="log-test")
+    with caplog.at_level(logging.INFO):
+        response = await routes.stream_software_recommendation(request)
+        frames = "".join([frame async for frame in response.body_iterator])
+        assert "event: final" in frames
+        log_event(logging.getLogger("retrieval"), logging.INFO, "retrieval.search", query=marker, docs=1)
+
+        async def fail(request):
+            raise ValueError(marker)
+
+        monkeypatch.setattr(routes, "_prepare_pinned_request", fail)
+        failed = await routes.stream_software_recommendation(request)
+        errors = "".join([frame async for frame in failed.body_iterator])
+        assert "event: error" in errors and marker not in errors
+    assert marker not in caplog.text
+    assert "log-test" in caplog.text and "ValueError" in caplog.text

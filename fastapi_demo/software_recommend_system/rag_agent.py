@@ -8,6 +8,14 @@ from pathlib import Path
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import StateGraph
 
+from .dynamic_routing import (
+    answer_destination,
+    clarification_node,
+    evidence_decision_node,
+    observe_intermediate,
+    planning_decision_node,
+    refinement_node,
+)
 from .nodes import (
     answer_generation_node,
     candidate_generation_node,
@@ -41,6 +49,7 @@ def _controlled_node(node):
 
         session_id = state.get("session_id", "") if isinstance(state, dict) else getattr(state, "session_id", "")
         check_for_session(session_id)
+        started = time.monotonic()
         snapshot_id = state.get("kb_snapshot_id", "") if isinstance(state, dict) else state.kb_snapshot_id
         snapshot_id = snapshot_id or capture_snapshot()
         with use_snapshot(snapshot_id), span("node." + node.__name__, session_id=session_id,
@@ -48,6 +57,11 @@ def _controlled_node(node):
             result = node(state)
             if isinstance(result, dict):
                 result["kb_snapshot_id"] = snapshot_id
+                prior = state.get("active_elapsed_ms", 0) if isinstance(state, dict) else state.active_elapsed_ms
+                result["active_elapsed_ms"] = prior + int((time.monotonic() - started) * 1000)
+                if node.__name__ in {"sub_question_generation_node", "coverage_check_node"}:
+                    observe_intermediate(state, result, "planning" if node.__name__.startswith("sub_question")
+                                         else "evidence")
             if isinstance(result, dict) and "mode" in result:
                 attributes["mode"] = result["mode"]
             check_for_session(session_id)
@@ -179,6 +193,10 @@ def create_rag_with_routing_agent():
     workflow.add_node("chat_answer_generation", _controlled_node(chat_answer_generation_node))
     workflow.add_node("pre_drawing", _controlled_node(pre_drawing_node))
     workflow.add_node("draw_image", _controlled_node(draw_image_node))
+    workflow.add_node("planning_decision", _controlled_node(planning_decision_node))
+    workflow.add_node("evidence_decision", _controlled_node(evidence_decision_node))
+    workflow.add_node("clarification", _controlled_node(clarification_node))
+    workflow.add_node("refinement", _controlled_node(refinement_node))
 
     # Entry
     workflow.set_entry_point("entry")
@@ -206,7 +224,17 @@ def create_rag_with_routing_agent():
     # RAG branch
     workflow.add_edge("skill_routing", "planning")
     workflow.add_edge("planning", "sub_question_generation")
-    workflow.add_edge("sub_question_generation", "human_confirmation")
+    workflow.add_conditional_edges(
+        "sub_question_generation",
+        lambda state: "dynamic" if state.dynamic_routing_enabled else "legacy",
+        {"dynamic": "planning_decision", "legacy": "human_confirmation"},
+    )
+    workflow.add_conditional_edges(
+        "planning_decision", lambda state: "clarify" if state.next_step == "clarify" else (
+            "answer" if state.next_step == "answer" else "retrieve"
+        ),
+        {"clarify": "clarification", "retrieve": "human_confirmation", "answer": "rag_answer_generation"},
+    )
     workflow.add_edge("human_confirmation", "retrieve")
     workflow.add_edge("retrieve", "evidence_collection")
     workflow.add_edge("evidence_collection", "evidence_evaluation")
@@ -217,6 +245,8 @@ def create_rag_with_routing_agent():
 
     # Loop control
     def should_continue(state: AgentState) -> str:
+        if state.dynamic_routing_enabled:
+            return "dynamic"
         logger.info(
             "Coverage check: coverage=%.2f threshold=%.2f iteration=%d/%d",
             state.coverage,
@@ -227,8 +257,7 @@ def create_rag_with_routing_agent():
         coverage_met = state.coverage >= state.coverage_threshold
         max_iterations_reached = state.iteration_count >= state.max_iterations
         needs_refinement = state.needs_refinement
-        elapsed_time = (time.time() - state.start_time) if state.start_time else 0
-        is_timeout = elapsed_time > state.timeout_budget
+        is_timeout = state.active_elapsed_ms >= state.timeout_budget * 1000
 
         if coverage_met or max_iterations_reached or is_timeout or not needs_refinement:
             logger.info("Termination conditions met; entering answer generation.")
@@ -242,8 +271,26 @@ def create_rag_with_routing_agent():
         {
             "continue": "retrieve",
             "terminate": "candidate_generation",
+            "dynamic": "evidence_decision",
         },
     )
+
+    def dynamic_destination(state: AgentState) -> str:
+        if state.next_step == "clarify":
+            return "clarify"
+        if state.next_step == "refine":
+            return "refine"
+        if state.next_step == "retrieve":
+            return "confirm" if state.route_stage == "planning" else "retrieve"
+        return answer_destination(state)
+
+    destinations = {
+        "clarify": "clarification", "refine": "refinement", "confirm": "human_confirmation",
+        "retrieve": "retrieve", "answer": "rag_answer_generation", "candidates": "candidate_generation",
+    }
+    workflow.add_conditional_edges("evidence_decision", dynamic_destination, destinations)
+    workflow.add_conditional_edges("clarification", dynamic_destination, destinations)
+    workflow.add_conditional_edges("refinement", dynamic_destination, destinations)
 
     # Exit edges
     workflow.add_edge("candidate_generation", "rag_answer_generation")
@@ -288,8 +335,7 @@ def create_rag_agent():
         coverage_met = state.coverage >= state.coverage_threshold
         max_iterations_reached = state.iteration_count >= state.max_iterations
         needs_refinement = state.needs_refinement
-        elapsed_time = (time.time() - state.start_time) if state.start_time else 0
-        is_timeout = elapsed_time > state.timeout_budget
+        is_timeout = state.active_elapsed_ms >= state.timeout_budget * 1000
 
         if coverage_met or max_iterations_reached or is_timeout or not needs_refinement:
             logger.info("Termination conditions met; entering answer generation.")

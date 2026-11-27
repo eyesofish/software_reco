@@ -190,7 +190,7 @@ public class RecommendTaskController {
                             String eventType = firstNonBlank(asText(payload.get("type")), "state");
                             recommendTaskStateService.applyStreamEvent(taskId, eventType, payload);
                             stream.send(eventType, payload);
-                            if ("awaiting_confirmation".equals(eventType)) stream.complete();
+                            if ("awaiting_input".equals(eventType) || "awaiting_confirmation".equals(eventType)) stream.complete();
                         } catch (RuntimeException error) {
                             stream.fail(error);
                         }
@@ -261,7 +261,7 @@ public class RecommendTaskController {
                         String eventType = firstNonBlank(asText(payload.get("type")), "state");
                         recommendTaskStateService.applyStreamEvent(resolvedTaskId, eventType, payload);
                         stream.send(eventType, payload);
-                        if ("awaiting_confirmation".equals(eventType)) stream.complete();
+        if ("awaiting_input".equals(eventType) || "awaiting_confirmation".equals(eventType)) stream.complete();
                     } catch (RuntimeException error) {
                         stream.fail(error);
                     }
@@ -303,10 +303,97 @@ public class RecommendTaskController {
         return response;
     }
 
+    @PostMapping("/recommend/clarify")
+    public RecommendTaskStateResponse clarify(@RequestBody Map<String, Object> request, @AuthenticationPrincipal Jwt jwt) {
+        String taskId = requireText(request, "task_id");
+        access.task(jwt.getSubject(), taskId);
+        return recommendTaskStateService.clarifyTask(taskId, requireText(request, "clarification_id"), requireText(request, "answer"));
+    }
+
+    @PostMapping(value = "/recommend/clarify/stream", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
+    public SseEmitter clarifyStream(@RequestBody Map<String, Object> request, @AuthenticationPrincipal Jwt jwt) {
+        String taskId = requireText(request, "task_id");
+        access.task(jwt.getSubject(), taskId);
+        var preparation = recommendTaskStateService.prepareClarification(taskId,
+                requireText(request, "clarification_id"), requireText(request, "answer"));
+        String conversationId = preparation.taskState().getConversationId();
+        SseEmitter emitter = new SseEmitter(0L);
+        AtomicBoolean accepted = new AtomicBoolean();
+        AtomicBoolean terminal = new AtomicBoolean();
+        SseStreamHandle stream = SseStreamHandle.start(emitter, () -> {
+            synchronized (accepted) {
+                if (!terminal.compareAndSet(false, true)) return;
+                if (!accepted.get()) recommendTaskStateService.restoreClarification(preparation);
+                else recommendTaskStateService.applyStreamEvent(taskId, "error",
+                        Map.of("message", "client disconnected; generation cancelled", "stop_reason", "cancelled"));
+            }
+        });
+        Disposable subscription = fastApiClient.streamClarifyCancellable(preparation.sessionId(),
+                preparation.clarificationId(), preparation.answer(), event -> {
+                    synchronized (accepted) {
+                    if (terminal.get()) return;
+                    try {
+                        if ("resume_accepted".equals(event.type())) {
+                            if (accepted.get()) return;
+                            if (!preparation.clarificationId().equals(event.payload().get("clarification_id"))
+                                    || !recommendTaskStateService.acceptClarification(preparation))
+                                throw new IllegalStateException("Clarification acceptance does not match its reservation");
+                            accepted.set(true);
+                            stream.send("meta", normalizeStreamPayload("meta", Map.of("status", "GENERATING"),
+                                    taskId, conversationId, preparation.sessionId()));
+                            return;
+                        }
+                        if (!accepted.get()) throw new IllegalStateException("Agent did not accept the clarification resume");
+                        Map<String, Object> payload = normalizeStreamPayload(event.type(), event.payload(), taskId,
+                                conversationId, preparation.sessionId());
+                        String type = String.valueOf(payload.get("type"));
+                        recommendTaskStateService.applyStreamEvent(taskId, type, payload);
+                        boolean finished = List.of("awaiting_input", "awaiting_confirmation", "final", "error").contains(type);
+                        if (finished) terminal.set(true);
+                        stream.send(type, payload);
+                        if (finished) stream.complete();
+                    } catch (RuntimeException error) {
+                        terminal.set(true);
+                        if (!accepted.get()) recommendTaskStateService.restoreClarification(preparation);
+                        else recommendTaskStateService.applyStreamEvent(taskId, "error", Map.of("message", "Agent stream failed"));
+                        stream.fail(error);
+                    }
+                    }
+                }, error -> {
+                    synchronized (accepted) {
+                    if (!terminal.compareAndSet(false, true)) return;
+                    if (!accepted.get()) recommendTaskStateService.restoreClarification(preparation);
+                    else recommendTaskStateService.applyStreamEvent(taskId, "error", Map.of("message", "Agent stream failed"));
+                    stream.fail(error);
+                    }
+                }, () -> {
+                    synchronized (accepted) {
+                    if (terminal.compareAndSet(false, true)) {
+                        if (!accepted.get()) recommendTaskStateService.restoreClarification(preparation);
+                        else recommendTaskStateService.applyStreamEvent(taskId, "error", Map.of("message", "Agent stream ended before completion"));
+                        stream.fail(new IllegalStateException("Agent stream ended before completion"));
+                    } else stream.complete();
+                    }
+                });
+        stream.attach(subscription);
+        return emitter;
+    }
+
+    @PostMapping("/recommend/tasks/{taskId}/cancel")
+    public RecommendTaskStateResponse cancelWaiting(@PathVariable String taskId, @AuthenticationPrincipal Jwt jwt) {
+        access.task(jwt.getSubject(), taskId);
+        return recommendTaskStateService.cancelWaitingTask(taskId);
+    }
+
+    private String requireText(Map<String, Object> request, String key) {
+        String value = request == null ? null : asText(request.get(key));
+        if (value == null || value.isBlank()) throw new ResponseStatusException(HttpStatus.BAD_REQUEST, key + " is required");
+        return value.trim();
+    }
+
     @GetMapping("/tasks/{taskId}")
     public RecommendTaskStateResponse getTaskState(@PathVariable String taskId, @AuthenticationPrincipal Jwt jwt) {
-        access.task(jwt.getSubject(), taskId);
-        return recommendTaskStateService.getTaskState(taskId);
+        return recommendTaskStateService.getOwnedTaskState(jwt.getSubject(), taskId);
     }
 
     @GetMapping("/conversations/{conversationId}/tasks")
@@ -317,8 +404,7 @@ public class RecommendTaskController {
 
     @GetMapping("/recommend/task/{taskId}")
     public RecommendTaskStateResponse getTaskStateCompatibility(@PathVariable String taskId, @AuthenticationPrincipal Jwt jwt) {
-        access.task(jwt.getSubject(), taskId);
-        return recommendTaskStateService.getTaskState(taskId);
+        return recommendTaskStateService.getOwnedTaskState(jwt.getSubject(), taskId);
     }
 
     private void startAfterCommit(Runnable start) {
@@ -384,7 +470,7 @@ public class RecommendTaskController {
                 normalized.put("delta", delta == null ? "" : String.valueOf(delta));
                 normalized.put("node", firstNonBlank(asText(source.get("node")), ""));
             }
-            case "routing_clarification", "route_decision" -> {
+            case "routing_clarification", "awaiting_input", "route_decision" -> {
                 normalized.putAll(source);
                 normalized.put("type", eventType);
                 normalized.put("task_id", taskId);
@@ -457,7 +543,7 @@ public class RecommendTaskController {
     private String normalizeEventType(String rawType) {
         String normalized = firstNonBlank(rawType, "state").toLowerCase(Locale.ROOT);
         return switch (normalized) {
-            case "meta", "node", "token", "state", "awaiting_confirmation", "routing_clarification", "route_decision", "final", "error" -> normalized;
+            case "meta", "node", "token", "state", "awaiting_confirmation", "awaiting_input", "routing_clarification", "route_decision", "final", "error" -> normalized;
             default -> "state";
         };
     }

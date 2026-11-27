@@ -6,6 +6,14 @@ import java.util.List;
 import java.util.Map;
 
 public class RecommendResponse {
+    @JsonProperty("pending_input")
+    private Map<String, Object> pendingInput;
+    private Map<String, Object> clarification;
+    public Map<String, Object> getPendingInput() { return pendingInput; }
+    public void setPendingInput(Map<String, Object> value) { pendingInput = value; }
+    public Map<String, Object> getClarification() { return clarification; }
+    public void setClarification(Map<String, Object> value) { clarification = value; }
+
     private String status;
     @JsonProperty("final_answer")
     private String finalAnswer;

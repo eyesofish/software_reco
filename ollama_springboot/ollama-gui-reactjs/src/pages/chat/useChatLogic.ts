@@ -27,7 +27,10 @@ import { disChats, useChats } from '~/stores/chats'
 import { addMessage, updateMessageContent } from '~/stores/chats/actions'
 import { useConfig } from '~/stores/config'
 import {
+  cancelWaitingTaskRequester,
   listConversationTasksRequester,
+  normalizeClarification,
+  streamClarifyRequester,
   resolveApiBase,
   streamChatConfirmRequester,
   streamChatRequester
@@ -37,6 +40,8 @@ import { routingFields } from '~/services/routing'
 export type TaskStatus =
   | 'IDLE'
   | 'PENDING_CONFIRM'
+  | 'PENDING_INPUT'
+  | 'CANCELLED'
   | 'CONFIRMING'
   | 'GENERATING'
   | 'DONE'
@@ -52,6 +57,8 @@ export interface ChatState {
   finalResult : string,
   loading : boolean,
   error ?: string,
+  pendingInput ?: Clarification,
+  nextStep ?: string
 }
 
 interface ConversationTaskSnapshot {
@@ -62,6 +69,8 @@ interface ConversationTaskSnapshot {
   finalResult : string,
   loading : boolean,
   error ?: string,
+  pendingInput ?: Clarification,
+  nextStep ?: string
 }
 
 interface UseChatLogicResult {
@@ -79,9 +88,13 @@ interface UseChatLogicResult {
   apiBaseUrl : string,
   routingMode : RoutingMode,
   routingClarification : Clarification|undefined,
+  pendingInput : Clarification|undefined,
+  nextStep : string,
   setRoutingMode : (mode : RoutingMode) => void,
   handleRoutingChoice : (option : RoutingOption|undefined, answer : string) => Promise<void>,
   handleRoutingDismiss : () => void,
+  handleInputSubmit : (answer : string) => Promise<void>,
+  handleCancelWaiting : () => Promise<void>,
   handleDeleteChat : (chatId : number) => void,
   requestHandler : () => void,
   handleConfirmClicked : () => Promise<void>,
@@ -313,6 +326,8 @@ export default function useChatLogic () : UseChatLogicResult {
       finalResult: snapshot.finalResult,
       loading: snapshot.loading,
       error: snapshot.error,
+      pendingInput: snapshot.pendingInput,
+      nextStep: snapshot.nextStep
     }))
   }, [])
 
@@ -321,7 +336,7 @@ export default function useChatLogic () : UseChatLogicResult {
     const status = patch.taskStatus ?? current.taskStatus
     applySnapshot({
       ...current, ...patch, conversationId,
-      loading: status === 'PENDING_CONFIRM' ? false : (patch.loading ?? current.loading)
+      loading: status === 'PENDING_CONFIRM' || status === 'PENDING_INPUT' ? false : (patch.loading ?? current.loading)
     })
   }, [applySnapshot])
 
@@ -380,6 +395,8 @@ export default function useChatLogic () : UseChatLogicResult {
     let images : RetrievedImage[] = []
     let assistantTime : number|undefined
     let terminal = false
+    let resumeAccepted = false
+    const resumeSnapshot = resumeConversationId ? conversationSnapshotsRef.current[resumeConversationId] : undefined
     const active = () => activeStreamRunIdRef.current === runId
     const update = (patch : Partial<ConversationTaskSnapshot>) => {
       if (conversationId) setSnapshotPatch(conversationId, { activeTaskId: taskId, ...patch })
@@ -426,7 +443,7 @@ export default function useChatLogic () : UseChatLogicResult {
         }))
       }
     }
-    update({ loading: true, taskStatus: 'GENERATING', error: undefined })
+    update({ loading: true, taskStatus: 'GENERATING', error: undefined, nextStep: '', pendingInput: resumeSnapshot?.pendingInput })
     try {
       await send((event) => {
         if (!active() || terminal) return
@@ -436,10 +453,22 @@ export default function useChatLogic () : UseChatLogicResult {
           setChatState((prev) => ({ ...prev, loading: false, taskStatus: 'IDLE', taskId: undefined, error: undefined }))
           return
         }
+        // A preflight failure must not commit the answer or discard the waiting form.
+        // The server sends the first meta only after Python accepts this exact resume.
+        if (event.type === 'error' && resumeSnapshot?.pendingInput && !resumeAccepted) {
+          terminal = true
+          update({ loading: false, taskStatus: 'PENDING_INPUT', pendingInput: resumeSnapshot.pendingInput, error: event.message, nextStep: '' })
+          return
+        }
+        if (resumeSnapshot?.pendingInput) resumeAccepted = true
         taskId = normalizeText(event.task_id) || taskId
         commitDestination(normalizeText(event.conversation_id) || undefined)
+        if (event.type === 'route_decision') {
+          update({ nextStep: event.next_step })
+          return
+        }
         if (event.type === 'meta' || event.type === 'node' || event.type === 'state') {
-          update({ loading: true, taskStatus: 'GENERATING' })
+          update({ loading: true, taskStatus: 'GENERATING', pendingInput: undefined })
           return
         }
         if (event.type === 'token') {
@@ -450,7 +479,17 @@ export default function useChatLogic () : UseChatLogicResult {
         }
         if (event.type === 'awaiting_confirmation') {
           terminal = true
-          update({ loading: false, taskStatus: 'PENDING_CONFIRM', subQuestions: normalizeSubQuestions(event.sub_questions) })
+          update({ loading: false, taskStatus: 'PENDING_CONFIRM', subQuestions: normalizeSubQuestions(event.sub_questions), pendingInput: undefined })
+          clearTurn()
+          return
+        }
+        if (event.type === 'awaiting_input') {
+          terminal = true
+          if (!taskId || !event.pending_input.clarification_id) {
+            update({ loading: false, taskStatus: 'ERROR', error: 'The request for more information is missing its task identifier.' })
+          } else {
+            update({ loading: false, taskStatus: 'PENDING_INPUT', pendingInput: event.pending_input, subQuestions: [] })
+          }
           clearTurn()
           return
         }
@@ -460,20 +499,21 @@ export default function useChatLogic () : UseChatLogicResult {
           images = event.retrieved_images
           syncAssistant()
           const incomplete = ['incomplete', 'expired', 'cancelled'].includes(event.status.toLowerCase())
-          update({ loading: false, taskStatus: incomplete ? 'INCOMPLETE' : 'DONE', finalResult: text, subQuestions: [] })
+          update({ loading: false, taskStatus: incomplete ? 'INCOMPLETE' : 'DONE', finalResult: text, subQuestions: [], pendingInput: undefined, nextStep: '' })
           clearTurn()
           return
         }
         if (event.type === 'error') {
           terminal = true
-          update({ loading: false, taskStatus: 'ERROR', error: event.message })
+          update({ loading: false, taskStatus: 'ERROR', pendingInput: undefined, error: event.message, nextStep: '' })
           if (turn && !turn.committed) restoreTurn()
           else clearTurn()
         }
       }, controller.signal)
       if (active() && !terminal) {
         update({
-          loading: false, taskStatus: 'INCOMPLETE',
+          loading: false, taskStatus: resumeSnapshot?.pendingInput && !resumeAccepted ? 'PENDING_INPUT' : 'INCOMPLETE',
+          pendingInput: resumeAccepted ? undefined : resumeSnapshot?.pendingInput,
           error: 'Stream ended before a completion event; partial text is preserved.'
         })
         if (turn && !turn.committed) restoreTurn()
@@ -482,8 +522,9 @@ export default function useChatLogic () : UseChatLogicResult {
     } catch (error) {
       if (active() && !controller.signal.aborted) {
         update({
-          loading: false, taskStatus: 'ERROR',
-          error: toErrorMessage(error)
+          loading: false, taskStatus: resumeSnapshot?.pendingInput && !resumeAccepted ? 'PENDING_INPUT' : 'ERROR',
+          pendingInput: resumeAccepted ? undefined : resumeSnapshot?.pendingInput,
+          error: toErrorMessage(error), nextStep: ''
         })
         if (turn && !turn.committed) restoreTurn()
         else clearTurn()
@@ -513,7 +554,7 @@ export default function useChatLogic () : UseChatLogicResult {
 
   const requestHandler = useCallback(() => {
     const chatId = currentChatIdRef.current
-    if (chatId === null || streamAbortControllerRef.current || pendingTurnRef.current) return
+    if (chatId === null || streamAbortControllerRef.current || pendingTurnRef.current || chatState.taskStatus === 'PENDING_INPUT') return
     const text = normalizeText(textAreaRef.current?.value)
     const images = [...pendingImages]
     if (!text && !images.length) return
@@ -548,6 +589,38 @@ export default function useChatLogic () : UseChatLogicResult {
     if (option) await submitTurn(turn, option.kind === 'new' ? 'new' : 'explicit', option.conversation_id)
     else if (answer.trim()) await submitTurn(turn, routingMode, turn.originConversationId)
   }, [routingMode, submitTurn])
+
+  const handleInputSubmit = useCallback(async (answer : string) => {
+    const conversationId = activeConversationIdRef.current
+    const snapshot = conversationId ? conversationSnapshotsRef.current[conversationId] : undefined
+    const pending = snapshot?.pendingInput
+    const taskId = snapshot?.activeTaskId
+    if (!conversationId || !taskId || !pending?.clarification_id || !answer.trim() || streamAbortControllerRef.current) return
+    if (answer.length > 4000) {
+      setSnapshotPatch(conversationId, { error: 'Please limit the clarification to 4000 characters.' })
+      return
+    }
+    const turn : PendingTurn = {
+      chatId: currentChatIdRef.current ?? 0,
+      text: answer.trim(), images: [], committed: false, originConversationId: conversationId,
+      message: createUserMessage(answer.trim(), conversationId, taskId)
+    }
+    await runStream((onEvent, signal) => streamClarifyRequester(modelUrl, {
+      task_id: taskId, clarification_id: pending.clarification_id, answer: answer.trim()
+    }, onEvent, signal), turn, conversationId, taskId)
+  }, [modelUrl, runStream, setSnapshotPatch])
+
+  const handleCancelWaiting = useCallback(async () => {
+    const conversationId = activeConversationIdRef.current
+    const snapshot = conversationId ? conversationSnapshotsRef.current[conversationId] : undefined
+    if (!conversationId || !snapshot?.activeTaskId || streamAbortControllerRef.current) return
+    try {
+      await cancelWaitingTaskRequester(modelUrl, snapshot.activeTaskId)
+      setSnapshotPatch(conversationId, { loading: false, taskStatus: 'CANCELLED', pendingInput: undefined, subQuestions: [], error: undefined })
+    } catch (error) {
+      setSnapshotPatch(conversationId, { error: toErrorMessage(error) })
+    }
+  }, [modelUrl, setSnapshotPatch])
 
   const handleDeleteChat = useCallback((chatId : number) => {
     const ids = readConversationIdsStorage()
@@ -601,13 +674,15 @@ export default function useChatLogic () : UseChatLogicResult {
       if (controller.signal.aborted || conversationSnapshotsRef.current[conversationId] || !tasks.length) return
       const task = tasks[0]
       const rawStatus = String(task.status).toUpperCase()
-      const status : TaskStatus = rawStatus === 'PENDING_CONFIRM' ? 'PENDING_CONFIRM'
+      const status : TaskStatus = rawStatus === 'PENDING_INPUT' ? 'PENDING_INPUT'
+        : rawStatus === 'PENDING_CONFIRM' ? 'PENDING_CONFIRM'
           : rawStatus === 'GENERATING' || rawStatus === 'CONFIRMED' ? 'GENERATING'
-            : rawStatus === 'DONE' ? 'DONE' : 'INCOMPLETE'
+            : rawStatus === 'DONE' ? 'DONE' : rawStatus === 'CANCELLED' ? 'CANCELLED' : 'INCOMPLETE'
       applySnapshot({
         ...createEmptySnapshot(conversationId),
         activeTaskId: task.task_id || task.taskId, taskStatus: status,
         subQuestions: normalizeSubQuestions(task.sub_questions ?? task.subQuestions ?? task.pending_sub_questions),
+        pendingInput: task.pending_input || task.pendingInput ? normalizeClarification(task.pending_input ?? task.pendingInput, 'execution') : undefined,
         finalResult: task.final_result || task.finalResult || '',
         error: task.error_message || task.errorMessage
       })
@@ -629,9 +704,9 @@ export default function useChatLogic () : UseChatLogicResult {
     taskId: chatState.taskId, taskStatus: chatState.taskStatus, subQuestions: chatState.subQuestions,
     finalResult: chatState.finalResult, loading: chatState.loading, error: chatState.error,
     pendingImages, apiBaseUrl: resolveApiBase(modelUrl), routingMode, setRoutingMode,
-    routingClarification,
+    routingClarification, pendingInput: chatState.pendingInput, nextStep: chatState.nextStep || '',
     handleDeleteChat, requestHandler, handleConfirmClicked, handleRoutingChoice,
-    handleRoutingDismiss: restoreTurn,
+    handleRoutingDismiss: restoreTurn, handleInputSubmit, handleCancelWaiting,
     handleImagesSelected: (images) => setPendingImages((current) => [...current, ...images].slice(0, 4)),
     handleImageRemoved: (index) => setPendingImages((current) => current.filter((_, i) => i !== index))
   }

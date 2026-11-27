@@ -200,6 +200,8 @@ const STREAM_EVENT_TYPES = [
   'state',
   'awaiting_confirmation',
   'routing_clarification',
+  'awaiting_input',
+  'route_decision',
   'final',
   'error'
 ] as const
@@ -248,6 +250,21 @@ function normalizeStreamEvent (
 
   if (type === 'routing_clarification') {
     return { type, clarification: normalizeClarification(payload.clarification ?? payload, 'routing') }
+  }
+
+  if (type === 'awaiting_input') {
+    return {
+      type, task_id: taskId, conversation_id: conversationId, session_id: sessionId,
+      pending_input: normalizeClarification(payload.pending_input ?? payload.clarification ?? payload, 'execution')
+    }
+  }
+
+  if (type === 'route_decision') {
+    return {
+      type, task_id: taskId, conversation_id: conversationId, session_id: sessionId,
+      next_step: asTrimmedText(payload.next_step ?? payload.step) || '',
+      stage: asTrimmedText(payload.stage) || ''
+    }
   }
 
   if (type === 'meta') {
@@ -484,6 +501,22 @@ export async function confirmTaskRequester (
     body: JSON.stringify(payload),
     signal
   })
+}
+
+export async function streamClarifyRequester (
+  modelUrl : string,
+  payload : { task_id : string, clarification_id : string, answer : string },
+  onEvent : (event : ChatStreamEvent) => void,
+  signal ?: AbortSignal
+) : Promise<void> {
+  return await streamSseRequester(`${resolveApiBase(modelUrl)}/api/v1/recommend/clarify/stream`, payload, onEvent, signal)
+}
+
+export async function cancelWaitingTaskRequester (modelUrl : string, taskId : string) : Promise<RecommendTaskStateResponse> {
+  return await requestJson<RecommendTaskStateResponse>(
+    `${resolveApiBase(modelUrl)}/api/v1/recommend/tasks/${encodeURIComponent(taskId)}/cancel`,
+    { method: 'POST' }
+  )
 }
 
 export async function listConversationTasksRequester (modelUrl : string, conversationId : string, signal ?: AbortSignal) {

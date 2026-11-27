@@ -99,6 +99,30 @@ public class FastApiClient {
     @jakarta.annotation.PreDestroy
     public void stopShadowExecutor() { shadowExecutor.shutdownNow(); }
 
+    public RecommendResponse clarify(String sessionId, String clarificationId, String answer) {
+        return restTemplate.postForObject(baseUrl + "/api/v1/recommend/clarify",
+                Map.of("session_id", sessionId, "clarification_id", clarificationId, "answer", answer), RecommendResponse.class);
+    }
+
+    public Disposable streamClarifyCancellable(String sessionId, String clarificationId, String answer,
+            Consumer<RecommendStreamEvent> onEvent, Consumer<Throwable> onError, Runnable onComplete) {
+        return webClient.post().uri(baseUrl + "/api/v1/recommend/clarify/stream")
+                .contentType(MediaType.APPLICATION_JSON).accept(MediaType.TEXT_EVENT_STREAM)
+                .bodyValue(Map.of("session_id", sessionId, "clarification_id", clarificationId, "answer", answer))
+                .retrieve().bodyToFlux(new ParameterizedTypeReference<ServerSentEvent<String>>() {})
+                .map(event -> {
+                    String type = firstNonBlank(trimToNull(event.event()), "message");
+                    return new RecommendStreamEvent(type, decodeSsePayload(event.data(), type));
+                }).subscribe(onEvent, onError, onComplete);
+    }
+
+    public void cancelWaiting(String sessionId, String clarificationId) {
+        Map<String, Object> payload = new LinkedHashMap<>();
+        payload.put("session_id", sessionId);
+        if (clarificationId != null) payload.put("clarification_id", clarificationId);
+        restTemplate.postForEntity(baseUrl + "/api/v1/recommend/cancel", payload, Map.class);
+    }
+
     public RecommendResponse recommend(RecommendRequest request) {
         HttpHeaders headers = new HttpHeaders();
         headers.setContentType(MediaType.APPLICATION_JSON);

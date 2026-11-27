@@ -1319,13 +1319,26 @@ def retrieve_node(state: AgentState) -> dict[str, Any]:
     """Retrieve node: global merge -> dedup -> rerank -> top3 evidence."""
     BASE_MAX_EVIDENCE = 3
     retrieved_doc_ids_full_limit = max(1, int(getattr(settings, "RETRIEVED_DOC_IDS_FULL_LIMIT", 20)))
-    sub_questions = _get_field(state, "sub_questions", [])
+    all_questions = list(_get_field(state, "sub_questions", []))
+    sub_questions = all_questions
+    dynamic = bool(_get_field(state, "dynamic_routing_enabled", False))
+    if dynamic and _get_field(state, "iteration_count", 0):
+        sub_questions = list(_get_field(state, "uncovered_subqueries", []) or [])
+    stable_ids = dict(_get_field(state, "subquery_ids", {}) or {})
+    for index, question in enumerate(all_questions, start=1):
+        stable_ids.setdefault(question, f"sq_{index}")
+    query_overrides = dict(_get_field(state, "retrieval_queries", {}) or {})
+    attempted = list(_get_field(state, "attempted_queries", []) or [])
+    from .dynamic_routing import search_query_for_objective
+    search_queries = {question: search_query_for_objective(state, question) for question in all_questions}
     original_query = state.normalized_query.strip()
     expansion = state.validated_query_expansion
-    query_overrides = {}
     if expansion and original_query and expansion.startswith(original_query):
         for question in sub_questions:
-            query_overrides[question] = question + expansion[len(original_query):]
+            query_overrides.setdefault(question, search_queries[question] + expansion[len(original_query):])
+    if dynamic:
+        sub_questions = [q for q in sub_questions if query_overrides.get(q, search_queries[q]) not in attempted]
+    docs_by_question: dict[str, list[Document]] = {}
     retrieval_records = list(_get_field(state, "retrieval_records", []) or [])
     iteration_count = _get_field(state, "iteration_count", 0)
     session_id = str(_get_field(state, "session_id", "") or "").strip()
@@ -1364,8 +1377,9 @@ def retrieve_node(state: AgentState) -> dict[str, Any]:
     @task
     def retrieve_question(index: int, question: str) -> tuple[list[Document], str, int]:
         check_current_run()
-        question_started_at = time.perf_counter()
         rewritten_query = query_overrides.get(question, "")
+        question = search_queries[question]
+        question_started_at = time.perf_counter()
         question_hint = text_preview(question)
         log_event(
             logger,
@@ -1415,7 +1429,9 @@ def retrieve_node(state: AgentState) -> dict[str, Any]:
                         if future.done():
                             raise
                 all_docs.extend(search_results)
-                subquery_id = f"sq_{index}"
+                docs_by_question[question] = search_results
+                attempted.append(query_overrides.get(question, search_queries[question]))
+                subquery_id = stable_ids[question]
                 retrieval_record = _build_retrieval_record(
                     subquery_id=subquery_id,
                     subquery=question,
@@ -1481,7 +1497,6 @@ def retrieve_node(state: AgentState) -> dict[str, Any]:
     )
     final_docs = ranked_docs[:max_evidence]
     retrieved_images = _build_retrieved_images(final_docs)
-    quality_score = min(0.9, 0.5 + (len(final_docs) * 0.1))
 
     retrieved_doc_ids: list[str] = []
     retrieved_doc_ids_full: list[str] = []
@@ -1503,25 +1518,34 @@ def retrieve_node(state: AgentState) -> dict[str, Any]:
         channel = str(_get_field(metadata, "channel", "") or "").strip().lower()
         if (retrieval_source == "memory" or channel == "memory") and doc_id not in memory_doc_ids:
             memory_doc_ids.append(doc_id)
-        search_result = {
-            "content": doc.content,
-            "score": doc.score,
-            "doc_id": doc_id,
-            "source": str(_get_field(metadata, "source", "") or ""),
-            "retrieval_source": retrieval_source,
-            "channel": channel,
-            "modality": str(_get_field(metadata, "modality", "") or ""),
-            "asset_path": str(_get_field(metadata, "asset_path", "") or ""),
-            "asset_url": str(_get_field(metadata, "asset_url", "") or ""),
-        }
-        evidence.append(
-            {
-                "question": global_query,
-                "documents": [doc],
-                "search_results": [search_result],
-                "quality_score": quality_score,
-            }
-        )
+    # Evidence is attributed before global presentation deduplication. A shared
+    # document can support multiple objectives, but is scored for each separately.
+    prior_evidence = list(_get_field(state, "evidence", []) or []) if dynamic else []
+    for question in all_questions:
+        previous = [item for item in prior_evidence if _get_field(item, "question", "") == question]
+        if question not in docs_by_question and previous:
+            # Covered objectives were not searched again. Keep both evidence
+            # and its evaluation so a refinement cannot erase prior progress.
+            evidence.extend(item.model_dump() if hasattr(item, "model_dump") else dict(item) for item in previous)
+            continue
+        documents = list(docs_by_question.get(question, []))
+        for item in previous:
+            documents.extend(_get_field(item, "documents", []) or [])
+        deduped: dict[str, Document] = {}
+        for index, doc in enumerate(documents, start=1):
+            deduped.setdefault(_extract_doc_id(doc, fallback_prefix=stable_ids[question], index=index), doc)
+        evidence.append({
+            "subquery_id": stable_ids[question], "question": question,
+            "documents": list(deduped.values())[:max_evidence], "search_results": [],
+            "quality_score": 0.0,
+        })
+    if dynamic:
+        retrieved_doc_ids = list(dict.fromkeys([
+            *_get_field(state, "retrieved_doc_ids", []), *retrieved_doc_ids,
+        ]))
+        retrieved_doc_ids_full = list(dict.fromkeys([
+            *_get_field(state, "retrieved_doc_ids_full", []), *retrieved_doc_ids_full,
+        ]))[:retrieved_doc_ids_full_limit]
 
     log_event(
         logger,
@@ -1548,6 +1572,8 @@ def retrieve_node(state: AgentState) -> dict[str, Any]:
         "retrieved_doc_ids_full": retrieved_doc_ids_full,
         "retrieved_images": retrieved_images,
         "memory_doc_ids": memory_doc_ids,
+        "subquery_ids": stable_ids,
+        "attempted_queries": list(dict.fromkeys(attempted)),
     }
 
 
@@ -1581,8 +1607,18 @@ def evidence_evaluation_node(state: AgentState) -> dict[str, Any]:
     if not question:
         question = str(_get_field(state, "normalized_query", "") or "").strip()
 
-    scores, mode = evaluate_evidence(question, evidence)
-    for item, score in zip(evidence, scores, strict=True):
+    scores = []
+    mode = "per_objective"
+    for item in evidence:
+        if state.dynamic_routing_enabled and state.iteration_count > 1:
+            prior_score = _safe_float(_get_field(item, "quality_score", 0), 0)
+            if (_get_field(item, "documents", []) and
+                    prior_score >= settings.QUALITY_THRESHOLD):
+                scores.append(prior_score)
+                continue
+        item_scores, _ = evaluate_evidence(_get_field(item, "question", "") or question, [item])
+        score = item_scores[0]
+        scores.append(score)
         _set_field(item, "quality_score", score)
 
     log_event(
@@ -1802,14 +1838,16 @@ def coverage_check_node(state: AgentState) -> dict[str, Any]:
     quality_threshold = _safe_float(getattr(settings, "QUALITY_THRESHOLD", 0.6), 0.6)
 
     total_questions = len(sub_questions)
-    covered_questions = 0
+    covered: set[str] = set()
     for item in evidence:
         if not _get_field(item, "documents", []):
             continue
         if _safe_float(_get_field(item, "quality_score", 0.0), 0.0) < quality_threshold:
             continue
-        covered_questions += 1
-    covered_questions = min(covered_questions, total_questions)
+        question = str(_get_field(item, "question", ""))
+        if question in sub_questions:
+            covered.add(question)
+    covered_questions = len(covered)
 
     coverage = covered_questions / total_questions if total_questions > 0 else 0.0
 
@@ -1847,6 +1885,7 @@ def coverage_check_node(state: AgentState) -> dict[str, Any]:
         "coverage": coverage,
         "previous_coverage": coverage,
         "needs_refinement": needs_refinement,
+        "uncovered_subqueries": [question for question in sub_questions if question not in covered],
     }
 
 @traceable(name="final_generation_rag")
@@ -1969,6 +2008,9 @@ def answer_generation_node(state: AgentState) -> dict[str, Any]:
         else:
             final_answer = f"Insufficient evidence to answer '{user_query}' confidently."
 
+    if _get_field(state, "evidence_incomplete", False):
+        missing = "；".join(_get_field(state, "uncovered_subqueries", []) or [])
+        final_answer += "\n\n证据尚不完整。" + (f"仍缺少：{missing}。" if missing else "")
     messages = list(_get_field(state, "messages", []) or [])
     messages.append({"role": "assistant", "content": final_answer})
 

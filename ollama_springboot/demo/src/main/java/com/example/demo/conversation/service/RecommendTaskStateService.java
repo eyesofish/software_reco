@@ -19,20 +19,26 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
+import org.springframework.http.HttpStatus;
+import org.springframework.web.server.ResponseStatusException;
 import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.support.TransactionSynchronization;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
 import org.springframework.transaction.support.TransactionTemplate;
 
 import java.time.Duration;
 import java.time.Instant;
 import java.lang.reflect.Array;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -51,6 +57,8 @@ public class RecommendTaskStateService {
     private static final Duration TASK_EXPIRE_AFTER = Duration.ofHours(24);
     private static final Duration STALLED_THRESHOLD = Duration.ofSeconds(60);
     private static final int HEARTBEAT_INTERVAL_SECONDS = 4;
+    private static final List<RecommendTaskStatus> ACTIVE_STATUSES = List.of(RecommendTaskStatus.GENERATING,
+            RecommendTaskStatus.CONFIRMED, RecommendTaskStatus.PENDING_CONFIRM, RecommendTaskStatus.PENDING_INPUT);
 
     private final ConversationService conversationService;
     private final RecommendTaskRepository recommendTaskRepository;
@@ -133,6 +141,7 @@ public class RecommendTaskStateService {
             throw new IllegalArgumentException("query is required");
         }
 
+        if (conversationId != null) assertConversationAvailable(owner, conversationId);
         ConversationEntity conversation = conversationService.ensureOwnedConversation(owner, conversationId, normalizedQuery, modelName);
 
         RecommendResponse fastapiResponse = null;
@@ -183,12 +192,14 @@ public class RecommendTaskStateService {
         task.setConversation(conversation);
         task.setFastapiSessionId(fastapiSessionId);
         applyCanonicalTaskState(task, status, subQuestions, assistantMessage, errorMessage);
+        if (status == RecommendTaskStatus.PENDING_INPUT && fastapiResponse != null)
+            task.setPendingInput(serializeMap(fastapiResponse.getPendingInput()));
         task.setProgress(progressForStatus(status));
         task.setLastHeartbeatAt(Instant.now());
         task.setExpireAt(Instant.now().plus(TASK_EXPIRE_AFTER));
 
         RecommendTaskEntity savedTask = recommendTaskRepository.save(task);
-        if (savedTask.getStatus() == RecommendTaskStatus.DONE && trimToNull(assistantMessage) != null) {
+        if ((savedTask.getStatus() == RecommendTaskStatus.DONE || savedTask.getStatus() == RecommendTaskStatus.INCOMPLETE) && trimToNull(assistantMessage) != null) {
             appendAssistantIfNeeded(conversation.getId(), assistantMessage);
         }
 
@@ -218,8 +229,9 @@ public class RecommendTaskStateService {
             throw new IllegalArgumentException("query is required");
         }
 
-        ConversationEntity conversation = conversationService.ensureOwnedConversation(owner, conversationId, normalizedQuery, modelName);
-
+        ConversationEntity conversation = conversationId == null
+                ? conversationService.ensureOwnedConversation(owner, null, normalizedQuery, modelName)
+                : assertConversationAvailable(owner, conversationId);
         RecommendTaskEntity task = new RecommendTaskEntity();
         task.setConversation(conversation);
         task.setFastapiSessionId(conversation.getId());
@@ -228,14 +240,7 @@ public class RecommendTaskStateService {
         task.setLastHeartbeatAt(Instant.now());
         task.setExpireAt(Instant.now().plus(TASK_EXPIRE_AFTER));
 
-        RecommendTaskEntity savedTask = recommendTaskRepository.save(task);
-        logger.info(
-                "stream task created task_id={}, conversation_id={}, status={}",
-                savedTask.getId(),
-                conversation.getId(),
-                savedTask.getStatus()
-        );
-        return toResponse(savedTask);
+        return toResponse(recommendTaskRepository.save(task));
     }
 
     @Transactional(rollbackFor = Exception.class)
@@ -249,22 +254,22 @@ public class RecommendTaskStateService {
             return expiredResponse("", "missing task id");
         }
 
-        RecommendTaskEntity task = recommendTaskRepository.findById(normalizedTaskId)
+        String normalizedEventType = firstNonBlank(eventType, asText(payload == null ? null : payload.get("type")), "state")
+                .toLowerCase(Locale.ROOT);
+        // All writers that need both rows lock the conversation before its task.
+        ConversationEntity conversation = "final".equals(normalizedEventType)
+                ? conversationService.lockTaskConversation(normalizedTaskId).orElse(null) : null;
+        RecommendTaskEntity task = recommendTaskRepository.lockById(normalizedTaskId)
                 .orElse(null);
         if (task == null) {
             return expiredResponse(normalizedTaskId, "task not found");
         }
 
         task = applyLifecycleRules(task, Instant.now());
-        if (isTerminal(task.getStatus())) {
+        if (isTerminal(task.getStatus()) || task.getStatus() == RecommendTaskStatus.PENDING_INPUT
+                || task.getStatus() == RecommendTaskStatus.PENDING_CONFIRM) {
             return toResponse(task);
         }
-        String normalizedEventType = firstNonBlank(
-                        trimToNull(eventType),
-                        asText(payload == null ? null : payload.get("type")),
-                        "state"
-                )
-                .toLowerCase(Locale.ROOT);
         Instant now = Instant.now();
 
         switch (normalizedEventType) {
@@ -275,25 +280,22 @@ public class RecommendTaskStateService {
                         task.getFastapiSessionId()
                 );
                 task.setFastapiSessionId(sessionId);
-                if (!isTerminal(task.getStatus()) && task.getStatus() != RecommendTaskStatus.PENDING_CONFIRM) {
-                    applyCanonicalTaskState(task, RecommendTaskStatus.GENERATING, List.of(), null, null);
-                    task.setProgress(
-                            Math.max(
-                                    progressForStatus(RecommendTaskStatus.GENERATING),
-                                    task.getProgress() == null ? 0 : task.getProgress()
-                            )
-                    );
-                }
+                applyCanonicalTaskState(task, RecommendTaskStatus.GENERATING, List.of(), null, null);
+                task.setProgress(Math.max(progressForStatus(RecommendTaskStatus.GENERATING),
+                        task.getProgress() == null ? 0 : task.getProgress()));
                 task.setLastHeartbeatAt(now);
             }
-            case "node", "state", "token" -> {
-                if (!isTerminal(task.getStatus()) && task.getStatus() != RecommendTaskStatus.PENDING_CONFIRM) {
-                    applyCanonicalTaskState(task, RecommendTaskStatus.GENERATING, List.of(), null, null);
-                    int progress = task.getProgress() == null
-                            ? progressForStatus(RecommendTaskStatus.GENERATING)
-                            : task.getProgress();
-                    task.setProgress(Math.min(Math.max(progress, progressForStatus(RecommendTaskStatus.GENERATING)) + 1, 95));
-                }
+            case "node", "state", "token", "route_decision" -> {
+                applyCanonicalTaskState(task, RecommendTaskStatus.GENERATING, List.of(), null, null);
+                int progress = task.getProgress() == null ? 0 : task.getProgress();
+                task.setProgress(Math.min(Math.max(progress, progressForStatus(RecommendTaskStatus.GENERATING)) + 1, 95));
+                task.setLastHeartbeatAt(now);
+            }
+            case "awaiting_input" -> {
+                applyCanonicalTaskState(task, RecommendTaskStatus.PENDING_INPUT, List.of(), null, null);
+                Object pending = payload == null ? null : payload.get("pending_input");
+                if (!(pending instanceof Map)) throw new IllegalArgumentException("awaiting_input requires pending_input");
+                task.setPendingInput(serializeMap((Map<?, ?>) pending));
                 task.setLastHeartbeatAt(now);
             }
             case "awaiting_confirmation" -> {
@@ -303,6 +305,12 @@ public class RecommendTaskStateService {
                 task.setLastHeartbeatAt(now);
             }
             case "final" -> {
+                if (conversation == null || conversation.isDeleted()) {
+                    applyCanonicalTaskState(task, RecommendTaskStatus.FAILED, List.of(), null, "Conversation was deleted");
+                    task.setProgress(progressForStatus(RecommendTaskStatus.FAILED));
+                    task.setLastHeartbeatAt(now);
+                    break;
+                }
                 String finalAnswer = firstNonBlank(
                         asText(payload == null ? null : payload.get("final_answer")),
                         asText(payload == null ? null : payload.get("message")),
@@ -315,14 +323,21 @@ public class RecommendTaskStateService {
                     task.setLastHeartbeatAt(now);
                     break;
                 }
-                applyCanonicalTaskState(task, RecommendTaskStatus.DONE, List.of(), finalAnswer, null);
-                task.setProgress(progressForStatus(RecommendTaskStatus.DONE));
+                RecommendTaskStatus finalStatus = switch (reported.toLowerCase(Locale.ROOT)) {
+                    case "done", "success" -> RecommendTaskStatus.DONE;
+                    case "incomplete" -> RecommendTaskStatus.INCOMPLETE;
+                    case "cancelled" -> RecommendTaskStatus.CANCELLED;
+                    case "expired" -> RecommendTaskStatus.EXPIRED;
+                    default -> RecommendTaskStatus.FAILED;
+                };
+                applyCanonicalTaskState(task, finalStatus, List.of(), finalAnswer,
+                        isFailureStatus(finalStatus) ? "Agent could not complete" : null);
+                task.setProgress(progressForStatus(finalStatus));
                 task.setLastHeartbeatAt(now);
-                RecommendTaskEntity saved = recommendTaskRepository.save(task);
-                if (trimToNull(finalAnswer) != null) {
-                    appendAssistantIfNeeded(saved.getConversation().getId(), finalAnswer);
+                if ((finalStatus == RecommendTaskStatus.DONE || finalStatus == RecommendTaskStatus.INCOMPLETE)
+                        && trimToNull(finalAnswer) != null) {
+                    conversationService.appendMessage(conversation, "assistant", finalAnswer);
                 }
-                return toResponse(saved);
             }
             case "error" -> {
                 String errorMessage = firstNonBlank(
@@ -352,7 +367,7 @@ public class RecommendTaskStateService {
             return expiredResponse("", "missing task id");
         }
 
-        RecommendTaskEntity task = recommendTaskRepository.findById(normalizedTaskId)
+        RecommendTaskEntity task = recommendTaskRepository.lockById(normalizedTaskId)
                 .orElse(null);
         if (task == null) {
             return expiredResponse(normalizedTaskId, "task not found");
@@ -363,6 +378,8 @@ public class RecommendTaskStateService {
             return toResponse(task);
         }
 
+        if (task.getStatus() != RecommendTaskStatus.PENDING_CONFIRM)
+            throw new ResponseStatusException(HttpStatus.CONFLICT, "Task is not awaiting confirmation");
         String normalizedAction = normalizeAction(action);
         List<String> normalizedSubQuestions = normalizeSubQuestions(subQuestions);
         if (normalizedSubQuestions.isEmpty()) {
@@ -398,7 +415,7 @@ public class RecommendTaskStateService {
             throw new IllegalArgumentException("missing task id");
         }
 
-        RecommendTaskEntity task = recommendTaskRepository.findById(normalizedTaskId)
+        RecommendTaskEntity task = recommendTaskRepository.lockById(normalizedTaskId)
                 .orElse(null);
         if (task == null) {
             throw new IllegalArgumentException("task not found");
@@ -408,10 +425,8 @@ public class RecommendTaskStateService {
         if (isTerminal(task.getStatus()) || task.getStatus() == RecommendTaskStatus.EXPIRED) {
             throw new IllegalStateException("task is not confirmable");
         }
-        if (task.getStatus() != RecommendTaskStatus.PENDING_CONFIRM) {
-            throw new IllegalStateException("task is not awaiting confirmation");
-        }
-
+        if (task.getStatus() != RecommendTaskStatus.PENDING_CONFIRM)
+            throw new ResponseStatusException(HttpStatus.CONFLICT, "Task is not awaiting confirmation");
         String normalizedAction = normalizeAction(action);
         List<String> normalizedSubQuestions = normalizeSubQuestions(subQuestions);
         if (normalizedSubQuestions.isEmpty()) {
@@ -438,13 +453,136 @@ public class RecommendTaskStateService {
     }
 
     @Transactional
+    public ConversationEntity assertConversationAvailable(String owner, String conversationId) {
+        ConversationEntity conversation = conversationService.lockOwnedConversation(owner, conversationId);
+        Instant now = Instant.now();
+        for (RecommendTaskEntity task : recommendTaskRepository.findByConversation_IdAndStatusIn(conversationId, ACTIVE_STATUSES)) {
+            if (!isTerminal(applyLifecycleRules(task, now).getStatus())) {
+                throw new ResponseStatusException(HttpStatus.CONFLICT, "Conversation has an active or waiting task; resume or cancel it first");
+            }
+        }
+        return conversation;
+    }
+
+    @Transactional
+    public ClarifyPreparation prepareClarification(String taskId, String clarificationId, String answer) {
+        if (trimToNull(answer) == null || answer.length() > 4000 || trimToNull(clarificationId) == null)
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "clarification_id and an answer of at most 4000 characters are required");
+        RecommendTaskEntity task = recommendTaskRepository.lockById(taskId)
+                .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Task not found"));
+        task = applyLifecycleRules(task, Instant.now());
+        Map<String, Object> pending = deserializeMap(task.getPendingInput());
+        if (task.getStatus() != RecommendTaskStatus.PENDING_INPUT
+                || !clarificationId.equals(pending.get("clarification_id")))
+            throw new ResponseStatusException(HttpStatus.CONFLICT, "Clarification is stale or task is not waiting for input");
+        String reservationId = UUID.randomUUID().toString();
+        Map<String, Object> reserved = new LinkedHashMap<>(pending);
+        reserved.put("_resume_reservation_id", reservationId);
+        applyCanonicalTaskState(task, RecommendTaskStatus.GENERATING, List.of(), null, null);
+        // Keep the original interruption until Python has accepted the resume.
+        // A reservation token prevents delayed failures from reverting a later retry.
+        task.setPendingInput(serializeMap(reserved));
+        task.setLastHeartbeatAt(Instant.now());
+        recommendTaskRepository.save(task);
+        return new ClarifyPreparation(toResponse(task), task.getFastapiSessionId(), clarificationId, answer.trim(), reservationId);
+    }
+
+    @Transactional
+    public boolean acceptClarification(ClarifyPreparation preparation) {
+        ConversationEntity conversation = conversationService.lockTaskConversation(preparation.taskState().getTaskId()).orElse(null);
+        if (conversation == null || conversation.isDeleted()) return false;
+        RecommendTaskEntity task = recommendTaskRepository.lockById(preparation.taskState().getTaskId()).orElseThrow();
+        Map<String, Object> pending = deserializeMap(task.getPendingInput());
+        if (task.getStatus() != RecommendTaskStatus.GENERATING
+                || !preparation.reservationId().equals(pending.get("_resume_reservation_id"))) return false;
+        conversationService.appendMessage(conversation, "user", preparation.answer());
+        task.setPendingInput(null);
+        task.setLastHeartbeatAt(Instant.now());
+        recommendTaskRepository.save(task);
+        return true;
+    }
+
+    @Transactional
+    public boolean restoreClarification(ClarifyPreparation preparation) {
+        RecommendTaskEntity task = recommendTaskRepository.lockById(preparation.taskState().getTaskId()).orElseThrow();
+        Map<String, Object> pending = new LinkedHashMap<>(deserializeMap(task.getPendingInput()));
+        if (task.getStatus() != RecommendTaskStatus.GENERATING
+                || !preparation.reservationId().equals(pending.get("_resume_reservation_id"))) return false;
+        pending.remove("_resume_reservation_id");
+        applyCanonicalTaskState(task, RecommendTaskStatus.PENDING_INPUT, List.of(), null, null);
+        task.setPendingInput(serializeMap(pending));
+        task.setLastHeartbeatAt(Instant.now());
+        recommendTaskRepository.save(task);
+        return true;
+    }
+
+    public RecommendTaskStateResponse clarifyTask(String taskId, String clarificationId, String answer) {
+        ClarifyPreparation preparation = transactionTemplate.execute(status -> prepareClarification(taskId, clarificationId, answer));
+        RecommendResponse response;
+        try {
+            response = fastApiClient.clarify(preparation.sessionId(), clarificationId, preparation.answer());
+            if (response == null) throw new IllegalStateException("Empty clarification response");
+        } catch (Exception error) {
+            transactionTemplate.executeWithoutResult(status -> restoreClarification(preparation));
+            throw new ResponseStatusException(HttpStatus.BAD_GATEWAY, "Clarification could not start; the task is still waiting for input", error);
+        }
+        return transactionTemplate.execute(status -> {
+            if (!acceptClarification(preparation))
+                throw new ResponseStatusException(HttpStatus.CONFLICT, "Clarification reservation is stale");
+            applyConfirmResponse(taskId, response);
+            return toResponse(recommendTaskRepository.findById(taskId).orElseThrow());
+        });
+    }
+
+    @Transactional
+    public RecommendTaskStateResponse cancelWaitingTask(String taskId) {
+        RecommendTaskEntity task = recommendTaskRepository.lockById(taskId)
+                .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Task not found"));
+        if (task.getStatus() == RecommendTaskStatus.CANCELLED) return toResponse(task);
+        if (task.getStatus() != RecommendTaskStatus.PENDING_INPUT && task.getStatus() != RecommendTaskStatus.PENDING_CONFIRM)
+            throw new ResponseStatusException(HttpStatus.CONFLICT, "Only a waiting task can be cancelled here");
+        String clarificationId = asText(deserializeMap(task.getPendingInput()).get("clarification_id"));
+        fastApiClient.cancelWaiting(task.getFastapiSessionId(), clarificationId);
+        applyCanonicalTaskState(task, RecommendTaskStatus.CANCELLED, List.of(), null, null);
+        task.setLastHeartbeatAt(Instant.now());
+        cancelHeartbeat(taskId);
+        return toResponse(recommendTaskRepository.save(task));
+    }
+
+    private String serializeMap(Map<?, ?> value) {
+        if (value == null) return null;
+        try { return objectMapper.writeValueAsString(value); }
+        catch (Exception error) { throw new IllegalArgumentException("Invalid pending input", error); }
+    }
+
+    private Map<String, Object> deserializeMap(String value) {
+        if (value == null || value.isBlank()) return Map.of();
+        try { return objectMapper.readValue(value, new TypeReference<Map<String, Object>>() {}); }
+        catch (Exception error) { return Map.of(); }
+    }
+
+    public record ClarifyPreparation(RecommendTaskStateResponse taskState, String sessionId,
+            String clarificationId, String answer, String reservationId) { }
+
+    @Transactional
+    public RecommendTaskStateResponse getOwnedTaskState(String owner, String taskId) {
+        // The first task read in this transaction must take the write lock. Preloading it for
+        // authorization would let Hibernate reuse an older snapshot when checking its heartbeat.
+        RecommendTaskEntity task = recommendTaskRepository.lockOwnedById(owner, taskId).orElseThrow(() -> {
+            logger.info("business.access.denied user_id={} resource_id={}", owner, taskId);
+            return new ResponseStatusException(HttpStatus.NOT_FOUND, "Resource not found");
+        });
+        return toResponse(applyLifecycleRules(task, Instant.now()));
+    }
+
+    @Transactional
     public RecommendTaskStateResponse getTaskState(String taskId) {
         String normalizedTaskId = trimToNull(taskId);
         if (normalizedTaskId == null) {
             return expiredResponse("", "missing task id");
         }
 
-        RecommendTaskEntity task = recommendTaskRepository.findById(normalizedTaskId)
+        RecommendTaskEntity task = recommendTaskRepository.lockById(normalizedTaskId)
                 .orElse(null);
         if (task == null) {
             return expiredResponse(normalizedTaskId, "task not found");
@@ -461,16 +599,18 @@ public class RecommendTaskStateService {
             return List.of();
         }
 
+        Instant now = Instant.now();
+        for (RecommendTaskEntity task : recommendTaskRepository.findByConversation_IdAndStatusIn(normalizedConversationId, ACTIVE_STATUSES)) {
+            applyLifecycleRules(task, now);
+        }
         List<RecommendTaskEntity> tasks = recommendTaskRepository.findByConversation_IdOrderByCreatedAtDesc(normalizedConversationId);
         if (tasks.isEmpty()) {
             return List.of();
         }
 
-        Instant now = Instant.now();
         List<RecommendTaskStateResponse> responses = new ArrayList<>(tasks.size());
         for (RecommendTaskEntity task : tasks) {
-            RecommendTaskEntity refreshed = applyLifecycleRules(task, now);
-            responses.add(toResponse(refreshed));
+            responses.add(toResponse(task));
         }
         return responses;
     }
@@ -501,9 +641,8 @@ public class RecommendTaskStateService {
     @Transactional
     public void reconcileStalledTasks() {
         Instant now = Instant.now();
-        List<RecommendTaskEntity> candidates = recommendTaskRepository.findByStatusIn(
-                List.of(RecommendTaskStatus.CONFIRMED, RecommendTaskStatus.GENERATING)
-        );
+        List<RecommendTaskEntity> candidates = recommendTaskRepository.lockStalledCandidates(
+                List.of(RecommendTaskStatus.CONFIRMED, RecommendTaskStatus.GENERATING), now.minus(STALLED_THRESHOLD), now);
         for (RecommendTaskEntity task : candidates) {
             RecommendTaskEntity updated = applyLifecycleRules(task, now);
             if (updated.getStatus() == RecommendTaskStatus.FAILED) {
@@ -556,8 +695,13 @@ public class RecommendTaskStateService {
     }
 
     private void applyConfirmResponse(String taskId, RecommendResponse response) {
-        RecommendTaskEntity task = recommendTaskRepository.findById(taskId).orElse(null);
-        if (task == null) {
+        ConversationEntity conversation = conversationService.lockTaskConversation(taskId).orElse(null);
+        RecommendTaskEntity task = recommendTaskRepository.lockById(taskId).orElse(null);
+        if (task == null || isTerminal(task.getStatus())) {
+            return;
+        }
+        if (conversation == null || conversation.isDeleted()) {
+            markFailed(taskId, "Conversation was deleted");
             return;
         }
 
@@ -577,13 +721,15 @@ public class RecommendTaskStateService {
                 ? firstNonBlank(trimToNull(task.getErrorMessage()), "confirm failed")
                 : null;
         applyCanonicalTaskState(task, nextStatus, pending, finalResult, nextError);
+        if (nextStatus == RecommendTaskStatus.PENDING_INPUT && response != null)
+            task.setPendingInput(serializeMap(response.getPendingInput()));
         task.setProgress(progressForStatus(nextStatus));
         task.setLastHeartbeatAt(Instant.now());
 
         RecommendTaskEntity saved = recommendTaskRepository.save(task);
 
         String persistedFinalResult = trimToNull(saved.getFinalResult());
-        if (saved.getStatus() == RecommendTaskStatus.DONE && persistedFinalResult != null) {
+        if ((saved.getStatus() == RecommendTaskStatus.DONE || saved.getStatus() == RecommendTaskStatus.INCOMPLETE) && persistedFinalResult != null) {
             appendAssistantIfNeeded(saved.getConversation().getId(), persistedFinalResult);
         }
 
@@ -596,8 +742,8 @@ public class RecommendTaskStateService {
     }
 
     private void markFailed(String taskId, String error) {
-        RecommendTaskEntity task = recommendTaskRepository.findById(taskId).orElse(null);
-        if (task == null) {
+        RecommendTaskEntity task = recommendTaskRepository.lockById(taskId).orElse(null);
+        if (task == null || isTerminal(task.getStatus())) {
             return;
         }
         applyCanonicalTaskState(
@@ -618,8 +764,7 @@ public class RecommendTaskStateService {
         Instant expireAt = task.getExpireAt();
         if (expireAt != null
                 && expireAt.isBefore(now)
-                && task.getStatus() != RecommendTaskStatus.DONE
-                && task.getStatus() != RecommendTaskStatus.EXPIRED) {
+                && !isTerminal(task.getStatus())) {
             applyCanonicalTaskState(
                     task,
                     RecommendTaskStatus.EXPIRED,
@@ -638,11 +783,6 @@ public class RecommendTaskStateService {
                 applyCanonicalTaskState(task, RecommendTaskStatus.FAILED, List.of(), null, "stalled");
                 task.setProgress(progressForStatus(RecommendTaskStatus.FAILED));
                 changed = true;
-                logger.warn(
-                        "task marked stalled task_id={}, last_heartbeat_at={}",
-                        task.getId(),
-                        heartbeat
-                );
             }
         }
 
@@ -650,6 +790,14 @@ public class RecommendTaskStateService {
             return task;
         }
 
+        String taskId = task.getId();
+        String conversationId = task.getConversation().getId();
+        RecommendTaskStatus status = task.getStatus();
+        TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
+            @Override public void afterCommit() {
+                logger.warn("chat.committed conversation_id={} task_id={} stage=lifecycle status={}", conversationId, taskId, status);
+            }
+        });
         return recommendTaskRepository.save(task);
     }
 
@@ -658,7 +806,7 @@ public class RecommendTaskStateService {
 
         ScheduledFuture<?> future = heartbeatExecutor.scheduleAtFixedRate(
                 () -> transactionTemplate.executeWithoutResult(status -> {
-                    RecommendTaskEntity task = recommendTaskRepository.findById(taskId).orElse(null);
+                    RecommendTaskEntity task = recommendTaskRepository.lockById(taskId).orElse(null);
                     if (task == null) {
                         return;
                     }
@@ -700,6 +848,9 @@ public class RecommendTaskStateService {
         }
 
         String normalized = rawStatus == null ? "" : rawStatus.trim().toUpperCase(Locale.ROOT);
+        if ("PENDING_INPUT".equals(normalized) || "AWAITING_INPUT".equals(normalized)) return RecommendTaskStatus.PENDING_INPUT;
+        if ("CANCELLED".equals(normalized)) return RecommendTaskStatus.CANCELLED;
+        if ("INCOMPLETE".equals(normalized)) return RecommendTaskStatus.INCOMPLETE;
         if (awaiting
                 || !subQuestions.isEmpty()
                 || "PENDING_CONFIRM".equals(normalized)
@@ -729,7 +880,7 @@ public class RecommendTaskStateService {
         List<String> subQuestions = status == RecommendTaskStatus.PENDING_CONFIRM
                 ? deserializeSubQuestions(task.getSubQuestions())
                 : List.of();
-        String finalResult = status == RecommendTaskStatus.DONE
+        String finalResult = (status == RecommendTaskStatus.DONE || status == RecommendTaskStatus.INCOMPLETE)
                 ? firstNonBlank(task.getFinalResult(), "")
                 : "";
         String errorMessage = isFailureStatus(status) ? task.getErrorMessage() : null;
@@ -738,6 +889,7 @@ public class RecommendTaskStateService {
         response.setTaskId(task.getId());
         response.setConversationId(task.getConversation() == null ? null : task.getConversation().getId());
         response.setStatus(status.name());
+        response.setPendingInput(status == RecommendTaskStatus.PENDING_INPUT ? deserializeMap(task.getPendingInput()) : null);
         response.setSubQuestions(subQuestions);
         response.setFinalResult(finalResult);
         response.setErrorMessage(errorMessage);
@@ -766,6 +918,7 @@ public class RecommendTaskStateService {
             String errorMessage
     ) {
         task.setStatus(status);
+        if (status != RecommendTaskStatus.PENDING_INPUT) task.setPendingInput(null);
         task.setSubQuestions(
                 serializeSubQuestions(
                         status == RecommendTaskStatus.PENDING_CONFIRM
@@ -773,7 +926,7 @@ public class RecommendTaskStateService {
                                 : List.of()
                 )
         );
-        task.setFinalResult(status == RecommendTaskStatus.DONE ? trimToNull(finalResult) : null);
+        task.setFinalResult((status == RecommendTaskStatus.DONE || status == RecommendTaskStatus.INCOMPLETE) ? trimToNull(finalResult) : null);
         task.setErrorMessage(isFailureStatus(status) ? trimToNull(errorMessage) : null);
     }
 
@@ -958,10 +1111,10 @@ public class RecommendTaskStateService {
 
     private int progressForStatus(RecommendTaskStatus status) {
         return switch (status) {
-            case PENDING_CONFIRM -> 20;
+            case PENDING_CONFIRM, PENDING_INPUT -> 20;
             case CONFIRMED -> 35;
             case GENERATING -> 60;
-            case DONE, FAILED, EXPIRED -> 100;
+            case DONE, FAILED, EXPIRED, CANCELLED, INCOMPLETE -> 100;
         };
     }
 
@@ -986,6 +1139,8 @@ public class RecommendTaskStateService {
 
     private boolean isTerminal(RecommendTaskStatus status) {
         return status == RecommendTaskStatus.DONE
+                || status == RecommendTaskStatus.CANCELLED
+                || status == RecommendTaskStatus.INCOMPLETE
                 || status == RecommendTaskStatus.FAILED
                 || status == RecommendTaskStatus.EXPIRED;
     }
