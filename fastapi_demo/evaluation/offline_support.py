@@ -90,6 +90,16 @@ def fake_embeddings(texts: list[str]) -> list[list[float]]:
     return vectors
 
 
+def _wait_for_run_stop() -> None:
+    from software_recommend_system.execution_control import current_control
+
+    control = current_control()
+    if control is None:
+        raise RuntimeError("The capacity fixture requires an active run")
+    control.stop_event.wait(control.remaining_seconds)
+    control.check()
+
+
 class FakeOpenAI:
     def __init__(self, *args, **kwargs):
         self.chat = SimpleNamespace(completions=SimpleNamespace(create=self.create))
@@ -104,15 +114,9 @@ class FakeOpenAI:
         query = str(messages[-1].get("content", ""))
         if "__perf_fail__" in query:
             raise RuntimeError("Injected model failure")
-        if "__perf_hold__" in query:
-            from software_recommend_system.execution_control import current_control
-
-            control = current_control()
-            if control is None:
-                raise RuntimeError("The capacity fixture requires an active run")
-            # Keep the slot occupied until the client disconnects or the run expires.
-            control.stop_event.wait(control.remaining_seconds)
-            control.check()
+        hold = "__perf_hold__" in query
+        if hold and not stream:
+            _wait_for_run_stop()
         if "__perf_slow__" in query:
             from software_recommend_system.execution_control import check_current_run, current_control
 
@@ -149,6 +153,9 @@ class FakeOpenAI:
             def chunks():
                 for token in ("Offline answer ", "based on the supplied evidence."):
                     yield SimpleNamespace(choices=[SimpleNamespace(delta=SimpleNamespace(content=token))])
+                    if hold:
+                        # The first token lets the client know generation is running.
+                        _wait_for_run_stop()
 
             return chunks()
         return SimpleNamespace(
