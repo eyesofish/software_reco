@@ -64,4 +64,5 @@ class AgentState(BaseModel):
     oracle_edits: list[str] = Field(default_factory=list)
     hitl: dict[str, Any] = Field(default_factory=dict)
     session_id: str = ""
+    kb_snapshot_id: str = ""
     run_id: str | None = None

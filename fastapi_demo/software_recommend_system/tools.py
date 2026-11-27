@@ -12,6 +12,7 @@ from .document_schema import Document
 from .execution_control import current_request_timeout
 from .ingestion.embedder import embed_texts
 from .ingestion.indexer import get_parent_documents_by_ids
+from .kb_versions import chroma_filter, current_snapshot_id, visible
 from .logging_utils import elapsed_ms, error_fields, log_event, log_exception, new_trace_id, text_preview
 from .observability import wrap_openai
 
@@ -39,18 +40,18 @@ def _get_openai_client() -> openai.OpenAI:
 
 
 def _metadata_obj(doc_metadata: dict[str, Any]) -> dict[str, Any]:
-    from .document_schema import STRUCTURE_METADATA_FIELDS
+    from .document_schema import STRUCTURE_METADATA_FIELDS, VERSION_METADATA_FIELDS
 
     return {
-        **{key: doc_metadata[key] for key in STRUCTURE_METADATA_FIELDS if key in doc_metadata},
+        **{
+            key: doc_metadata[key]
+            for key in (*STRUCTURE_METADATA_FIELDS, *VERSION_METADATA_FIELDS)
+            if key in doc_metadata
+        },
         "source": doc_metadata.get("source", ""),
         # Preserve the upstream source document id so recall eval can
         # match retrieved ids with dataset gold_doc_ids.
-        "doc_id": (
-            doc_metadata.get("source_doc_id")
-            or doc_metadata.get("doc_id")
-            or doc_metadata.get("filename")
-        ),
+        "doc_id": (doc_metadata.get("source_doc_id") or doc_metadata.get("doc_id") or doc_metadata.get("filename")),
         "author": doc_metadata.get("author"),
         "published_date": doc_metadata.get("published_date"),
         "updated_date": doc_metadata.get("updated_date"),
@@ -184,6 +185,13 @@ def _build_parent_child_documents(
         parent_id = str(hit.get("parent_id", "")).strip()
         parent_entry = parent_lookup.get(parent_id) if parent_id else None
 
+        if parent_entry and child_metadata.get("version"):
+            parent_meta = dict(parent_entry.get("metadata") or {})
+            if (parent_meta.get("document_id"), parent_meta.get("version")) != (
+                child_metadata.get("document_id"),
+                child_metadata.get("version"),
+            ):
+                parent_entry = None
         if parent_entry and str(parent_entry.get("content", "")).strip():
             parent_metadata = parent_entry.get("metadata", {})
             if not isinstance(parent_metadata, dict):
@@ -236,6 +244,7 @@ def similarity_search(
         component="search",
         trace_id=current_trace_id,
         engine="chroma",
+        kb_snapshot_id=current_snapshot_id() or "legacy",
         query=query_hint,
         top_k=k,
         collection="software_recommendations",
@@ -251,6 +260,7 @@ def similarity_search(
                 component="search",
                 trace_id=current_trace_id,
                 engine="chroma",
+                kb_snapshot_id=current_snapshot_id() or "legacy",
                 query=query_hint,
                 reason="collection_missing",
                 collection="software_recommendations",
@@ -289,12 +299,15 @@ def similarity_search(
             component="search",
             trace_id=current_trace_id,
             engine="chroma",
+            kb_snapshot_id=current_snapshot_id() or "legacy",
             query=query_hint,
             top_k=k,
         )
+        where = chroma_filter()
         results = collection.query(
             query_embeddings=query_embeddings,
             n_results=k,
+            **({"where": where} if where is not None else {}),
         )
         raw_documents = results.get("documents") or [[]]
         raw_metadatas = results.get("metadatas") or [[]]
@@ -302,6 +315,14 @@ def similarity_search(
         doc_row = raw_documents[0] if raw_documents else []
         metadata_row = raw_metadatas[0] if raw_metadatas else []
         distance_row = raw_distances[0] if raw_distances else []
+        allowed = [
+            i for i in range(len(doc_row)) if visible(dict(metadata_row[i] or {}) if i < len(metadata_row) else {})
+        ]
+        doc_row, metadata_row, distance_row = (
+            [doc_row[i] for i in allowed],
+            [metadata_row[i] if i < len(metadata_row) else {} for i in allowed],
+            [distance_row[i] if i < len(distance_row) else None for i in allowed],
+        )
         log_event(
             logger,
             logging.INFO,
@@ -309,6 +330,7 @@ def similarity_search(
             component="search",
             trace_id=current_trace_id,
             engine="chroma",
+            kb_snapshot_id=current_snapshot_id() or "legacy",
             query=query_hint,
             elapsed_ms=elapsed_ms(vector_query_started_at),
             raw_count=len(doc_row),
@@ -338,6 +360,7 @@ def similarity_search(
             component="search",
             trace_id=current_trace_id,
             engine="chroma",
+            kb_snapshot_id=current_snapshot_id() or "legacy",
             query=query_hint,
             docs=len(documents),
             elapsed_ms=elapsed_ms(start_at),
@@ -360,6 +383,7 @@ def similarity_search(
                 component="search",
                 trace_id=current_trace_id,
                 engine="chroma",
+                kb_snapshot_id=current_snapshot_id() or "legacy",
                 query=query_hint,
                 reason="collection_missing",
                 collection="software_recommendations",
@@ -372,6 +396,7 @@ def similarity_search(
             component="search",
             trace_id=current_trace_id,
             engine="chroma",
+            kb_snapshot_id=current_snapshot_id() or "legacy",
             query=query_hint,
             degraded_to_empty=True,
             elapsed_ms=elapsed_ms(start_at),
@@ -383,6 +408,7 @@ def similarity_search(
 # Tavily search tool (langchain_tavily wrapper only)
 try:
     from langchain_tavily import TavilySearch  # type: ignore
+
     _TAVILY_NEW_IMPORT_ERROR = None
 except Exception as exc:  # pragma: no cover - optional dependency
     TavilySearch = None  # type: ignore
@@ -731,10 +757,10 @@ def unified_search(query: str, k: int | None = None) -> list[Document]:
 def get_all_tools():
     """获取所有可用工具的列表"""
     tools = [
-        unified_search,     # 统一搜索入口
+        unified_search,  # 统一搜索入口
         similarity_search,  # 现有的相似性搜索工具
-        pre_drawing_tool,   # 画图前处理工具
-        draw_image_tool,    # 画图执行工具
+        pre_drawing_tool,  # 画图前处理工具
+        draw_image_tool,  # 画图执行工具
     ]
 
     # 如果搜索工具可用，添加到工具列表

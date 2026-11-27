@@ -47,6 +47,7 @@ def main(argv: list[str] | None = None) -> int:
             "LOCAL_CHECK_REPORT_DIR": str(output),
             "PERFORMANCE_RUNTIME_DIR": str(runtime),
             "CHROMA_DB_PATH": str(runtime / "chroma"),
+            "KB_MANIFEST_PATH": str(runtime / "kb_manifest.sqlite3"),
             "MEMORY_STORE_FILE": str(runtime / "memory.json"),
             "MEMORY_STORE_DB": str(runtime / "memory.sqlite3"),
             "SESSION_STATE_FILE": str(runtime / "sessions.json"),

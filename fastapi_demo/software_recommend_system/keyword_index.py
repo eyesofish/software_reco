@@ -39,7 +39,11 @@ class KeywordIndex:
         self.write_lock = threading.RLock()
 
     def ensure_index(self) -> None:
+        version_mapping = {
+            name: {"type": "keyword"} for name in ("document_id", "version", "snapshot_id", "status", "chunk_id")
+        }
         if self.client.indices.exists(index=self.index):
+            self.client.indices.put_mapping(index=self.index, properties=version_mapping)
             return
         try:
             self.client.indices.create(
@@ -48,6 +52,7 @@ class KeywordIndex:
                 mappings={
                     "dynamic": "strict",
                     "properties": {
+                        **version_mapping,
                         "content": {"type": "text", "analyzer": "cjk"},
                         "tags": {"type": "text", "analyzer": "cjk"},
                         "metadata": {"type": "object", "enabled": False},
@@ -94,6 +99,11 @@ class KeywordIndex:
                             "content": str(text),
                             "tags": normalize_tags(metadata.get("tags")),
                             "metadata": dict(metadata),
+                            **{
+                                key: metadata[key]
+                                for key in ("document_id", "version", "snapshot_id", "status", "chunk_id")
+                                if key in metadata
+                            },
                         },
                     }
                     for chunk_id, text, metadata in zip(ids, texts, metadatas, strict=True)
@@ -123,12 +133,20 @@ class KeywordIndex:
     def search(self, query: str, top_k: int) -> list[Document]:
         if not query.strip():
             return []
+        from .kb_versions import current_snapshot_id, keyword_filter, visible
+
+        snapshot_filter = keyword_filter()
+        text_query = {"multi_match": {"query": query, "fields": ["content", "tags"], "type": "most_fields"}}
+        search_query = (
+            {"bool": {"must": [text_query], "filter": [snapshot_filter]}} if snapshot_filter is not None else text_query
+        )
+        logger.info("search.keyword.snapshot snapshot_id=%s", current_snapshot_id() or "legacy")
         response = self.client.search(
             index=self.index,
             size=max(1, int(top_k)),
             track_total_hits=False,
             allow_partial_search_results=False,
-            query={"multi_match": {"query": query, "fields": ["content", "tags"], "type": "most_fields"}},
+            query=search_query,
         )
         if response.get("timed_out"):
             raise TimeoutError("Elasticsearch keyword search timed out")
@@ -136,6 +154,8 @@ class KeywordIndex:
         for hit in response["hits"]["hits"]:
             source = hit["_source"]
             metadata = dict(source.get("metadata") or {})
+            if not visible(metadata):
+                continue
             metadata["source"] = metadata.get("source") or "keyword_index"
             metadata["doc_id"] = (
                 metadata.get("source_doc_id") or metadata.get("doc_id") or metadata.get("filename") or hit["_id"]

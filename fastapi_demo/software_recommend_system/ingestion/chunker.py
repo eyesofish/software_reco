@@ -228,7 +228,7 @@ def chunk_documents(
                         "metadata": {
                             **base_metadata,
                             **piece["metadata"],
-                            "source_doc_id": source_doc_id,
+                            "source_doc_id": base_metadata.get("document_id", source_doc_id),
                             "chunk_index": index,
                         },
                     }
@@ -245,7 +245,7 @@ def chunk_documents(
             chunk_id = f"{source_doc_id}:{chunk_index}"
             metadata = {
                 **base_metadata,
-                "source_doc_id": source_doc_id,
+                "source_doc_id": base_metadata.get("document_id", source_doc_id),
                 "chunk_index": chunk_index,
                 "chunk_start": chunk_span.start,
                 "chunk_end": chunk_span.end,
@@ -262,6 +262,7 @@ def chunk_documents(
                 }
             )
 
+    _stamp_chunk_ids(chunks)
     return chunks
 
 
@@ -306,7 +307,7 @@ def chunk_documents_parent_child(
                 meta = {
                     **base_metadata,
                     **piece["metadata"],
-                    "source_doc_id": source_doc_id,
+                    "source_doc_id": base_metadata.get("document_id", source_doc_id),
                     "parent_id": parent_id,
                     "parent_index": parent_index,
                     "parent_start": piece["metadata"]["chunk_start"],
@@ -324,7 +325,7 @@ def chunk_documents_parent_child(
                             "metadata": {
                                 **base_metadata,
                                 **child["metadata"],
-                                "source_doc_id": source_doc_id,
+                                "source_doc_id": base_metadata.get("document_id", source_doc_id),
                                 "parent_id": parent_id,
                                 "child_index": child_index,
                             },
@@ -342,7 +343,7 @@ def chunk_documents_parent_child(
             parent_id = f"{source_doc_id}:p:{parent_index}"
             parent_metadata = {
                 **base_metadata,
-                "source_doc_id": source_doc_id,
+                "source_doc_id": base_metadata.get("document_id", source_doc_id),
                 "parent_id": parent_id,
                 "parent_index": parent_index,
                 "parent_start": parent_span.start,
@@ -369,7 +370,7 @@ def chunk_documents_parent_child(
                 child_id = f"{parent_id}:c:{child_index}"
                 child_metadata = {
                     **base_metadata,
-                    "source_doc_id": source_doc_id,
+                    "source_doc_id": base_metadata.get("document_id", source_doc_id),
                     "parent_id": parent_id,
                     "child_index": child_index,
                     "chunk_start": parent_span.start + child_span.start,
@@ -387,6 +388,8 @@ def chunk_documents_parent_child(
                     }
                 )
 
+    _stamp_chunk_ids(parent_chunks)
+    _stamp_chunk_ids(child_chunks)
     return parent_chunks, child_chunks
 
 
@@ -398,3 +401,9 @@ def _resolve_strategy(strategy: str | None) -> str:
     if strategy not in {"structure", "sentence"}:
         raise ValueError("chunking strategy must be structure or sentence")
     return strategy
+
+
+def _stamp_chunk_ids(chunks: list[dict[str, Any]]) -> None:
+    for chunk in chunks:
+        if chunk["metadata"].get("version"):
+            chunk["metadata"]["chunk_id"] = chunk["id"]
