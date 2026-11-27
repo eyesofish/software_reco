@@ -832,6 +832,7 @@ def retrieve(
     channel_timeout_seconds: float | None = None,
     defer_rerank: bool = False,
     web_query_hint: str | None = None,
+    rewrite_query: str | None = None,
 ) -> list[Document]:
     """Run shared hybrid retrieval and return normalized documents."""
 
@@ -845,8 +846,14 @@ def retrieve(
     rerank_top_n = max(int(top_k), int(getattr(settings, "RERANK_FINAL_TOP_N", top_k)))
 
     recall_tasks: list[tuple[str, Any]] = []
+    # Only additive, validated expressions can enter the additional local branches.
+    expansion = str(rewrite_query or "")
+    use_expansion = expansion != query and expansion.startswith(query) and bool(query)
     if getattr(settings, "RECALL_ENABLE_VECTOR", True):
         recall_tasks.append(("vector", lambda: recall_vector(query=query, top_k=vector_k, trace_id=trace_id)))
+        if use_expansion:
+            recall_tasks.append(("vector_rewrite", lambda: recall_vector(
+                query=expansion, top_k=vector_k, trace_id=trace_id)))
     if getattr(settings, "RECALL_ENABLE_IMAGE_VECTOR", False):
         recall_tasks.append(
             (
@@ -869,6 +876,9 @@ def retrieve(
         recall_tasks.append(("web", lambda: recall_web(query=query, top_k=web_k, trace_id=trace_id)))
     if getattr(settings, "RECALL_ENABLE_KEYWORD", True):
         recall_tasks.append(("keyword", lambda: recall_keyword(query=query, top_k=keyword_k, trace_id=trace_id)))
+        if use_expansion:
+            recall_tasks.append(("keyword_rewrite", lambda: recall_keyword(
+                query=expansion, top_k=keyword_k, trace_id=trace_id)))
     if getattr(settings, "RECALL_ENABLE_MEMORY", True):
         recall_tasks.append(
             (
@@ -888,6 +898,33 @@ def retrieve(
     deadline = time.monotonic() + budget if budget is not None else None
     channel_docs, timed_out_channels = _run_recall_tasks(recall_tasks, budget, trace_id, query_hint)
     check_current_run()
+    if use_expansion:
+        for channel in ("vector", "keyword"):
+            original_docs = channel_docs.get(channel, [])
+            expanded_docs = channel_docs.pop(f"{channel}_rewrite", [])
+            if not expanded_docs:
+                continue
+            from .query_rewrite import choose_rewrite
+            # Re-score both sets against the SAME original query. Neutralize raw
+            # query-dependent distances/BM25 scores before the common reranker.
+            neutral_original = [doc.model_copy(deep=True, update={"score": 0.5}) for doc in original_docs]
+            neutral_expanded = [doc.model_copy(deep=True, update={"score": 0.5}) for doc in expanded_docs]
+            scored = rerank_documents(query, neutral_original + neutral_expanded,
+                                      top_n=len(neutral_original) + len(neutral_expanded),
+                                      selected_skill=selected_skill, session_id=session_id,
+                                      use_model=settings.RETRIEVAL_ENABLE_RERANK)
+            def score_key(doc: Document) -> str:
+                return doc.metadata.doc_id or hashlib.sha256(doc.content.encode("utf-8")).hexdigest()
+
+            scores = {score_key(doc): doc.score for doc in scored}
+            for doc in neutral_original + neutral_expanded:
+                doc.score = scores[score_key(doc)]
+            choice = choose_rewrite(neutral_original, neutral_expanded, scores_comparable=True)
+            if choice.accepted:
+                channel_docs[channel] = original_docs + expanded_docs
+            log_event(logger, logging.INFO, "search.rewrite.selection", channel=channel,
+                      accepted=choice.accepted, reason=choice.reason,
+                      original_score=choice.original_score, expanded_score=choice.expanded_score)
     if web_enabled and web_reason == "local_first":
         if _local_evidence_sufficient(channel_docs):
             web_reason = "sufficient_local_evidence"

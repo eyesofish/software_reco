@@ -10,7 +10,6 @@ from typing import Any
 from langgraph.func import task
 from langgraph.types import interrupt
 
-from .agent_loop import run_agent_loop
 from .config import settings
 from .document_schema import Document
 from .evidence_evaluator import evaluate_evidence
@@ -35,7 +34,7 @@ from .llm_utils import (
 from .logging_utils import elapsed_ms, error_fields, log_event, new_trace_id, text_preview
 from .observability import traceable
 from .planner import build_execution_plan
-from .retriever import _web_request_reason, rerank_documents, retrieve
+from .retriever import rerank_documents, retrieve
 from .router import route_query
 from .skill_router import route_skill
 from .state import AgentState, CandidateSolution
@@ -709,7 +708,8 @@ def normalize_query_with_llm(model: str, prompt: str, query: str):
                 {"role": "system", "content": prompt},
                 {"role": "user", "content": query},
             ],
-            temperature=0.2,
+            temperature=0,
+            response_format={"type": "json_object"},
         )
     except Exception as exc:
         _llm_invoke_failed(
@@ -730,54 +730,11 @@ def query_normalization_node(state: AgentState) -> dict[str, Any]:
     user_query = _extract_current_user_query(_get_field(state, "user_query", ""))
     logger.info("normalizing query chars=%d", len(user_query))
 
-    normalized_queries = []
-    prompt = "\n".join([
-        'You are a software engineering query normalization assistant.',
-        '',
-        'Your task is:',
-        (
-            "Convert a user's natural-language question into one or more standardized, "
-            "engineering-oriented, searchable queries."
-        ),
-        'Make them as close as possible to technical keywords in the following categories:',
-        '- Software architecture / Distributed systems',
-        '- Backend engineering / Middleware',
-        '- Databases / Vector databases / Data engineering',
-        '- AI / LLM / RAG / Agent',
-        '- DevOps / Cloud / Non-functional requirements',
-        '- Common programming languages and frameworks',
-        '',
-        'Transformation rules:',
-        (
-            '1. Remove emotional, goal-oriented, or vague wording (e.g., "I want", '
-            '"any expert recommendations", "best", "very strong").'
-        ),
-        (
-            '2. Replace colloquial expressions with explicit technical concepts (e.g., "handle lots of users" -> '
-            '"high concurrency").'
-        ),
-        '3. If multiple technical concerns exist, split them into multiple normalized sub-queries.',
-        '4. Do not introduce new requirements not mentioned by the user.',
-        '5. Do not provide solutions or recommendations.',
-        '',
-        'Output format requirements:',
-        '- Output JSON only',
-        '- Use the normalized_queries field',
-        '- Each query should look like a search-engine query or technical document title',
-        '',
-        'Example:',
-        'User input:',
-        '"I want to build a RAG system that can handle many simultaneous users. Any good approach?"',
-        '',
-        'Output:',
-        '{',
-        '  "normalized_queries": [',
-        '    "RAG system architecture for high concurrency",',
-        '    "vector database selection for RAG",',
-        '    "distributed system design for AI services"',
-        '  ]',
-        '}',
-    ])
+    from .query_rewrite import build_rewrite_messages, parse_and_validate_rewrite
+
+    context_text = "\n".join(str(item.get("content", "")) for item in state.messages[-6:])
+    rewrite_messages = build_rewrite_messages(user_query, context_text=context_text)
+    candidate = parse_and_validate_rewrite("", user_query, context_text=context_text)
 
     use_llm_normalization = bool(getattr(settings, "QUERY_NORMALIZATION_USE_LLM", True))
     if (_is_chat_first_query(user_query) and not _has_rag_intent(user_query)
@@ -789,7 +746,10 @@ def query_normalization_node(state: AgentState) -> dict[str, Any]:
 
     if use_llm_normalization:
         try:
-            future = normalize_query_with_llm(model=settings.LLM_MODEL, prompt=prompt, query=user_query)
+            future = normalize_query_with_llm(
+                model=settings.LLM_MODEL, prompt=rewrite_messages[0]["content"],
+                query=rewrite_messages[1]["content"],
+            )
             response = future.result()
             content = ""
             if hasattr(response, "choices") and response.choices:
@@ -801,16 +761,7 @@ def query_normalization_node(state: AgentState) -> dict[str, Any]:
                     message = getattr(first_choice, "message", None)
                     content = getattr(message, "content", "") if message else ""
 
-            parsed = json.loads(content) if content else {}
-            if isinstance(parsed, dict):
-                normalized_queries = parsed.get("normalized_queries", [])
-            elif isinstance(parsed, list):
-                normalized_queries = parsed
-
-            if not isinstance(normalized_queries, list):
-                raise ValueError("LLM返回格式不是列表")
-
-            normalized_queries = [str(item).strip() for item in normalized_queries if str(item).strip()]
+            candidate = parse_and_validate_rewrite(content, user_query, context_text=context_text)
         except Exception as exc:
             log_event(
                 logger,
@@ -823,7 +774,8 @@ def query_normalization_node(state: AgentState) -> dict[str, Any]:
                 **error_fields(exc),
             )
 
-    normalized_query = "\n".join(normalized_queries) if normalized_queries else user_query.strip()
+    # The canonical query is immutable. Only retrieval sees validated additive expansions.
+    normalized_query = user_query.strip()
 
     constraints = {"language": "", "scenario": "", "preference": ""}
 
@@ -856,7 +808,10 @@ def query_normalization_node(state: AgentState) -> dict[str, Any]:
 
     return {
         "normalized_query": normalized_query,
-        "constraints": constraints
+        "constraints": constraints,
+        "validated_query_expansion": candidate.expanded if candidate.accepted else "",
+        "rewrite_audit": {"accepted": candidate.accepted, "reason": candidate.reason,
+                          "protected_terms": candidate.protected_terms},
     }
 @task
 def sub_question_generation_with_llm(model: str, prompt: str, query: str):
@@ -1358,6 +1313,12 @@ def retrieve_node(state: AgentState) -> dict[str, Any]:
     BASE_MAX_EVIDENCE = 3
     retrieved_doc_ids_full_limit = max(1, int(getattr(settings, "RETRIEVED_DOC_IDS_FULL_LIMIT", 20)))
     sub_questions = _get_field(state, "sub_questions", [])
+    original_query = state.normalized_query.strip()
+    expansion = state.validated_query_expansion
+    query_overrides = {}
+    if expansion and original_query and expansion.startswith(original_query):
+        for question in sub_questions:
+            query_overrides[question] = question + expansion[len(original_query):]
     retrieval_records = list(_get_field(state, "retrieval_records", []) or [])
     iteration_count = _get_field(state, "iteration_count", 0)
     session_id = str(_get_field(state, "session_id", "") or "").strip()
@@ -1397,6 +1358,7 @@ def retrieve_node(state: AgentState) -> dict[str, Any]:
     def retrieve_question(index: int, question: str) -> tuple[list[Document], str, int]:
         check_current_run()
         question_started_at = time.perf_counter()
+        rewritten_query = query_overrides.get(question, "")
         question_hint = text_preview(question)
         log_event(
             logger,
@@ -1411,32 +1373,20 @@ def retrieve_node(state: AgentState) -> dict[str, Any]:
             query=question_hint,
             top_k=settings.TOP_K,
         )
-        search_results: list[Document] | None = None
         retrieval_strategy = "static"
-        if settings.AGENT_LOOP_ENABLE and _web_request_reason(global_query) != "user_opt_out":
-            # Model-driven tool selection. Returns None on any failure so the
-            # deterministic pipeline below stays the safety net.
-            agent_docs = run_agent_loop(
-                question,
-                session_id=session_id or None,
-                memory_context=memory_context,
-                top_k=settings.TOP_K,
-            )
-            if agent_docs:
-                search_results = agent_docs
-                retrieval_strategy = "agent_loop"
-
-        if search_results is None:
-            search_results = retrieve(
-                question,
-                top_k=settings.TOP_K,
-                session_id=session_id,
-                selected_skill=selected_skill,
-                memory_context=memory_context,
-                query_image_candidates=query_image_candidates,
-                defer_rerank=True,
-                web_query_hint=global_query,
-            )
+        # All app requests retain the original keyword/vector branches. The
+        # experimental free-form tool loop cannot bypass rewrite validation.
+        search_results = retrieve(
+            question,
+            top_k=settings.TOP_K,
+            session_id=session_id,
+            selected_skill=selected_skill,
+            memory_context=memory_context,
+            query_image_candidates=query_image_candidates,
+            defer_rerank=True,
+            web_query_hint=global_query,
+            rewrite_query=rewritten_query or None,
+        )
         check_current_run()
         return search_results, retrieval_strategy, elapsed_ms(question_started_at)
 

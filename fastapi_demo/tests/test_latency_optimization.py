@@ -193,7 +193,7 @@ def test_checkpoint_replay_keeps_subquery_identity():
 
 def test_original_request_preserves_web_opt_out(monkeypatch):
     monkeypatch.setattr(nodes.settings, "AGENT_LOOP_ENABLE", True)
-    with patch.object(nodes, "run_agent_loop") as loop, \
+    with patch("software_recommend_system.agent_loop.run_agent_loop") as loop, \
             patch.object(retriever, "recall_vector", return_value=[]), \
             patch.object(retriever, "recall_web") as web:
         retrieval_graph().invoke(AgentState(user_query="不要联网，Redis persistence", sub_questions=["Redis AOF"]))
